@@ -31,13 +31,22 @@ def section_id(header):
 
 
 def split_section(text):
-    """`(header, prose)` for a rendered section (the text a PROGRESS.md diff added)."""
+    """`(header, prose)` for the appended text of a `PROGRESS.md` update.
+
+    Note what `text` actually is: everything the update added to the file. For an area's *first*
+    report that includes the file preamble ahead of the section, not just the section, so this cannot
+    assume the text begins at the marker. It takes the prose after the last section marker's heading,
+    which is right in both cases.
+    """
     headers = files.parse_sections(text)
     if len(headers) != 1:
         raise files.FormatError(f"expected exactly one section, found {len(headers)}")
-    # Drop the machine header and the `## ...` heading; Zulip gets a lead-in of our own.
-    body = re.sub(r"\A\s*<!--tauceti-progress:v1 .*?-->\s*", "", text, flags=re.S)
-    body = re.sub(r"\A##[^\n]*\n", "", body).strip()
+    m = re.search(r"<!--tauceti-progress:v1 .*?-->[^\n]*\n", text, flags=re.S)
+    if not m:
+        raise files.FormatError("no section marker found in the appended text")
+    body = text[m.end():]
+    # Drop the `## ...` heading too; Zulip gets a lead-in of our own.
+    body = re.sub(r"\A\s*##[^\n]*\n", "", body).strip()
     return headers[0], body
 
 

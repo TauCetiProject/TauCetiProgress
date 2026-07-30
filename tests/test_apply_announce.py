@@ -135,6 +135,23 @@ def make_section():
                                 "Harnack's inequality landed, with the sharp constant.")
 
 
+def test_split_section_handles_a_first_report_with_its_preamble():
+    """Regression: the appended text of an area's FIRST report is the file preamble PLUS the section,
+    so a splitter that assumed the text began at the marker leaked the preamble and a raw
+    `<!--tauceti-progress:v1 ...-->` marker into the Zulip post."""
+    added = files.new_progress_file("PDE") + files.render_section(
+        "PDE", A, B, [1], "w", "Harnack landed."
+    )
+    header, prose = announce.split_section(added)
+    assert header["roadmap"] == "PDE"
+    assert prose == "Harnack landed.", repr(prose)
+    assert "append-only record" not in prose
+    assert "tauceti-progress:v1" not in prose
+    msg = announce.render_message(header, prose)
+    assert "# Progress log" not in msg
+    assert "tauceti-progress:v1" not in msg
+
+
 def test_split_section_strips_machine_furniture():
     header, prose = announce.split_section(make_section())
     assert header["roadmap"] == "PDE"
