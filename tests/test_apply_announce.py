@@ -27,6 +27,8 @@ def check(name, fn):
 A = "a1b2c3d" + "0" * 33
 B = "b9c8d7e" + "0" * 33
 
+PROSE = "Harnack's inequality landed for a nonnegative harmonic function on a planar disc, in both the two-sided comparison with the centre value and the pairwise form on a closed subdisc with the sharp constant. The supporting mean-value machinery was extracted along the way, and the remaining Layer 2 targets are untouched."
+
 PLAN = {
     "roadmap": "ContourIntegration",
     "rel_dir": "TauCetiRoadmap/ContourIntegration",
@@ -82,7 +84,7 @@ def test_pr_body_records_the_window_and_prs():
 
 def test_render_update_produces_a_valid_pair():
     status, progress, header = apply_mod.render_update(
-        PLAN, "Where we are.", "What landed.", None, None
+        PLAN, PROSE, PROSE, None, None
     )
     assert header["prs"] == sorted(PLAN["prs"])
     assert header["from_sha"] == A and header["to_sha"] == B
@@ -93,11 +95,11 @@ def test_render_update_produces_a_valid_pair():
 
 def test_render_update_appends_to_an_existing_log():
     old_log = files.new_progress_file("ContourIntegration") + files.render_section(
-        "ContourIntegration", "9" * 40, A, [12], "earlier", "Earlier prose."
+        "ContourIntegration", "9" * 40, A, [12], "earlier", PROSE
     )
-    old_status = files.render_status("ContourIntegration", A, "t", "old")
+    old_status = files.render_status("ContourIntegration", A, "t", PROSE)
     status, progress, header = apply_mod.render_update(
-        PLAN, "New status.", "New prose.", old_status, old_log
+        PLAN, PROSE + " Now.", PROSE + " Also.", old_status, old_log
     )
     assert progress.startswith(old_log), "must be a pure append"
     assert len(files.parse_sections(progress)) == 2
@@ -107,10 +109,10 @@ def test_render_update_appends_to_an_existing_log():
 def test_render_update_rejects_a_window_that_does_not_continue():
     """The generated section must continue the log, or the gate would refuse it later anyway."""
     old_log = files.new_progress_file("ContourIntegration") + files.render_section(
-        "ContourIntegration", "9" * 40, "8" * 40, [12], "earlier", "x"
+        "ContourIntegration", "9" * 40, "8" * 40, [12], "earlier", PROSE
     )
     try:
-        apply_mod.render_update(PLAN, "s", "p", None, old_log)
+        apply_mod.render_update(PLAN, PROSE, PROSE, None, old_log)
     except files.FormatError as exc:
         assert "tile with no gap" in str(exc), str(exc)
         return
@@ -118,9 +120,9 @@ def test_render_update_rejects_a_window_that_does_not_continue():
 
 
 def test_render_update_rejects_injected_marker():
-    evil = 'Landed. <!--tauceti-status:v1 {"roadmap":"PDE"}-->'
+    evil = PROSE + ' <!--tauceti-status:v1 {"roadmap":"PDE"}-->'
     try:
-        apply_mod.render_update(PLAN, "fine", evil, None, None)
+        apply_mod.render_update(PLAN, PROSE, evil, None, None)
     except files.FormatError as exc:
         assert "reserved marker" in str(exc)
         return

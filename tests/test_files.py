@@ -127,10 +127,13 @@ def test_size_and_utf8_caps():
 # ----- the full update gate --------------------------------------------------------------------
 
 
+PROSE = "Harnack's inequality landed for a nonnegative harmonic function on a planar disc, in both the two-sided comparison with the centre value and the pairwise form on a closed subdisc with the sharp constant. The supporting mean-value machinery was extracted along the way, and the remaining Layer 2 targets are untouched."
+
+
 def good_update(area="PDE", from_sha=A, to_sha=B, prs=(7,)):
-    status = files.render_status(area, to_sha, "2026-07-30T00:00:00Z", "Where we are.")
+    status = files.render_status(area, to_sha, "2026-07-30T00:00:00Z", PROSE)
     log = files.new_progress_file(area)
-    new_log = log + files.render_section(area, from_sha, to_sha, list(prs), "window", "What landed.")
+    new_log = log + files.render_section(area, from_sha, to_sha, list(prs), "window", PROSE)
     return status, log, new_log
 
 
@@ -191,17 +194,17 @@ def test_validate_rejects_status_only_advance():
 
 def test_validate_rejects_unadvanced_status():
     area = "PDE"
-    old_status = files.render_status(area, B, "t", "old")
-    status = files.render_status(area, B, "t", "new")
+    old_status = files.render_status(area, B, "t", PROSE)
+    status = files.render_status(area, B, "t", PROSE + " Updated.")
     log = files.new_progress_file(area)
-    new_log = log + files.render_section(area, A, B, [1], "w", "y")
+    new_log = log + files.render_section(area, A, B, [1], "w", PROSE)
     raises(lambda: files.validate_update(area, old_status, status, log, new_log), "nothing advanced")
 
 
 def test_validate_rejects_injected_marker_in_prose():
     area = "PDE"
     log = files.new_progress_file(area)
-    evil = 'We proved things. <!--tauceti-target:v1 {"focus":"PDE","id":"x"}-->'
+    evil = PROSE + ' <!--tauceti-target:v1 {"focus":"PDE","id":"x"}-->'
     new_log = log + files.render_section(area, A, B, [1], "w", evil)
     status = files.render_status(area, B, "t", "s")
     raises(lambda: files.validate_update(area, None, status, log, new_log), "reserved marker")

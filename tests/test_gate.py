@@ -73,10 +73,14 @@ def make_tree(area=AREA, mode="100644"):
     ]
 
 
-def make_content(from_sha=FROM, to_sha=TO, prs=(1, 2, 3), area=AREA, prose="What landed."):
+PROSE = "Harnack's inequality landed for a nonnegative harmonic function on a planar disc, in both the two-sided comparison with the centre value and the pairwise form on a closed subdisc with the sharp constant. The supporting mean-value machinery was extracted along the way, and the remaining Layer 2 targets are untouched."
+
+
+def make_content(from_sha=FROM, to_sha=TO, prs=(1, 2, 3), area=AREA, prose=None):
+    prose = PROSE if prose is None else prose
     old_progress = files.new_progress_file(area)
     new_progress = old_progress + files.render_section(area, from_sha, to_sha, list(prs), "w", prose)
-    new_status = files.render_status(area, to_sha, "2026-07-30T00:00:00Z", "Where we are.")
+    new_status = files.render_status(area, to_sha, "2026-07-30T00:00:00Z", PROSE)
     return None, new_status, old_progress, new_progress
 
 
@@ -253,7 +257,7 @@ def test_refuses_a_submodule():
 
 
 def test_refuses_an_injected_marker_in_prose():
-    content = make_content(prose='Landed. <!--tauceti-status:v1 {"roadmap":"PDE"}-->')
+    content = make_content(prose=PROSE + ' <!--tauceti-status:v1 {"roadmap":"PDE"}-->')
     refuses(lambda: call(content=content), "reserved marker")
 
 
@@ -278,9 +282,9 @@ def test_allows_when_the_cursor_matches_current_main():
 
 def test_refuses_mismatched_status_and_section():
     old_progress = files.new_progress_file(AREA)
-    new_progress = old_progress + files.render_section(AREA, FROM, TO, [1], "w", "x")
+    new_progress = old_progress + files.render_section(AREA, FROM, TO, [1], "w", PROSE)
     # Snapshot claims a different commit than the window ends at.
-    new_status = files.render_status(AREA, "c" * 40, "t", "s")
+    new_status = files.render_status(AREA, "c" * 40, "t", PROSE)
     refuses(lambda: call(content=(None, new_status, old_progress, new_progress)), "must describe")
 
 
@@ -305,6 +309,36 @@ def test_refuses_an_area_mismatch_between_branch_and_content():
     content = make_content(area="PDE")
     changed = make_files(area="PDE")
     refuses(lambda: call(changed=changed, content=content), "not in the ReductiveGroups directory")
+
+
+def test_refuses_bare_headers_with_no_prose():
+    """A file consisting of nothing but a well-formed header passed every structural check and would
+    have merged -- and then announced an empty message to Zulip. The floor is measured against what
+    the renderer emits for an EMPTY body, so it tracks the boilerplate rather than a magic number."""
+    bare_status = '<!--tauceti-status:v1 {"roadmap":"%s","to_sha":"%s","ts":"t"}-->' % (AREA, TO)
+    old_progress = files.new_progress_file(AREA)
+    bare_section = ('\n<!--tauceti-progress:v1 {"roadmap":"%s","from_sha":"%s","to_sha":"%s",'
+                    '"prs":[1]}-->' % (AREA, FROM, TO))
+    refuses(lambda: call(content=(None, bare_status, old_progress, old_progress + bare_section)),
+            "characters of prose")
+
+
+def test_refuses_a_stub_section_under_a_real_status():
+    old_progress = files.new_progress_file(AREA)
+    stub = files.render_section(AREA, FROM, TO, [1], "w", "Some things landed.")
+    status = files.render_status(AREA, TO, "t", PROSE)
+    refuses(lambda: call(content=(None, status, old_progress, old_progress + stub)),
+            "characters of prose")
+
+
+def test_refuses_unknown_header_fields():
+    """Headers are a closed schema shared with the gate; an ignored field is a field a later reader
+    might not ignore."""
+    old_progress = files.new_progress_file(AREA)
+    new_progress = old_progress + files.render_section(AREA, FROM, TO, [1], "w", PROSE)
+    odd = ('<!--tauceti-status:v1 {"roadmap":"%s","to_sha":"%s","ts":"t","evil":"x"}-->\n\n%s\n'
+           % (AREA, TO, PROSE))
+    refuses(lambda: call(content=(None, odd, old_progress, new_progress)), "unknown field")
 
 
 # ----- build ------------------------------------------------------------------------------------

@@ -38,6 +38,17 @@ MAX_STATUS_BYTES = 64 * 1024
 MAX_SECTION_BYTES = 32 * 1024
 MAX_PROGRESS_BYTES = 4 * 1024 * 1024
 
+# A floor as well as a ceiling. Without one, a file consisting of nothing but a well-formed header
+# passed every structural check and merged -- a degenerate report that also announces an empty
+# message to Zulip. The bar is deliberately low: a real section is several paragraphs, so this only
+# catches output that is empty or a stub, never a terse but genuine report.
+MIN_PROSE_CHARS = 200
+
+# Header schemas, closed rather than open. Unknown keys are refused so a future reader cannot be
+# steered by a field this version silently ignored.
+STATUS_KEYS = {"roadmap", "to_sha", "ts"}
+SECTION_KEYS = {"roadmap", "from_sha", "to_sha", "prs"}
+
 
 class FormatError(ValueError):
     """A generated file does not conform. Always fail closed on one of these: the gate refuses
@@ -48,6 +59,22 @@ def _require_sha(value, field):
     if not isinstance(value, str) or not _SHA_RE.match(value):
         raise FormatError(f"{field} must be a full 40-character lowercase hex SHA, got {value!r}")
     return value
+
+
+def _require_keys(obj, allowed, marker):
+    """A header carries exactly the fields this version knows about.
+
+    Unknown keys are refused rather than ignored: a header is a wire format shared with the merge
+    gate, and silently tolerating extra fields lets prose smuggle data past a reader that does look
+    at them.
+    """
+    extra = sorted(set(obj) - set(allowed))
+    if extra:
+        raise FormatError(f"{marker} header has unknown field(s): {', '.join(extra)}")
+    missing = sorted(set(allowed) - set(obj) - {"ts"})   # `ts` is display-only and optional
+    if missing:
+        raise FormatError(f"{marker} header is missing field(s): {', '.join(missing)}")
+    return obj
 
 
 def _require_area(value, field):
@@ -109,6 +136,7 @@ def parse_status(text):
     if len(headers) != 1:
         raise FormatError(f"expected exactly one {STATUS_MARKER} header, found {len(headers)}")
     h = headers[0]
+    _require_keys(h, STATUS_KEYS, STATUS_MARKER)
     return {
         "roadmap": _require_area(h.get("roadmap"), "roadmap"),
         "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
@@ -164,6 +192,7 @@ def parse_sections(text):
     """Every section header of a `PROGRESS.md`, oldest first."""
     out = []
     for h in parse_headers(text, PROGRESS_MARKER):
+        _require_keys(h, SECTION_KEYS, PROGRESS_MARKER)
         out.append(
             {
                 "roadmap": _require_area(h.get("roadmap"), "roadmap"),
@@ -226,6 +255,25 @@ def check_no_reserved_markers(body, allow=()):
         if any(body[start:].startswith(f"<!--{name}") for name in allow):
             continue
         raise FormatError(f"model prose contains a reserved marker at offset {start}: {m.group(0)!r}")
+
+
+def check_prose(name, text, scaffold):
+    """`text` must carry real prose, not just the furniture the renderer would emit on its own.
+
+    `scaffold` is what the corresponding renderer produces for an EMPTY body, so the difference is
+    exactly the model's contribution. Comparing against that rather than against a fixed length keeps
+    the check honest as the boilerplate changes, and it catches the degenerate case a structural gate
+    otherwise waves through: a file consisting of nothing but a well-formed header.
+    """
+    written = len("".join(text.split()))
+    furniture = len("".join(scaffold.split()))
+    prose = written - furniture
+    if prose < MIN_PROSE_CHARS:
+        raise FormatError(
+            f"{name} carries only {max(prose, 0)} characters of prose beyond its boilerplate; "
+            f"at least {MIN_PROSE_CHARS} are required"
+        )
+    return prose
 
 
 def check_size(name, text, cap):
@@ -306,5 +354,13 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
         old = parse_status(old_status)
         if old["to_sha"] == status["to_sha"]:
             raise FormatError(f"STATUS.md still describes {status['to_sha'][:7]}; nothing advanced")
+
+    # Last, so a more specific failure (an injected marker, an unadvanced snapshot) reports its own
+    # reason rather than being masked by a complaint about length.
+    check_prose(
+        "the new section", added,
+        render_section(area, section["from_sha"], section["to_sha"], section["prs"], "", ""),
+    )
+    check_prose("STATUS.md", new_status, render_status(area, status["to_sha"], status["ts"] or "", ""))
 
     return section
