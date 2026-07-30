@@ -84,6 +84,11 @@ jobs:
       # This grants no privilege that account lacks -- it is already an OrganizationAdmin bypass
       # actor on this ruleset -- so the check's real job is excluding everyone else.
       allowed_user_ids: "477956"
+      # `tau-ceti-roadmap-sync`, the App this repository's ruleset lists as a bypass actor. It must be
+      # this one and not `secrets.APP_ID` (the review bot, which auto-merge.yml uses): the review bot
+      # bypasses TauCeti's ruleset, not this one, so a direct merge with its token would be refused
+      # for want of a code-owner review. auto-merge.yml can use it because it only *enables* GitHub's
+      # native auto-merge and lets the ruleset gate the merge; this workflow merges directly.
+      app_id: ${{ vars.SYNC_BOT_APP_ID }}
     secrets:
-      APP_ID: ${{ secrets.APP_ID }}
-      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+      APP_PRIVATE_KEY: ${{ secrets.SYNC_BOT_APP_PRIVATE_KEY }}

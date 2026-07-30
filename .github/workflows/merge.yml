@@ -38,14 +38,21 @@ on:
         description: Comma-separated numeric GitHub user ids permitted to author these PRs.
         required: true
         type: string
+      app_id:
+        description: >
+          Numeric id of the App whose token performs the merge. It MUST be an App that the target
+          repository's ruleset lists as a bypass actor, or the merge is refused for want of a
+          code-owner review. For TauCetiRoadmap that is `tau-ceti-roadmap-sync`
+          (`vars.SYNC_BOT_APP_ID`), NOT the review bot in `APP_ID`, which is a bypass actor on
+          TauCeti but not here. An App id is not a secret, hence an input.
+        required: true
+        type: string
       dry_run:
         description: Validate and report, but never merge.
         required: false
         default: false
         type: boolean
     secrets:
-      APP_ID:
-        required: true
       APP_PRIVATE_KEY:
         required: true
 
@@ -149,7 +156,7 @@ jobs:
         id: token
         uses: actions/create-github-app-token@v1
         with:
-          app-id: ${{ secrets.APP_ID }}
+          app-id: ${{ inputs.app_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name || 'TauCetiRoadmap' }}
