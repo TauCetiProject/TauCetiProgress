@@ -1,0 +1,239 @@
+"""Tests for window arithmetic and the plan decision.
+
+The git-touching parts are exercised against a real throwaway repository built in a temp dir, so
+the ancestry and half-open-range behaviour is tested against actual git rather than a mock that
+could encode the same mistake twice.
+"""
+
+import datetime
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from progress import files, plan, window  # noqa: E402
+
+failures = []
+
+
+def check(name, fn):
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001
+        failures.append(name)
+        print(f"FAIL {name}: {type(exc).__name__}: {exc}")
+    else:
+        print(f"ok   {name}")
+
+
+def raises(exc_type, fn, needle=None):
+    try:
+        fn()
+    except exc_type as exc:
+        if needle and needle not in str(exc):
+            raise AssertionError(f"expected {needle!r} in {str(exc)!r}") from None
+        return
+    raise AssertionError(f"expected {exc_type.__name__}, none raised")
+
+
+# ----- subject parsing -------------------------------------------------------------------------
+
+
+def test_pr_number_of_subject():
+    assert window.pr_number_of_subject("feat: add products (#1433)") == 1433
+    assert window.pr_number_of_subject("Merge pull request #62 from TauCetiProject/x") == 62
+    assert window.pr_number_of_subject("chore: no number here") is None
+    # A number in the middle is not a merge marker; only the trailing form counts.
+    assert window.pr_number_of_subject("fix: handle (#12) in parser") is None
+
+
+def test_pr_numbers_from_log_dedupes_and_keeps_order():
+    log = "feat: a (#3)\nfix: b (#2)\nfeat: c (#3)\nchore: none\nMerge pull request #1 from x\n"
+    assert window.pr_numbers_from_log(log) == [3, 2, 1]
+
+
+# ----- a real git repo -------------------------------------------------------------------------
+
+
+def make_repo(tmp, subjects):
+    """A repo whose mainline is one commit per subject, oldest first. Returns [sha] aligned to it."""
+    subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
+    # Inherit the real environment (git must stay on PATH) and only pin identity and dates, so
+    # commit SHAs are reproducible without breaking the tool lookup.
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@e",
+        "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@e",
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+    }
+    shas = []
+    for i, subject in enumerate(subjects):
+        (pathlib.Path(tmp) / f"f{i}").write_text(str(i))
+        subprocess.run(["git", "-C", tmp, "add", "-A"], check=True, capture_output=True, env=env)
+        subprocess.run(["git", "-C", tmp, "commit", "-q", "-m", subject],
+                       check=True, capture_output=True, env=env)
+        shas.append(window.git(["rev-parse", "HEAD"], tmp).strip())
+    return shas
+
+
+def test_window_is_half_open_and_excludes_from_sha():
+    with tempfile.TemporaryDirectory() as tmp:
+        shas = make_repo(tmp, ["init", "a (#1)", "b (#2)", "c (#3)"])
+        # (shas[1], shas[3]] must contain #2 and #3, and must NOT contain #1.
+        got = window.window_prs(tmp, shas[1], shas[3])
+        assert got == [3, 2], got
+        # The whole history from the root's parent is not expressible, which is exactly why
+        # bootstrap uses first_parent_before on the earliest *merge*, not on the root.
+        got_all = window.window_prs(tmp, shas[0], shas[3])
+        assert got_all == [3, 2, 1], got_all
+
+
+def test_bootstrap_parent_includes_the_first_pr():
+    with tempfile.TemporaryDirectory() as tmp:
+        shas = make_repo(tmp, ["init", "a (#1)", "b (#2)"])
+        merge = window.find_merge_commit(tmp, 1, ref="main")
+        assert merge == shas[1], merge
+        from_sha = window.first_parent_before(tmp, merge)
+        assert from_sha == shas[0]
+        # With the parent as cursor, #1 is reported. With the merge itself, it would be lost.
+        assert window.window_prs(tmp, from_sha, shas[2]) == [2, 1]
+        assert window.window_prs(tmp, merge, shas[2]) == [2]
+
+
+def test_ancestry_is_asserted():
+    with tempfile.TemporaryDirectory() as tmp:
+        shas = make_repo(tmp, ["init", "a (#1)"])
+        assert window.is_ancestor(tmp, shas[0], shas[1]) is True
+        assert window.is_ancestor(tmp, shas[1], shas[0]) is False
+        # A cursor that is not an ancestor means rewritten history or a foreign cursor. Refuse.
+        raises(window.GitError, lambda: window.window_prs(tmp, shas[1], shas[0]), "not an ancestor")
+
+
+def test_consecutive_windows_tile_with_no_gap_or_overlap():
+    with tempfile.TemporaryDirectory() as tmp:
+        shas = make_repo(tmp, ["init", "a (#1)", "b (#2)", "c (#3)", "d (#4)"])
+        w1 = window.window_prs(tmp, shas[0], shas[2])
+        w2 = window.window_prs(tmp, shas[2], shas[4])
+        assert w1 == [2, 1], w1
+        assert w2 == [4, 3], w2
+        assert not set(w1) & set(w2), "windows must not overlap"
+        assert set(w1) | set(w2) == {1, 2, 3, 4}, "windows must leave no gap"
+
+
+def test_head_sha_and_commit_date():
+    with tempfile.TemporaryDirectory() as tmp:
+        shas = make_repo(tmp, ["init", "a (#1)"])
+        assert window.head_sha(tmp, ref="main") == shas[-1]
+        assert window.commit_date(tmp, shas[-1]).startswith("2026-")
+
+
+# ----- cadence ---------------------------------------------------------------------------------
+
+
+NOW = datetime.datetime(2026, 7, 30, 12, 0, tzinfo=datetime.timezone.utc)
+
+
+def test_cadence_never_updated():
+    reason = plan.check_cadence([("2026-07-30T11:00:00Z", "feat: something else (#1)")], now=NOW)
+    assert "ever" in reason, reason
+
+
+def test_cadence_too_recent_raises():
+    commits = [("2026-07-30T02:00:00Z", "progress: PDE 2026-07-30 (#9)")]
+    raises(plan.NotDue, lambda: plan.check_cadence(commits, now=NOW), "10.0h ago")
+
+
+def test_cadence_old_enough_passes():
+    commits = [("2026-07-28T12:00:00Z", "progress: PDE (#9)")]
+    reason = plan.check_cadence(commits, now=NOW)
+    assert "48.0h" in reason, reason
+
+
+def test_cadence_ignores_non_progress_commits():
+    commits = [
+        ("2026-07-30T11:00:00Z", "doc: sharpen a target (#91)"),
+        ("2026-07-27T12:00:00Z", "progress: PDE (#9)"),
+    ]
+    reason = plan.check_cadence(commits, now=NOW)
+    assert "72.0h" in reason, reason
+
+
+# ----- area discovery --------------------------------------------------------------------------
+
+
+def test_discover_areas_matches_canonical_rule():
+    """Shaped after the real origin/main tree: nested RepresentationTheory, a Completed area, a
+    references/ dir that must NOT count, and an area with no Suggested.lean."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        for rel in [
+            "TauCetiRoadmap/PDE",
+            "TauCetiRoadmap/ContourIntegration",
+            "TauCetiRoadmap/OneParameterSemigroups",     # README only, no Suggested.lean
+            "TauCetiRoadmap/RepresentationTheory",
+            "TauCetiRoadmap/RepresentationTheory/RootSystems",   # nested: not a top-level area
+            "TauCetiRoadmap/GeometricTopology",
+            "TauCetiRoadmap/GeometricTopology/references",       # has a README but is not an area
+            "Completed/EffectiveBounds",
+        ]:
+            (root / rel).mkdir(parents=True)
+            (root / rel / "README.md").write_text("#")
+        (root / "TauCetiRoadmap/PDE/Suggested.lean").write_text("-- x")
+        # A directory with no README is not an area.
+        (root / "TauCetiRoadmap/NotAnArea").mkdir()
+
+        areas = plan.discover_areas(root)
+        assert set(areas) == {
+            "PDE", "ContourIntegration", "OneParameterSemigroups", "RepresentationTheory",
+            "GeometricTopology", "EffectiveBounds",
+        }, sorted(areas)
+        assert areas["PDE"] == "TauCetiRoadmap/PDE"
+        assert areas["EffectiveBounds"] == "Completed/EffectiveBounds"
+        assert "RootSystems" not in areas, "nested sub-roadmaps are not separate labelled areas"
+        assert "references" not in areas
+
+
+def test_read_area_files_missing_is_none():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "TauCetiRoadmap/PDE").mkdir(parents=True)
+        s, p = plan.read_area_files(root, "TauCetiRoadmap/PDE")
+        assert s is None and p is None
+        (root / "TauCetiRoadmap/PDE/PROGRESS.md").write_text("hi")
+        s, p = plan.read_area_files(root, "TauCetiRoadmap/PDE")
+        assert s is None and p == "hi"
+
+
+# ----- attribution and duplicate rejection -----------------------------------------------------
+
+
+def test_area_window_filters_by_label():
+    with tempfile.TemporaryDirectory() as tmp:
+        shas = make_repo(tmp, ["init", "a (#1)", "b (#2)", "c (#3)"])
+        area_of = {1: "PDE", 2: None, 3: "PDE"}   # #2 is roadmap/none
+        got = plan.area_window(tmp, "PDE", shas[0], shas[3], area_of)
+        assert got == [3, 1], got
+
+
+def test_already_reported_prs_are_excluded():
+    """A relabel after a section landed must not double-report. The section header records the PR
+    numbers, and `reported_prs` is the authority."""
+    log = files.new_progress_file("PDE") + files.render_section("PDE", "a" * 40, "b" * 40, [1, 2],
+                                                                "w", "x")
+    assert files.reported_prs(log) == {1, 2}
+    fresh = [n for n in [3, 2, 1] if n not in files.reported_prs(log)]
+    assert fresh == [3], fresh
+
+
+for _name, _fn in sorted(globals().items()):
+    if _name.startswith("test_") and callable(_fn):
+        check(_name, _fn)
+
+print()
+if failures:
+    print(f"{len(failures)} failure(s): {', '.join(failures)}")
+    sys.exit(1)
+print("all tests passed")

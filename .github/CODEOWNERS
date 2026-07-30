@@ -1,0 +1,8 @@
+# This repository holds the merge gate that lets progress reports land in the human-owned
+# TauCetiRoadmap repo without a human review. That makes it privileged code: everything here
+# is human-governed, exactly as the review rubrics and machinery are in TauCetiReview.
+#
+# Moving scripts out of TauCeti's human-owned `scripts/` directory must not quietly de-trust
+# them.
+
+*   @TauCetiProject/humans

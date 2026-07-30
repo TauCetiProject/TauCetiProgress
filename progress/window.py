@@ -1,0 +1,135 @@
+"""Commit windows: turning a range of TauCeti `main` into the set of PRs it contains.
+
+A window is the half-open commit range `(from_sha, to_sha]` on `main`. `from_sha` is the previous
+section's `to_sha`, so consecutive windows tile exactly with no gap and no overlap, and the
+identity of a window does not depend on anyone's clock.
+
+Timestamps are used only for display and for the "is an update due" cadence, never as the cursor.
+A cursor made of timestamps is wrong in a way that loses work silently: a worker whose clock runs
+fast stores a cursor in the future, and PRs merged in the interval then carry merge times *before*
+the stored cursor and are never reported by any later window.
+
+Pure functions take text and lists; the two that shell out to `git` are marked.
+"""
+
+import re
+import subprocess
+
+# Squash-merge subjects made by GitHub end in `(#1234)`. The roadmap repo also has a few true
+# merge commits whose subject is `Merge pull request #62 from ...`. Both forms appear in real
+# history, so both are recognised; anything else contributes no PR number.
+_SQUASH_RE = re.compile(r"\(#(\d+)\)\s*\Z")
+_MERGE_RE = re.compile(r"\AMerge pull request #(\d+)\b")
+
+
+class GitError(RuntimeError):
+    """A git invocation failed. Callers treat this as "cannot decide", never as "nothing to do"."""
+
+
+def git(args, repo_dir):
+    """Run git in `repo_dir` and return stdout. Raises GitError on a non-zero exit."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo_dir), *args],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git {' '.join(args)} failed: {proc.stderr.strip() or proc.returncode}")
+    return proc.stdout
+
+
+def pr_number_of_subject(subject):
+    """The PR number a commit subject records, or None."""
+    m = _SQUASH_RE.search(subject)
+    if m:
+        return int(m.group(1))
+    m = _MERGE_RE.match(subject)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def pr_numbers_from_log(log_text):
+    """PR numbers from `git log --format=%s` output, in the order given, deduped.
+
+    Order is preserved (newest first as git emits it) because the caller reports the newest
+    window boundary from the first entry.
+    """
+    out = []
+    seen = set()
+    for line in log_text.splitlines():
+        n = pr_number_of_subject(line.strip())
+        if n is not None and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def is_ancestor(repo_dir, maybe_ancestor, descendant):
+    """Is `maybe_ancestor` an ancestor of `descendant`?
+
+    Asserted before every window: if the stored cursor is not an ancestor of the observed head,
+    the history was rewritten or the cursor refers to another repository, and computing a range
+    from it would silently produce nonsense.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", maybe_ancestor, descendant],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    raise GitError(f"git merge-base failed: {proc.stderr.strip() or proc.returncode}")
+
+
+def window_prs(repo_dir, from_sha, to_sha):
+    """PR numbers merged in `(from_sha, to_sha]`, newest first.
+
+    `--first-parent` is deliberate: it walks the mainline only, so a PR's own internal commits
+    (which may themselves mention other PR numbers) never leak into the window.
+    """
+    if not is_ancestor(repo_dir, from_sha, to_sha):
+        raise GitError(
+            f"{from_sha[:7]} is not an ancestor of {to_sha[:7]}; the cursor does not belong to "
+            f"this history (rewritten branch, or a cursor from another repository)"
+        )
+    log = git(["log", "--first-parent", "--format=%s", f"{from_sha}..{to_sha}"], repo_dir)
+    return pr_numbers_from_log(log)
+
+
+def head_sha(repo_dir, ref="origin/main"):
+    """One observed SHA for `ref`. Read once per plan and reused everywhere downstream, so that
+    the PR set and the recorded `to_sha` are guaranteed to describe the same history."""
+    return git(["rev-parse", ref], repo_dir).strip()
+
+
+def first_parent_before(repo_dir, sha):
+    """The first parent of `sha`, for bootstrapping a window that should *include* `sha`.
+
+    A window is half-open, so to report the earliest PR of an area its `from_sha` must be that
+    commit's parent rather than the commit itself. Without this the first PR of every area would
+    be silently dropped.
+    """
+    out = git(["rev-parse", f"{sha}^"], repo_dir).strip()
+    return out
+
+
+def commit_date(repo_dir, sha):
+    """The committer date of `sha` as an ISO-8601 string, for display in headings."""
+    return git(["log", "-1", "--format=%cI", sha], repo_dir).strip()
+
+
+def find_merge_commit(repo_dir, pr_number, ref="origin/main"):
+    """The mainline commit that merged `pr_number`, or None.
+
+    Used only for bootstrap, where an area's earliest labelled PR must be located in history.
+    Searching subjects is cheap and exact here because both merge-subject forms embed the number.
+    """
+    log = git(["log", "--first-parent", "--format=%H %s", ref], repo_dir)
+    for line in log.splitlines():
+        sha, _, subject = line.partition(" ")
+        if pr_number_of_subject(subject.strip()) == pr_number:
+            return sha
+    return None
