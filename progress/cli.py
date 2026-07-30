@@ -67,7 +67,9 @@ def cmd_facts(args):
     from . import facts
 
     p = _load_plan(args.plan)
-    result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"])
+    # The plan's PR list is the area filter. Without it `collect` would walk every merged PR in the
+    # commit range, so a report on one roadmap would be grounded in every roadmap's work.
+    result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"])
     out = json.dumps(result, indent=2, sort_keys=True)
     if args.out:
         pathlib.Path(args.out).write_text(out + "\n", encoding="utf-8")
