@@ -210,16 +210,27 @@ def main(argv=None):
     new_status = blob_for("STATUS.md")
     new_progress = blob_for("PROGRESS.md")
 
-    # ----- the previous contents, at main_sha, not from a checkout -----------------------------
+    # ----- the previous contents, at main_sha, from the parent THIS DIFF TOUCHES ---------------
+    #
+    # The parent is derived from the changed paths, never probed in a fixed order. Probing
+    # `TauCetiRoadmap/` first was a real hole: an area can exist under both parents, so a pull request
+    # changing `Completed/<area>/` would be handed the ACTIVE log as its append-only baseline, and a
+    # wholesale replacement of the archived log then looked like a valid append.
     old_status = old_progress = None
+    old_paths = {}
     current_cursor = None
-    if area:
-        for parent in ("TauCetiRoadmap", "Completed"):
-            probe = file_at(args.repo, main_sha, f"{parent}/{area}/PROGRESS.md")
-            other = file_at(args.repo, main_sha, f"{parent}/{area}/STATUS.md")
-            if probe is not None or other is not None:
-                old_progress, old_status = probe, other
-                break
+    parents = {gate.PATH_RE.match(p).group(1) for p in by_path}
+    if len(parents) > 1:
+        # The gate refuses this too, but collecting a baseline would mean choosing one arbitrarily.
+        raise CollectError(f"the diff spans {sorted(parents)}; it must touch one directory")
+    if area and parents:
+        parent = parents.pop()
+        old_paths = {
+            "STATUS.md": f"{parent}/{area}/STATUS.md",
+            "PROGRESS.md": f"{parent}/{area}/PROGRESS.md",
+        }
+        old_status = file_at(args.repo, main_sha, old_paths["STATUS.md"])
+        old_progress = file_at(args.repo, main_sha, old_paths["PROGRESS.md"])
         if old_progress:
             try:
                 current_cursor = files.cursor(old_progress)
@@ -258,6 +269,8 @@ def main(argv=None):
         "new_progress": new_progress,
         "old_status": old_status,
         "old_progress": old_progress,
+        # Recorded so the gate can confirm the baseline came from the directory being changed.
+        "old_paths": old_paths,
         "current_main_cursor": current_cursor,
         "check_runs": check_runs,
     }

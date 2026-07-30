@@ -84,14 +84,22 @@ def make_content(from_sha=FROM, to_sha=TO, prs=(1, 2, 3), area=AREA, prose=None)
     return None, new_status, old_progress, new_progress
 
 
-CHECKS_OK = [{"name": "build", "head_sha": HEAD, "conclusion": "success"}]
+def build_run(**over):
+    """A fully-specified check-run. Every field is required by the gate, so fixtures state them all."""
+    run = {"name": "build", "head_sha": HEAD, "conclusion": "success",
+           "status": "completed", "app_id": gate.GITHUB_ACTIONS_APP_ID, "source": "check_run"}
+    run.update(over)
+    return run
+
+
+CHECKS_OK = [build_run()]
 
 
 MAIN = "9a9a9a9" + "0" * 33
 
 
 def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=None, ids=None,
-         compare_status="ahead", behind_by=0):
+         compare_status="ahead", behind_by=0, old_paths=None):
     old_status, new_status, old_progress, new_progress = content or make_content()
     return gate.decide(
         pr=pr or make_pr(),
@@ -108,6 +116,9 @@ def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=Non
         compare_status=compare_status,
         behind_by=behind_by,
         main_sha=MAIN,
+        old_paths=old_paths if old_paths is not None else {
+            n: f"TauCetiRoadmap/{AREA}/{n}" for n in ("STATUS.md", "PROGRESS.md")
+        },
     )
 
 
@@ -237,6 +248,19 @@ def test_refuses_more_files_than_allowed():
     refuses(lambda: call(changed=changed), "appears twice")
 
 
+def test_refuses_a_baseline_from_the_wrong_parent():
+    """An area can exist under both parents. A collector probing a fixed order would hand a
+    Completed/ update the ACTIVE log as its baseline, making a wholesale replacement of the archived
+    log look like a valid append."""
+    wrong = {n: f"Completed/{AREA}/{n}" for n in ("STATUS.md", "PROGRESS.md")}
+    refuses(lambda: call(old_paths=wrong), "expected 'TauCetiRoadmap/")
+
+
+def test_refuses_a_partial_baseline():
+    half = {"STATUS.md": f"TauCetiRoadmap/{AREA}/STATUS.md"}
+    refuses(lambda: call(old_paths=half), "baseline for PROGRESS.md")
+
+
 # ----- modes -----------------------------------------------------------------------------------
 
 
@@ -339,7 +363,7 @@ def test_refuses_bare_headers_with_no_prose():
     bare_section = ('\n<!--tauceti-progress:v1 {"roadmap":"%s","from_sha":"%s","to_sha":"%s",'
                     '"prs":[1]}-->' % (AREA, FROM, TO))
     refuses(lambda: call(content=(None, bare_status, old_progress, old_progress + bare_section)),
-            "canonical")
+            "missing")
 
 
 def test_refuses_a_stub_section_under_a_real_status():
@@ -367,7 +391,7 @@ def test_refuses_a_status_whose_header_is_not_first():
     new_progress = old_progress + files.render_section(AREA, FROM, TO, [1], "w", PROSE)
     good = files.render_status(AREA, TO, "t", PROSE)
     moved = "Preamble a reader sees first.\n\n" + good
-    refuses(lambda: call(content=(None, moved, old_progress, new_progress)), "must begin with")
+    refuses(lambda: call(content=(None, moved, old_progress, new_progress)), "does not begin with")
 
 
 def test_refuses_a_section_without_its_heading():
@@ -375,7 +399,7 @@ def test_refuses_a_section_without_its_heading():
     section = files.render_section(AREA, FROM, TO, [1], "w", PROSE)
     headless = section.replace(f"## {AREA}: ", "Some other line ")
     status = files.render_status(AREA, TO, "t", PROSE)
-    refuses(lambda: call(content=(None, status, old_progress, old_progress + headless)), "canonical")
+    refuses(lambda: call(content=(None, status, old_progress, old_progress + headless)), "must begin with")
 
 
 def test_refuses_junk_pr_numbers():
@@ -387,6 +411,40 @@ def test_refuses_junk_pr_numbers():
         bad = ('\n<!--tauceti-progress:v1 {"roadmap":"%s","from_sha":"%s","to_sha":"%s","prs":%s}-->\n'
                '## %s: w\n\n%s\n' % (AREA, FROM, TO, junk, AREA, PROSE))
         refuses(lambda b=bad: call(content=(None, status, old_progress, old_progress + b)), "prs")
+
+
+def test_refuses_a_report_wrapped_in_a_code_fence():
+    """The substring version of the shape check let the heading and disclaimer live anywhere,
+    including inside a fenced block, so a document that rendered as no report at all still passed.
+    The framing is now an exact prefix, and the prose floor measures the extracted body."""
+    old_progress = files.new_progress_file(AREA)
+    good_status = files.render_status(AREA, TO, "t", PROSE)
+    fenced_status = f"```\n{good_status}\n```\n"
+    good_section = files.render_section(AREA, FROM, TO, [1], "w", PROSE)
+    fenced_section = f"```\n{good_section}\n```\n"
+    refuses(lambda: call(content=(None, fenced_status, old_progress, old_progress + good_section)),
+            "does not begin with")
+    refuses(lambda: call(content=(None, good_status, old_progress, old_progress + fenced_section)),
+            "must begin with")
+
+
+def test_refuses_a_heading_naming_the_wrong_window():
+    """The heading must name the same window the header declares, so the two cannot disagree."""
+    old_progress = files.new_progress_file(AREA)
+    status = files.render_status(AREA, TO, "t", PROSE)
+    section = files.render_section(AREA, FROM, TO, [1], "w", PROSE)
+    wrong = section.replace(f"(`{FROM[:7]}` to `{TO[:7]}`)", "(`0000000` to `1111111`)")
+    refuses(lambda: call(content=(None, status, old_progress, old_progress + wrong)), "must begin with")
+
+
+def test_refuses_padded_framing_with_no_real_body():
+    """A length subtraction could be satisfied by padding the framing itself; measuring the extracted
+    body cannot."""
+    old_progress = files.new_progress_file(AREA)
+    status = files.render_status(AREA, TO, "t", PROSE)
+    section = files.render_section(AREA, FROM, TO, [1], "w", "tiny")
+    refuses(lambda: call(content=(None, status, old_progress, old_progress + section)),
+            "characters of prose")
 
 
 def test_refuses_unknown_header_fields():
@@ -403,19 +461,19 @@ def test_refuses_unknown_header_fields():
 
 
 def test_refuses_a_failing_build():
-    checks = [{"name": "build", "head_sha": HEAD, "conclusion": "failure"}]
-    refuses(lambda: call(checks=checks), "concluded failure")
+    checks = [build_run(conclusion="failure")]
+    refuses(lambda: call(checks=checks), "concluded 'failure'")
 
 
 def test_refuses_a_build_from_another_app():
     """Any repository WRITER can create a check-run or POST a commit status under any name, so a
     result is evidence only if it came from the App that actually runs CI."""
-    checks = [{"name": "build", "head_sha": HEAD, "conclusion": "success", "app_id": 99999}]
+    checks = [build_run(app_id=99999)]
     refuses(lambda: call(checks=checks), "reported by app")
 
 
 def test_refuses_a_legacy_commit_status():
-    checks = [{"name": "build", "head_sha": HEAD, "conclusion": "success", "source": "status"}]
+    checks = [build_run(source="status")]
     refuses(lambda: call(checks=checks), "not a check run")
 
 
@@ -423,12 +481,11 @@ def test_refuses_a_skipped_or_neutral_build():
     """Both count as passing for ordinary branch protection, so a workflow that skipped the build
     entirely would otherwise have satisfied this."""
     for concl in ("skipped", "neutral"):
-        refuses(lambda c=concl: call(checks=[{"name": "build", "head_sha": HEAD, "conclusion": c}]),
-                "concluded " + concl)
+        refuses(lambda c=concl: call(checks=[build_run(conclusion=c)]), "concluded " + repr(concl))
 
 
 def test_refuses_an_incomplete_build():
-    checks = [{"name": "build", "head_sha": HEAD, "conclusion": None, "status": "in_progress"}]
+    checks = [build_run(conclusion=None, status="in_progress")]
     refuses(lambda: call(checks=checks), "in_progress")
 
 
@@ -444,8 +501,8 @@ def test_refuses_a_branch_whose_window_disagrees_with_the_section():
 
 
 def test_refuses_a_pending_build():
-    checks = [{"name": "build", "head_sha": HEAD, "conclusion": None}]
-    refuses(lambda: call(checks=checks), "concluded pending")
+    checks = [build_run(conclusion=None)]
+    refuses(lambda: call(checks=checks), "concluded None")
 
 
 def test_refuses_a_missing_build():
@@ -455,25 +512,28 @@ def test_refuses_a_missing_build():
 def test_refuses_a_failing_build_listed_after_a_success():
     """A head can carry BOTH a check-run and a commit status named `build` (the collector appends
     check-runs, then statuses). Returning on the first match let a success hide a later failure."""
-    checks = [
-        {"name": "build", "head_sha": HEAD, "conclusion": "success"},
-        {"name": "build", "head_sha": HEAD, "conclusion": "failure"},
-    ]
-    refuses(lambda: call(checks=checks), "concluded failure")
+    checks = [build_run(), build_run(conclusion="failure")]
+    refuses(lambda: call(checks=checks), "concluded 'failure'")
 
 
 def test_allows_when_every_build_entry_is_green():
-    checks = [
-        {"name": "build", "head_sha": HEAD, "conclusion": "success"},
-        {"name": "build", "head_sha": HEAD, "conclusion": "success"},
-    ]
+    checks = [build_run(), build_run()]
     assert call(checks=checks)["area"] == AREA
 
 
 def test_refuses_a_build_for_another_commit():
     """A green build on an earlier commit says nothing about the head being merged."""
-    checks = [{"name": "build", "head_sha": "0" * 40, "conclusion": "success"}]
-    refuses(lambda: call(checks=checks), "has not reported")
+    refuses(lambda: call(checks=[build_run(head_sha="0" * 40)]), "names head")
+
+
+def test_refuses_a_build_with_missing_provenance():
+    """Defaulting an absent field to the acceptable value meant a bare
+    {"name": "build", "conclusion": "SUCCESS"} passed: no app to check, status assumed completed."""
+    refuses(lambda: call(checks=[{"name": "build", "conclusion": "SUCCESS"}]), "not a check run")
+    refuses(lambda: call(checks=[build_run(app_id=None)]), "reported by app")
+    refuses(lambda: call(checks=[build_run(status=None)]), "not completed")
+    # Case matters: GitHub emits lowercase, so anything else was not written by GitHub.
+    refuses(lambda: call(checks=[build_run(conclusion="SUCCESS")]), "concluded")
 
 
 for _name, _fn in sorted(globals().items()):

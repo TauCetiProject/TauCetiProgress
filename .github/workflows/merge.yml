@@ -76,6 +76,7 @@ jobs:
       verdict: ${{ steps.gate.outputs.verdict }}
       head_sha: ${{ steps.gate.outputs.head_sha }}
       main_sha: ${{ steps.gate.outputs.main_sha }}
+      area: ${{ steps.gate.outputs.area }}
     steps:
       # The validator itself, at exactly the ref the caller pinned. Checking out this repository
       # (never the pull request) is what keeps the executed code trusted.
@@ -102,9 +103,10 @@ jobs:
           python3 validator/.github/scripts/collect.py \
             --repo "$REPO" --pr "$PR" --allowed-user-ids "$ALLOWED" --out bundle.json
 
-      # The gate. Exit 0 allows, exit 2 is a considered refusal, anything else is a crash. A crash
+      # The gate. Exit 0 allows, exit 3 is a considered refusal, anything else is a crash. A crash
       # must NOT read as a refusal: the two are different, and conflating them turns an unexpected
-      # failure into a quiet no-op.
+      # failure into a quiet no-op. Note 3 rather than 2, because `argparse` exits 2 on a usage
+      # error; and the exit code must AGREE with the output, so a refusal also has to say REFUSED.
       - name: Run the gate
         id: gate
         env:
@@ -118,12 +120,13 @@ jobs:
           {
             echo "head_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("head_sha",""))')"
             echo "main_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("main_sha",""))')"
+            echo "area=$(python3 -c 'import json,re;a=json.load(open("bundle.json")).get("area","");print(a if re.fullmatch(r"[A-Za-z0-9]+", a or "") else "")')"
           } >> "$GITHUB_OUTPUT"
           if [ "$rc" -eq 0 ]; then
             echo "verdict=allow" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ "$rc" -eq 2 ]; then
+          if [ "$rc" -eq 3 ] && head -n1 gate.out | grep -q '^REFUSED: '; then
             echo "verdict=refuse" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -169,40 +172,80 @@ jobs:
           permission-pull-requests: write
           permission-contents: write
 
-      # Two independent bindings, because the merge must land EXACTLY the bytes that were validated:
+      # The write is a compare-and-swap on the ref, NOT a pull-request merge.
       #
-      #   --match-head-commit  the pull request head has not moved since validation.
-      #   the ref update       `main` has not moved since validation.
+      # `gh pr merge` was the wrong instrument, and its two failures had the same root cause: it
+      # depends on pull-request state that stays mutable right up to the moment it runs.
       #
-      # The second is the one `gh pr merge` alone cannot give. The gate has already established that
-      # the head contains current main (`behind_by == 0`), so the merge is a fast-forward of content
-      # and the post-merge bytes are the head's bytes. Re-reading main here and refusing if it has
-      # advanced turns that into a compare-and-swap: if anything landed on main in between -- another
-      # bypass actor, a human -- the merge is abandoned rather than three-way merged into something
-      # nobody checked.
-      - name: Merge, bound to the validated head and the validated main
+      #   * The base can be RETARGETED after validation. `--match-head-commit` pins only the head, so
+      #     an unchanged head would have been merged into a different base -- against which it can
+      #     alter far more than the two files that were checked.
+      #   * `main` can advance between reading it and merging, and a three-way merge then produces
+      #     bytes nobody validated.
+      #
+      # Constructing the commit explicitly removes both, because nothing about the pull request is
+      # consulted at write time. The gate established that the head is `ahead` of the validated main
+      # with `behind_by == 0` and differs in exactly the two generated files, so the head's TREE is
+      # already the intended post-merge tree. Committing that tree with the validated main as its only
+      # parent is precisely the squash that was wanted, and a non-forced ref update lands it only if
+      # `main` is still where it was: GitHub rejects a non-fast-forward, and our commit can only
+      # fast-forward a `main` that has not moved. If anything landed in between, the update fails and
+      # nothing happens.
+      - name: Land the validated tree by compare-and-swap on refs/heads/main
+        id: land
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           PR: ${{ inputs.pr }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
           MAIN_SHA: ${{ needs.validate.outputs.main_sha }}
+          AREA: ${{ needs.validate.outputs.area }}
         run: |
           set -euo pipefail
-          now="$(gh api "repos/$REPO/commits/main" --jq .sha)"
-          if [ "$now" != "$MAIN_SHA" ]; then
-            echo "::warning title=main moved::main is now ${now:0:7}, validated against ${MAIN_SHA:0:7}; not merging"
+
+          # The tree of the exact head that was validated. Named by SHA, so it cannot have changed.
+          tree="$(gh api "repos/$REPO/git/commits/$HEAD_SHA" --jq .tree.sha)"
+          printf 'validated head %s carries tree %s\n' "${HEAD_SHA:0:7}" "${tree:0:7}"
+
+          # Message written here rather than taken from the pull request: the title is mutable and
+          # attacker-influenced, and the `progress:` prefix is load-bearing (the daily cadence check
+          # finds the last update by scanning commit subjects for it).
+          # `AREA` is re-validated as alphanumeric when it is exported, so it cannot inject here.
+          message="$(printf 'progress: %s report\n\nValidated head %s over main %s.\nCloses #%s.\n' \
+            "$AREA" "$HEAD_SHA" "$MAIN_SHA" "$PR")"
+
+          commit="$(gh api -X POST "repos/$REPO/git/commits" \
+            -f message="$message" \
+            -f tree="$tree" \
+            -f parents[]="$MAIN_SHA" \
+            --jq .sha)"
+          printf 'built %s (tree %s, parent %s)\n' "${commit:0:7}" "${tree:0:7}" "${MAIN_SHA:0:7}"
+
+          # force=false is the compare-and-swap. It fails if main is no longer at MAIN_SHA, because
+          # then this commit is not a fast-forward of it.
+          if ! gh api -X PATCH "repos/$REPO/git/refs/heads/main" \
+                 -f sha="$commit" -F force=false > /dev/null 2> update.err; then
+            echo "::warning title=main moved::compare-and-swap refused; nothing was landed"
+            cat update.err
+            echo "landed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          printf 'merging #%s at %s onto main %s\n' "$PR" "${HEAD_SHA:0:7}" "${MAIN_SHA:0:7}"
-          gh pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$HEAD_SHA"
+          echo "landed=true" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          printf 'main advanced %s -> %s\n' "${MAIN_SHA:0:7}" "${commit:0:7}"
 
-          # Confirm what actually landed: main must now be a commit whose tree came from the head we
-          # validated. A mismatch means something merged concurrently despite the checks above, and
-          # that is worth failing loudly over rather than discovering later.
-          after="$(gh api "repos/$REPO/commits/main" --jq .sha)"
-          if [ "$after" = "$MAIN_SHA" ]; then
-            echo "::error title=merge did not land::main is still ${MAIN_SHA:0:7}"
-            exit 1
-          fi
-          printf 'main advanced %s -> %s\n' "${MAIN_SHA:0:7}" "${after:0:7}"
+      # The content is on main, but the pull request is not "merged" in GitHub's sense, so close it
+      # explicitly and say where its content went. Leaving it open would make the next planning run
+      # treat the area as still in flight.
+      - name: Close the pull request now its content has landed
+        if: steps.land.outputs.landed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR: ${{ inputs.pr }}
+          REPO: ${{ github.repository }}
+          COMMIT: ${{ steps.land.outputs.commit }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR" --repo "$REPO" \
+            --body "Landed on \`main\` as $COMMIT by compare-and-swap on the validated tree."
+          gh pr close "$PR" --repo "$REPO" --delete-branch

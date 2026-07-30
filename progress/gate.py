@@ -50,10 +50,14 @@ REGULAR_MODES = {"100644"}
 # evidence. Legacy commit statuses are not accepted here at all -- the roadmap repo publishes none.
 GITHUB_ACTIONS_APP_ID = 15368
 
-# A considered refusal is exit 2, distinct from both an allow (0) and a crash (anything else). The
+# A considered refusal is exit 3, distinct from both an allow (0) and a crash (anything else). The
 # workflow relies on that distinction: a refusal is a normal outcome that leaves the pull request for
 # a human, while an unexpected failure must go red rather than reading as a quiet "did not merge".
-EX_REFUSED = 2
+#
+# Not 2: `argparse` exits 2 on a usage error, so a mistyped invocation would have been reported as a
+# considered refusal. The workflow additionally requires the output to start with `REFUSED:`, so the
+# two signals have to agree.
+EX_REFUSED = 3
 
 
 class Refused(Exception):
@@ -241,30 +245,54 @@ def check_build(check_runs, head_sha, required="build", app_id=GITHUB_ACTIONS_AP
     * **No contradictions.** Every matching entry must agree; a success listed ahead of a failure
       used to win because the first match returned.
     """
-    matching = [
-        r for r in check_runs
-        if (r.get("name") or "") == required and (r.get("head_sha") or head_sha) == head_sha
-    ]
+    matching = [r for r in check_runs if (r.get("name") or "") == required]
     if not matching:
         _refuse(f"{required} has not reported on {head_sha[:7]}")
     for run in matching:
-        source = run.get("source")
-        if source is not None and source != "check_run":
-            _refuse(f"{required} on {head_sha[:7]} came from a {source}, not a check run")
+        # Every field is REQUIRED. Defaulting a missing field to the acceptable value meant a bare
+        # {"name": "build", "conclusion": "SUCCESS"} passed: no app to check, status assumed
+        # completed, head assumed to match. An absent field is unknown provenance, which is exactly
+        # the thing this refuses.
+        if run.get("source") != "check_run":
+            _refuse(f"{required} on {head_sha[:7]} came from {run.get('source')!r}, not a check run")
+        if run.get("head_sha") != head_sha:
+            _refuse(f"{required} names head {run.get('head_sha')!r}, not {head_sha}")
         got_app = run.get("app_id")
-        if got_app is not None and int(got_app) != int(app_id):
-            _refuse(f"{required} on {head_sha[:7]} was reported by app {got_app}, not {app_id}")
-        if (run.get("status") or "completed") != "completed":
-            _refuse(f"{required} is {run.get('status')} on {head_sha[:7]}, not completed")
-        concl = (run.get("conclusion") or "").lower()
-        if concl != "success":
-            _refuse(f"{required} concluded {concl or 'pending'} on {head_sha[:7]}")
+        if got_app is None or int(got_app) != int(app_id):
+            _refuse(f"{required} on {head_sha[:7]} was reported by app {got_app!r}, not {app_id}")
+        if run.get("status") != "completed":
+            _refuse(f"{required} is {run.get('status')!r} on {head_sha[:7]}, not completed")
+        # Compared exactly, not case-folded: GitHub emits lowercase conclusions, so anything else is
+        # not something GitHub wrote.
+        if run.get("conclusion") != "success":
+            _refuse(f"{required} concluded {run.get('conclusion')!r} on {head_sha[:7]}")
     return f"{len(matching)}x success"
+
+
+def check_baseline_paths(old_paths, parent, area):
+    """The append-only baseline must come from the directory the diff actually touches.
+
+    An area can exist under both `TauCetiRoadmap/` and `Completed/`. A collector that probed a fixed
+    order would hand a `Completed/` update the ACTIVE log as its baseline, and a wholesale
+    replacement of the archived log would then look like a valid append. The paths the baseline was
+    read from are therefore recorded and checked here rather than trusted.
+    """
+    if not old_paths:
+        # No baseline at all is legitimate only for an area's first report; validate_update enforces
+        # the rest (a first report starts from a fresh preamble).
+        return True
+    for name in ALLOWED_BASENAMES:
+        got = old_paths.get(name)
+        want = f"{parent}/{area}/{name}"
+        if got != want:
+            _refuse(f"baseline for {name} was read from {got!r}, expected {want!r}")
+    return True
 
 
 def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_progress,
            new_progress_bytes, check_runs, allowed_user_ids, base_repo,
-           current_main_cursor=None, compare_status=None, behind_by=None, main_sha=""):
+           current_main_cursor=None, compare_status=None, behind_by=None, main_sha="",
+           old_paths=None):
     """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
@@ -278,6 +306,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
 
     check_up_to_date(compare_status, behind_by, head_sha, main_sha)
     seen, parent = check_files(changed_files, area)
+    check_baseline_paths(old_paths or {}, parent, area)
     check_modes(tree_entries, [f"{parent}/{area}/{name}" for name in ALLOWED_BASENAMES])
     section = check_content(
         area, old_status, new_status_bytes, old_progress, new_progress_bytes,
@@ -343,6 +372,7 @@ def main(argv=None):
             compare_status=data.get("compare_status"),
             behind_by=data.get("behind_by"),
             main_sha=data.get("main_sha") or "",
+            old_paths=data.get("old_paths") or {},
         )
     except Refused as exc:
         print(f"REFUSED: {exc}")

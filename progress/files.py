@@ -135,12 +135,13 @@ def parse_headers(text, marker):
 # ----- STATUS.md -------------------------------------------------------------------------------
 
 
-def render_status(area, to_sha, ts, body):
-    """A whole `STATUS.md`. `body` is the model's prose, without any heading of its own.
+def status_prefix(area, to_sha, ts):
+    """The exact bytes a `STATUS.md` must begin with, given its own header values.
 
-    The prose is deliberately preceded by a standing note that the file may be out of date: it is
-    updated asynchronously from the PRs it describes, so a reader must never take it as
-    authoritative about the current tip.
+    Shared by the renderer and the validator so there is one definition. Checking a PREFIX rather
+    than searching for substrings is what makes the framing canonical: with a substring check the
+    heading and the disclaimer could sit anywhere, including inside a fenced code block, so a file
+    could satisfy every check and still render as no report at all.
     """
     header = json.dumps(
         {"roadmap": _require_area(area, "roadmap"), "to_sha": _require_sha(to_sha, "to_sha"), "ts": ts},
@@ -153,8 +154,17 @@ def render_status(area, to_sha, ts, body):
         f"This file documents the status of the {area} roadmap up until "
         f"`{to_sha[:7]}` ({ts}). There may have been subsequent updates.\n\n"
         f"{STATUS_DISCLAIMER}\n\n"
-        f"{body.strip()}\n"
     )
+
+
+def render_status(area, to_sha, ts, body):
+    """A whole `STATUS.md`. `body` is the model's prose, without any heading of its own.
+
+    The prose is deliberately preceded by a standing note that the file may be out of date: it is
+    updated asynchronously from the PRs it describes, so a reader must never take it as
+    authoritative about the current tip.
+    """
+    return f"{status_prefix(area, to_sha, ts)}{body.strip()}\n"
 
 
 def parse_status(text):
@@ -298,48 +308,61 @@ def check_no_reserved_markers(body):
         raise FormatError(f"prose contains a reserved marker at offset {m.start()}: {m.group(0)!r}")
 
 
-def check_status_shape(text, area):
-    """`STATUS.md` must open with its header and carry the canonical heading and disclaimer.
+def check_status_shape(text, area, to_sha, ts):
+    """`STATUS.md` must begin with EXACTLY the canonical prefix for its own header values.
 
-    Anchoring the header at byte zero matters because `parse_headers` will find one anywhere; a file
-    that buried it under other content would parse yet read as something else entirely. The
-    disclaimer is required verbatim -- it is the only thing telling a reader the prose is unverified.
+    A prefix comparison, not a set of substring searches. The looser version could be satisfied with
+    the heading and the disclaimer buried anywhere in the file -- inside a fenced code block, say --
+    so a document that rendered as no report at all still passed. Returns the body that follows.
     """
-    if not text.startswith(f"<!--{STATUS_MARKER} "):
-        raise FormatError("STATUS.md must begin with its tauceti-status:v1 header")
-    if f"\n# Status: {area}\n" not in text:
-        raise FormatError(f"STATUS.md is missing its canonical '# Status: {area}' heading")
-    if STATUS_DISCLAIMER not in text:
+    expected = status_prefix(area, to_sha, ts)
+    if not text.startswith(expected):
+        # Say which part diverges; the whole prefix is too long to quote usefully.
+        for label, probe in (
+            ("its tauceti-status:v1 header", f"<!--{STATUS_MARKER} "),
+            (f"its canonical '# Status: {area}' heading", f"# Status: {area}\n"),
+            ("the standing 'not security-validated' disclaimer", STATUS_DISCLAIMER),
+        ):
+            if probe not in text:
+                raise FormatError(f"STATUS.md is missing {label}")
         raise FormatError(
-            "STATUS.md is missing the standing 'generated / not security-validated' disclaimer"
+            "STATUS.md does not begin with the canonical header, heading and disclaimer, in that "
+            "order and unmodified"
         )
-    return True
+    return text[len(expected):]
 
 
-def check_section_shape(added, area):
-    """The appended text must open with its section header and carry the canonical `##` heading."""
-    stripped = added.lstrip("\n")
-    if not stripped.startswith(f"<!--{PROGRESS_MARKER} ") and f"<!--{PROGRESS_MARKER} " not in added:
-        raise FormatError("the new section must carry a tauceti-progress:v1 header")
-    if not re.search(rf"^## {re.escape(area)}: ", added, re.M):
-        raise FormatError(f"the new section is missing its canonical '## {area}: ...' heading")
-    return True
+def check_section_shape(added, area, from_sha, to_sha):
+    """The appended text must open with its section header and canonical heading. Returns the body.
 
-
-def check_prose(name, text, scaffold):
-    """`text` must carry real prose, not just the furniture the renderer would emit on its own.
-
-    `scaffold` is what the corresponding renderer produces for an EMPTY body, so the difference is
-    exactly the model's contribution. Comparing against that rather than against a fixed length keeps
-    the check honest as the boilerplate changes, and it catches the degenerate case a structural gate
-    otherwise waves through: a file consisting of nothing but a well-formed header.
+    Anchored at the start of the addition, so nothing -- a code fence, stray prose -- can precede it.
+    The heading must also name the same window the header declares.
     """
-    written = len("".join(text.split()))
-    furniture = len("".join(scaffold.split()))
-    prose = written - furniture
+    pattern = re.compile(
+        rf"\A\n?<!--{re.escape(PROGRESS_MARKER)} \{{.*?\}}-->\n"
+        rf"## {re.escape(area)}: [^\n]*\(`{re.escape(from_sha[:7])}` to `{re.escape(to_sha[:7])}`\)\n\n",
+        re.S,
+    )
+    m = pattern.match(added)
+    if not m:
+        raise FormatError(
+            f"the new section must begin with its tauceti-progress:v1 header followed by a "
+            f"'## {area}: ... (`{from_sha[:7]}` to `{to_sha[:7]}`)' heading"
+        )
+    return added[m.end():]
+
+
+def check_prose(name, body):
+    """`body` -- the text AFTER the canonical framing -- must carry real prose.
+
+    Measuring the extracted body rather than "whole file minus a scaffold length" matters: a length
+    subtraction can be satisfied by padding the framing itself, which is exactly what a report
+    wrapped in a code fence did.
+    """
+    prose = len("".join(body.split()))
     if prose < MIN_PROSE_CHARS:
         raise FormatError(
-            f"{name} carries only {max(prose, 0)} characters of prose beyond its boilerplate; "
+            f"{name} carries only {prose} characters of prose after its heading; "
             f"at least {MIN_PROSE_CHARS} are required"
         )
     return prose
@@ -417,9 +440,9 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
     check_size("the new section", added, MAX_SECTION_BYTES)
 
     # Shape before content: both files must carry their canonical framing, so a generation cannot
-    # drop the heading or the disclaimer and still parse.
-    check_status_shape(new_status, area)
-    check_section_shape(added, area)
+    # drop the heading or the disclaimer and still parse. Each returns the body that follows it.
+    status_body = check_status_shape(new_status, area, status["to_sha"], status["ts"])
+    section_body = check_section_shape(added, area, section["from_sha"], section["to_sha"])
 
     # Remove the ONE legitimate header from each, then scan what is left with no exemptions.
     check_no_reserved_markers(strip_one_header(added, PROGRESS_MARKER))
@@ -432,10 +455,7 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
 
     # Last, so a more specific failure (an injected marker, an unadvanced snapshot) reports its own
     # reason rather than being masked by a complaint about length.
-    check_prose(
-        "the new section", added,
-        render_section(area, section["from_sha"], section["to_sha"], section["prs"], "", ""),
-    )
-    check_prose("STATUS.md", new_status, render_status(area, status["to_sha"], status["ts"] or "", ""))
+    check_prose("the new section", section_body)
+    check_prose("STATUS.md", status_body)
 
     return section

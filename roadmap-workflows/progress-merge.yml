@@ -66,16 +66,19 @@ jobs:
             check_suite)
               # The open progress pull request for this head, if any.
               #
-              # Restricted to pull requests whose HEAD LIVES IN THIS REPOSITORY. A fork can create a
-              # branch at the very same commit, and an unfiltered "first match wins" would let that
-              # fork's pull request shadow the legitimate one: the gate would refuse the fork (as it
-              # should) and the real report would never be considered at all.
-              pr="$(gh pr list --repo "$REPO" --state open \
-                     --json number,headRefName,headRefOid,headRepositoryOwner \
-                     --jq '[.[] | select(.headRefName | startswith("progress/"))
-                                | select(.headRefOid == env.HEAD_SHA)
-                                | select(.headRepositoryOwner.login == env.OWNER)
-                                | .number] | first // ""')"
+              # Asked of the commit directly, not of a list of recent pull requests. `gh pr list`
+              # returns only the newest 30 by default, so anyone could open 30 newer pull requests and
+              # push the legitimate report out of the window -- its build would complete and this
+              # trigger would never find it.
+              #
+              # The result is also restricted to a head IN THIS REPOSITORY. A fork can create a branch
+              # at the very same commit, and "first match wins" would let it shadow the real one: the
+              # gate would refuse the fork, correctly, and the report would never be considered.
+              pr="$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/pulls" \
+                     --jq '[.[] | select(.state == "open")
+                                | select(.head.ref | startswith("progress/"))
+                                | select(.head.repo.full_name == env.REPO)
+                                | .number] | first // ""' 2>/dev/null | head -n1)"
               echo "pr=$pr" >> "$GITHUB_OUTPUT" ;;
           esac
 
