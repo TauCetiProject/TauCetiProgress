@@ -16,9 +16,13 @@ allow. The checks run cheapest-and-most-decisive first, so a hostile pull reques
 provenance long before any content is parsed.
 
 What this gate proves is *shape*: which paths changed, that the cursor continues, that the append is
-byte-exact, that the head being merged is the head that was validated. What it cannot prove is that
-the prose is true. That limit is accepted deliberately and documented in README.md; the path
-restriction is what bounds the damage to two markdown files in one directory.
+byte-exact, and that the bytes validated are the bytes that will land (the head is pinned, and it
+already contains current `main`). What it cannot prove is that the prose is true. That limit is
+accepted deliberately and documented in README.md.
+
+The path restriction bounds the damage to two markdown files in one directory -- and to one Zulip
+message, since every merged section is announced automatically. That second sink is part of the blast
+radius and is named here so it is not overlooked.
 """
 
 import json
@@ -28,7 +32,7 @@ from . import files
 
 # Only these two basenames, and only inside ONE area directory.
 ALLOWED_BASENAMES = ("STATUS.md", "PROGRESS.md")
-BRANCH_RE = re.compile(r"\Aprogress/[0-9a-f]{7}-[0-9a-f]{7}/([A-Za-z0-9]+)\Z")
+BRANCH_RE = re.compile(r"\Aprogress/([0-9a-f]{7})-([0-9a-f]{7})/([A-Za-z0-9]+)\Z")
 # Group 1 is the parent (an area lives under one or the other, never both), group 2 the area name,
 # group 3 the basename. The parent is captured because an area name can legitimately exist under
 # BOTH parents -- `Completed/` is where a finished roadmap is archived -- so matching on the area and
@@ -39,6 +43,17 @@ PATH_RE = re.compile(r"\A(TauCetiRoadmap|Completed)/([A-Za-z0-9]+)/(STATUS\.md|P
 # an executable. A symlink named STATUS.md pointing at something else is the classic way to make a
 # path-restricted gate write outside its restriction, so modes are checked, not assumed.
 REGULAR_MODES = {"100644"}
+
+# The App permitted to report the required check. `build` in TauCetiRoadmap is a GitHub Actions
+# check-run (app id 15368); any repository WRITER can POST a commit status or create a check-run
+# under an arbitrary name, so an unauthenticated "something called build says success" is not
+# evidence. Legacy commit statuses are not accepted here at all -- the roadmap repo publishes none.
+GITHUB_ACTIONS_APP_ID = 15368
+
+# A considered refusal is exit 2, distinct from both an allow (0) and a crash (anything else). The
+# workflow relies on that distinction: a refusal is a normal outcome that leaves the pull request for
+# a human, while an unexpected failure must go red rather than reading as a quiet "did not merge".
+EX_REFUSED = 2
 
 
 class Refused(Exception):
@@ -81,7 +96,12 @@ def check_provenance(pr, allowed_user_ids, base_repo, base_branch="main"):
     m = BRANCH_RE.match(branch)
     if not m:
         _refuse(f"head branch {branch!r} is not a progress branch")
-    return {"area": m.group(1), "head_sha": head.get("sha") or ""}
+    return {
+        "area": m.group(3),
+        "from_prefix": m.group(1),
+        "to_prefix": m.group(2),
+        "head_sha": head.get("sha") or "",
+    }
 
 
 def check_files(changed_files, area):
@@ -181,15 +201,45 @@ def check_content(area, old_status, new_status_bytes, old_progress, new_progress
         _refuse(str(exc))
 
 
-def check_build(check_runs, head_sha, required="build"):
-    """The `build` check must be green on the exact head being merged.
+def check_up_to_date(compare_status, behind_by, head_sha, main_sha):
+    """The head must already contain current `main`.
 
-    The App bypasses required status checks, so this is asserted rather than relied upon -- the same
-    reasoning as `decide_merge` in TauCetiReview, which refuses when `ci_build` is not success.
+    This is what makes the merge safe to reason about. If the head is BEHIND main, merging it is a
+    three-way merge, and the resulting bytes are a combination of the head and whatever landed on
+    main since -- not the bytes that were validated. Requiring `ahead` with `behind_by == 0` means
+    the head's tree IS the post-merge tree for the paths in question, so validating the head's blobs
+    validates exactly what will land.
 
-    EVERY entry named `build` must pass, not merely the first one found. A head can carry both a
-    check-run and a commit status under that name (the collector appends check-runs, then statuses),
-    so returning on the first match meant a success listed ahead of a failure hid it entirely.
+    A head that has fallen behind is not an error; the worker simply rebuilds the report against the
+    newer main. Refusing is the correct outcome, not a failure.
+    """
+    if behind_by is None or compare_status is None:
+        _refuse("could not determine whether the head contains current main")
+    if int(behind_by) != 0 or compare_status != "ahead":
+        _refuse(
+            f"head {head_sha[:7]} is {compare_status} main {main_sha[:7]} and is behind by "
+            f"{behind_by}; rebuild the report on current main so the merged bytes are the "
+            f"validated bytes"
+        )
+    return True
+
+
+def check_build(check_runs, head_sha, required="build", app_id=GITHUB_ACTIONS_APP_ID):
+    """The `build` check must be a completed success, from the expected App, on the exact head.
+
+    The merging App bypasses required status checks, so this is asserted rather than relied upon --
+    the same reasoning as `decide_merge` in TauCetiReview.
+
+    Three things this is strict about, each a way the looser version could be fooled:
+
+    * **Provenance.** Any repository writer can create a check-run or POST a commit status under any
+      name, so a result is only evidence if it came from the App that actually runs CI. Legacy commit
+      statuses are refused outright -- the roadmap repo publishes none, and accepting them would open
+      exactly that forgery route.
+    * **Literal success.** `neutral` and `skipped` count as passing for ordinary branch protection,
+      which means a workflow that skipped the build entirely would have satisfied this.
+    * **No contradictions.** Every matching entry must agree; a success listed ahead of a failure
+      used to win because the first match returned.
     """
     matching = [
         r for r in check_runs
@@ -197,18 +247,24 @@ def check_build(check_runs, head_sha, required="build"):
     ]
     if not matching:
         _refuse(f"{required} has not reported on {head_sha[:7]}")
-    seen = []
     for run in matching:
-        concl = (run.get("conclusion") or "").upper()
-        if concl not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+        source = run.get("source")
+        if source is not None and source != "check_run":
+            _refuse(f"{required} on {head_sha[:7]} came from a {source}, not a check run")
+        got_app = run.get("app_id")
+        if got_app is not None and int(got_app) != int(app_id):
+            _refuse(f"{required} on {head_sha[:7]} was reported by app {got_app}, not {app_id}")
+        if (run.get("status") or "completed") != "completed":
+            _refuse(f"{required} is {run.get('status')} on {head_sha[:7]}, not completed")
+        concl = (run.get("conclusion") or "").lower()
+        if concl != "success":
             _refuse(f"{required} concluded {concl or 'pending'} on {head_sha[:7]}")
-        seen.append(concl)
-    return ",".join(seen)
+    return f"{len(matching)}x success"
 
 
 def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_progress,
            new_progress_bytes, check_runs, allowed_user_ids, base_repo,
-           current_main_cursor=None):
+           current_main_cursor=None, compare_status=None, behind_by=None, main_sha=""):
     """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
@@ -220,6 +276,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     if not head_sha:
         _refuse("pull request has no head sha")
 
+    check_up_to_date(compare_status, behind_by, head_sha, main_sha)
     seen, parent = check_files(changed_files, area)
     check_modes(tree_entries, [f"{parent}/{area}/{name}" for name in ALLOWED_BASENAMES])
     section = check_content(
@@ -227,7 +284,24 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
         expect_from_sha=current_main_cursor,
     )
     check_build(check_runs, head_sha)
-    return {"area": area, "head_sha": head_sha, "section": section}
+
+    # The branch name encodes the window it reports, and `apply` derives it from the same plan that
+    # produced the header. Requiring them to agree binds the branch to its content, so a branch
+    # cannot be reused to carry a different window's update. It does not authenticate WHO produced
+    # the head -- any repository writer can push to an open branch, and `pr.user.id` still names the
+    # opener -- so restricting who may push `progress/*` remains a repository-level control; see
+    # roadmap-workflows/README.md.
+    if not section["from_sha"].startswith(prov["from_prefix"]):
+        _refuse(
+            f"branch says the window starts at {prov['from_prefix']} but the section says "
+            f"{section['from_sha'][:7]}"
+        )
+    if not section["to_sha"].startswith(prov["to_prefix"]):
+        _refuse(
+            f"branch says the window ends at {prov['to_prefix']} but the section says "
+            f"{section['to_sha'][:7]}"
+        )
+    return {"area": area, "head_sha": head_sha, "main_sha": main_sha, "section": section}
 
 
 def summary(result):
@@ -266,9 +340,12 @@ def main(argv=None):
             allowed_user_ids=data["allowed_user_ids"],
             base_repo=data["base_repo"],
             current_main_cursor=data.get("current_main_cursor"),
+            compare_status=data.get("compare_status"),
+            behind_by=data.get("behind_by"),
+            main_sha=data.get("main_sha") or "",
         )
     except Refused as exc:
         print(f"REFUSED: {exc}")
-        return 1
+        return EX_REFUSED
     print(f"ALLOWED: {summary(result)}")
     return 0

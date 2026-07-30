@@ -87,7 +87,11 @@ def make_content(from_sha=FROM, to_sha=TO, prs=(1, 2, 3), area=AREA, prose=None)
 CHECKS_OK = [{"name": "build", "head_sha": HEAD, "conclusion": "success"}]
 
 
-def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=None, ids=None):
+MAIN = "9a9a9a9" + "0" * 33
+
+
+def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=None, ids=None,
+         compare_status="ahead", behind_by=0):
     old_status, new_status, old_progress, new_progress = content or make_content()
     return gate.decide(
         pr=pr or make_pr(),
@@ -101,6 +105,9 @@ def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=Non
         allowed_user_ids=ids if ids is not None else OK_IDS,
         base_repo=REPO,
         current_main_cursor=cursor,
+        compare_status=compare_status,
+        behind_by=behind_by,
+        main_sha=MAIN,
     )
 
 
@@ -152,6 +159,17 @@ def test_refuses_a_branch_whose_area_is_not_alphanumeric():
     pr = make_pr(head={"ref": f"progress/{FROM[:7]}-{TO[:7]}/../../etc", "sha": HEAD,
                        "repo": {"full_name": REPO}})
     refuses(lambda: call(pr=pr), "not a progress branch")
+
+
+def test_refuses_a_head_behind_main():
+    """If the head is behind main, merging is a three-way merge and the resulting bytes are NOT the
+    validated bytes. Refusing makes the worker rebuild on current main."""
+    refuses(lambda: call(compare_status="diverged", behind_by=3), "is behind by 3")
+    refuses(lambda: call(compare_status="behind", behind_by=1), "is behind by 1")
+
+
+def test_refuses_an_unknown_comparison():
+    refuses(lambda: call(compare_status=None, behind_by=None), "could not determine")
 
 
 # ----- diff shape ------------------------------------------------------------------------------
@@ -297,6 +315,7 @@ def test_refuses_invalid_utf8():
             old_status=old_status, new_status_bytes=new_status.encode(),
             old_progress=old_progress, new_progress_bytes=bad,
             check_runs=CHECKS_OK, allowed_user_ids=OK_IDS, base_repo=REPO,
+            compare_status="ahead", behind_by=0, main_sha=MAIN,
         )
     except (Refused, files.FormatError) as exc:
         assert "UTF-8" in str(exc), str(exc)
@@ -320,7 +339,7 @@ def test_refuses_bare_headers_with_no_prose():
     bare_section = ('\n<!--tauceti-progress:v1 {"roadmap":"%s","from_sha":"%s","to_sha":"%s",'
                     '"prs":[1]}-->' % (AREA, FROM, TO))
     refuses(lambda: call(content=(None, bare_status, old_progress, old_progress + bare_section)),
-            "characters of prose")
+            "canonical")
 
 
 def test_refuses_a_stub_section_under_a_real_status():
@@ -329,6 +348,45 @@ def test_refuses_a_stub_section_under_a_real_status():
     status = files.render_status(AREA, TO, "t", PROSE)
     refuses(lambda: call(content=(None, status, old_progress, old_progress + stub)),
             "characters of prose")
+
+
+def test_refuses_a_status_missing_the_disclaimer():
+    """The disclaimer is the only thing telling a reader the prose is machine-written and
+    unverified, so a generation that drops it must not merge as ordinary roadmap content."""
+    old_progress = files.new_progress_file(AREA)
+    new_progress = old_progress + files.render_section(AREA, FROM, TO, [1], "w", PROSE)
+    good = files.render_status(AREA, TO, "t", PROSE)
+    stripped = good.replace(files.STATUS_DISCLAIMER, "")
+    refuses(lambda: call(content=(None, stripped, old_progress, new_progress)), "disclaimer")
+
+
+def test_refuses_a_status_whose_header_is_not_first():
+    """parse_headers finds a header anywhere; a file that buried it under other content would parse
+    yet read as something else."""
+    old_progress = files.new_progress_file(AREA)
+    new_progress = old_progress + files.render_section(AREA, FROM, TO, [1], "w", PROSE)
+    good = files.render_status(AREA, TO, "t", PROSE)
+    moved = "Preamble a reader sees first.\n\n" + good
+    refuses(lambda: call(content=(None, moved, old_progress, new_progress)), "must begin with")
+
+
+def test_refuses_a_section_without_its_heading():
+    old_progress = files.new_progress_file(AREA)
+    section = files.render_section(AREA, FROM, TO, [1], "w", PROSE)
+    headless = section.replace(f"## {AREA}: ", "Some other line ")
+    status = files.render_status(AREA, TO, "t", PROSE)
+    refuses(lambda: call(content=(None, status, old_progress, old_progress + headless)), "canonical")
+
+
+def test_refuses_junk_pr_numbers():
+    """`prs` is what stops a PR being reported twice, so it is validated, not coerced. int() used to
+    accept booleans, floats and numeric strings."""
+    old_progress = files.new_progress_file(AREA)
+    status = files.render_status(AREA, TO, "t", PROSE)
+    for junk in ('["1"]', "[true]", "[1.5]", "[-3]", "[]", "[1,1]"):
+        bad = ('\n<!--tauceti-progress:v1 {"roadmap":"%s","from_sha":"%s","to_sha":"%s","prs":%s}-->\n'
+               '## %s: w\n\n%s\n' % (AREA, FROM, TO, junk, AREA, PROSE))
+        refuses(lambda b=bad: call(content=(None, status, old_progress, old_progress + b)), "prs")
 
 
 def test_refuses_unknown_header_fields():
@@ -346,7 +404,43 @@ def test_refuses_unknown_header_fields():
 
 def test_refuses_a_failing_build():
     checks = [{"name": "build", "head_sha": HEAD, "conclusion": "failure"}]
-    refuses(lambda: call(checks=checks), "concluded FAILURE")
+    refuses(lambda: call(checks=checks), "concluded failure")
+
+
+def test_refuses_a_build_from_another_app():
+    """Any repository WRITER can create a check-run or POST a commit status under any name, so a
+    result is evidence only if it came from the App that actually runs CI."""
+    checks = [{"name": "build", "head_sha": HEAD, "conclusion": "success", "app_id": 99999}]
+    refuses(lambda: call(checks=checks), "reported by app")
+
+
+def test_refuses_a_legacy_commit_status():
+    checks = [{"name": "build", "head_sha": HEAD, "conclusion": "success", "source": "status"}]
+    refuses(lambda: call(checks=checks), "not a check run")
+
+
+def test_refuses_a_skipped_or_neutral_build():
+    """Both count as passing for ordinary branch protection, so a workflow that skipped the build
+    entirely would otherwise have satisfied this."""
+    for concl in ("skipped", "neutral"):
+        refuses(lambda c=concl: call(checks=[{"name": "build", "head_sha": HEAD, "conclusion": c}]),
+                "concluded " + concl)
+
+
+def test_refuses_an_incomplete_build():
+    checks = [{"name": "build", "head_sha": HEAD, "conclusion": None, "status": "in_progress"}]
+    refuses(lambda: call(checks=checks), "in_progress")
+
+
+def test_refuses_a_branch_whose_window_disagrees_with_the_section():
+    """The branch encodes the window it reports; requiring agreement stops a branch being reused to
+    carry a different window's update."""
+    other = make_pr(head={"ref": f"progress/aaaaaaa-{TO[:7]}/{AREA}", "sha": HEAD,
+                          "repo": {"full_name": REPO}})
+    refuses(lambda: call(pr=other), "branch says the window starts at")
+    other2 = make_pr(head={"ref": f"progress/{FROM[:7]}-bbbbbbb/{AREA}", "sha": HEAD,
+                           "repo": {"full_name": REPO}})
+    refuses(lambda: call(pr=other2), "branch says the window ends at")
 
 
 def test_refuses_a_pending_build():
@@ -365,7 +459,7 @@ def test_refuses_a_failing_build_listed_after_a_success():
         {"name": "build", "head_sha": HEAD, "conclusion": "success"},
         {"name": "build", "head_sha": HEAD, "conclusion": "failure"},
     ]
-    refuses(lambda: call(checks=checks), "concluded FAILURE")
+    refuses(lambda: call(checks=checks), "concluded failure")
 
 
 def test_allows_when_every_build_entry_is_green():

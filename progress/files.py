@@ -44,6 +44,15 @@ MAX_PROGRESS_BYTES = 4 * 1024 * 1024
 # catches output that is empty or a stub, never a terse but genuine report.
 MIN_PROSE_CHARS = 200
 
+# The standing disclaimer every STATUS.md must carry. It is the only thing telling a reader that the
+# prose below is machine-written and unverified, so the gate REQUIRES it verbatim: a generation that
+# dropped it would read as reviewed roadmap content. Split into lines so wrapping cannot change it
+# without changing this constant too.
+STATUS_DISCLAIMER = (
+    "It is generated, and its prose is not security-validated; see\n"
+    "https://github.com/TauCetiProject/TauCetiProgress for what that means."
+)
+
 # Header schemas, closed rather than open. Unknown keys are refused so a future reader cannot be
 # steered by a field this version silently ignored.
 STATUS_KEYS = {"roadmap", "to_sha", "ts"}
@@ -75,6 +84,25 @@ def _require_keys(obj, allowed, marker):
     if missing:
         raise FormatError(f"{marker} header is missing field(s): {', '.join(missing)}")
     return obj
+
+
+def _require_pr_numbers(value):
+    """`prs` must be a list of positive integers, verbatim.
+
+    `int()` coercion accepted floats, bools and numeric strings, so a header could record `[true]`
+    or `["1"]` and still parse. The list is what stops a pull request being reported twice, so it is
+    validated rather than coerced.
+    """
+    if not isinstance(value, list) or not value:
+        raise FormatError(f"prs must be a non-empty list, got {value!r}")
+    out = []
+    for n in value:
+        if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+            raise FormatError(f"prs must contain positive integers, got {n!r}")
+        out.append(n)
+    if len(set(out)) != len(out):
+        raise FormatError(f"prs contains duplicates: {value!r}")
+    return out
 
 
 def _require_area(value, field):
@@ -124,8 +152,7 @@ def render_status(area, to_sha, ts, body):
         f"# Status: {area}\n\n"
         f"This file documents the status of the {area} roadmap up until "
         f"`{to_sha[:7]}` ({ts}). There may have been subsequent updates.\n\n"
-        f"It is generated, and its prose is not security-validated; see\n"
-        f"https://github.com/TauCetiProject/TauCetiProgress for what that means.\n\n"
+        f"{STATUS_DISCLAIMER}\n\n"
         f"{body.strip()}\n"
     )
 
@@ -198,7 +225,7 @@ def parse_sections(text):
                 "roadmap": _require_area(h.get("roadmap"), "roadmap"),
                 "from_sha": _require_sha(h.get("from_sha"), "from_sha"),
                 "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
-                "prs": [int(n) for n in h.get("prs") or []],
+                "prs": _require_pr_numbers(h.get("prs")),
             }
         )
     return out
@@ -243,18 +270,60 @@ def check_append_only(old_text, new_text):
     return new_text[len(old_text):]
 
 
-def check_no_reserved_markers(body, allow=()):
-    """Refuse model prose that contains any `tauceti-*:vN` marker.
+def strip_one_header(text, marker):
+    """Remove exactly ONE well-formed `marker` header from `text`, or raise.
+
+    Used before scanning prose for reserved markers. The previous approach exempted anything whose
+    prefix matched an allowed marker name, which let prose carrying `<!--tauceti-progress:v1 junk-->`
+    through untouched -- a string that is not the parsed header at all. Removing the one canonical
+    span and then scanning the remainder with NO exemptions is exact.
+    """
+    spans = [m.span() for m in _HEADER_RE.finditer(text)
+             if _HEADER_RE.match(text, m.start()).group(1) == marker]
+    if len(spans) != 1:
+        raise FormatError(f"expected exactly one {marker} header, found {len(spans)}")
+    start, end = spans[0]
+    return text[:start] + text[end:]
+
+
+def check_no_reserved_markers(body):
+    """Refuse prose that contains any `tauceti-*:vN` marker.
 
     A model that emits one could forge a second status header, a fake scoreboard, or a target
-    marker, and every later parse of the file would then see something the generator never
-    intended. `allow` exempts the headers this update legitimately introduces.
+    marker, and every later parse of the file would then see something the generator never intended.
+    There is no exemption list: the caller removes the one legitimate header first.
     """
-    for m in RESERVED_MARKER_RE.finditer(body):
-        start = m.start()
-        if any(body[start:].startswith(f"<!--{name}") for name in allow):
-            continue
-        raise FormatError(f"model prose contains a reserved marker at offset {start}: {m.group(0)!r}")
+    m = RESERVED_MARKER_RE.search(body)
+    if m:
+        raise FormatError(f"prose contains a reserved marker at offset {m.start()}: {m.group(0)!r}")
+
+
+def check_status_shape(text, area):
+    """`STATUS.md` must open with its header and carry the canonical heading and disclaimer.
+
+    Anchoring the header at byte zero matters because `parse_headers` will find one anywhere; a file
+    that buried it under other content would parse yet read as something else entirely. The
+    disclaimer is required verbatim -- it is the only thing telling a reader the prose is unverified.
+    """
+    if not text.startswith(f"<!--{STATUS_MARKER} "):
+        raise FormatError("STATUS.md must begin with its tauceti-status:v1 header")
+    if f"\n# Status: {area}\n" not in text:
+        raise FormatError(f"STATUS.md is missing its canonical '# Status: {area}' heading")
+    if STATUS_DISCLAIMER not in text:
+        raise FormatError(
+            "STATUS.md is missing the standing 'generated / not security-validated' disclaimer"
+        )
+    return True
+
+
+def check_section_shape(added, area):
+    """The appended text must open with its section header and carry the canonical `##` heading."""
+    stripped = added.lstrip("\n")
+    if not stripped.startswith(f"<!--{PROGRESS_MARKER} ") and f"<!--{PROGRESS_MARKER} " not in added:
+        raise FormatError("the new section must carry a tauceti-progress:v1 header")
+    if not re.search(rf"^## {re.escape(area)}: ", added, re.M):
+        raise FormatError(f"the new section is missing its canonical '## {area}: ...' heading")
+    return True
 
 
 def check_prose(name, text, scaffold):
@@ -346,9 +415,15 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
         raise FormatError("new section records no PRs")
 
     check_size("the new section", added, MAX_SECTION_BYTES)
-    check_no_reserved_markers(added, allow=(PROGRESS_MARKER,))
-    # The status file is rewritten whole, so its one legitimate header is the status marker.
-    check_no_reserved_markers(new_status, allow=(STATUS_MARKER,))
+
+    # Shape before content: both files must carry their canonical framing, so a generation cannot
+    # drop the heading or the disclaimer and still parse.
+    check_status_shape(new_status, area)
+    check_section_shape(added, area)
+
+    # Remove the ONE legitimate header from each, then scan what is left with no exemptions.
+    check_no_reserved_markers(strip_one_header(added, PROGRESS_MARKER))
+    check_no_reserved_markers(strip_one_header(new_status, STATUS_MARKER))
 
     if old_status is not None:
         old = parse_status(old_status)

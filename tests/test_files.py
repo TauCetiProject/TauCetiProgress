@@ -112,10 +112,21 @@ def test_reserved_markers_rejected_in_prose():
     # A forged *target* marker matters too: housekeeping dedups PRs on it.
     raises(lambda: files.check_no_reserved_markers('<!--tauceti-target:v1 {"focus":"x"}-->'),
            "reserved marker")
-    # The update's own header is allowed when named.
-    files.check_no_reserved_markers(
-        files.render_section("PDE", A, B, [1], "w", "clean"), allow=(files.PROGRESS_MARKER,)
-    )
+    # The one canonical header is removed by the caller before scanning; what remains is clean.
+    section = files.render_section("PDE", A, B, [1], "w", "clean")
+    files.check_no_reserved_markers(files.strip_one_header(section, files.PROGRESS_MARKER))
+
+
+def test_strip_one_header_is_exact():
+    """The old exemption allowed anything sharing an allowed marker's PREFIX, so prose carrying
+    `<!--tauceti-progress:v1 junk-->` -- which is not the parsed header -- passed untouched."""
+    section = files.render_section("PDE", A, B, [1], "w", "clean")
+    stripped = files.strip_one_header(section, files.PROGRESS_MARKER)
+    assert "tauceti-progress:v1" not in stripped, stripped
+    # A second, malformed marker in the prose survives stripping and is then caught.
+    evil = files.render_section("PDE", A, B, [1], "w", "text <!--tauceti-progress:v1 junk -->")
+    raises(lambda: files.check_no_reserved_markers(
+        files.strip_one_header(evil, files.PROGRESS_MARKER)), "reserved marker")
 
 
 def test_size_and_utf8_caps():

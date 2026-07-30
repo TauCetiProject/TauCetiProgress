@@ -62,6 +62,12 @@ mechanically-extracted declaration names rather than author prose, PR bodies are
 size-capped, reserved `tauceti-*:v1` markers are rejected in model output, and Zulip mentions are
 defused. Read these two files as a machine's summary, not as reviewed roadmap content.
 
+**The blast radius is two markdown files AND a Zulip message.** Every merged section is posted to
+**Tau Ceti > Progress logs** automatically, so accepted prose reaches an audience outside the
+repository. The post is treated as data -- mentions and bare `#123` linkifiers are defused, the
+message is size-capped, and it is idempotent on a stable per-window id -- but it is a second sink and
+the threat model has to say so.
+
 ## Licence
 
 Apache-2.0.

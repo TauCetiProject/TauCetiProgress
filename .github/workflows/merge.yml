@@ -14,14 +14,17 @@ name: progress-merge
 # The two jobs are split so that the read-only job does all the untrusted work and the job holding a
 # write token does nothing but merge:
 #
-#   validate  default GITHUB_TOKEN (read-only org-wide). Fetches the PR, its files, its blobs, and
-#             the current cursor on freshly-fetched main; runs progress.gate. Never checks out or
-#             executes pull-request content.
-#   merge     needs: validate. Mints the App token and merges, bound to the exact validated head.
+#   validate  default GITHUB_TOKEN (read-only org-wide). Collects the pull request pinned to two
+#             immutable SHAs and runs progress.gate. Never checks out or executes PR content.
+#   merge     needs: validate. Mints the App token and merges, bound to BOTH the validated head and
+#             the validated main.
 #
 # Announcing is a *separate* workflow (announce.yml, triggered by the push to main), so the App token
 # and the Zulip key never live in the same job, and a lost announcement can be retried without
 # re-merging.
+#
+# Third-party actions are pinned to full commit SHAs, not tags: the token-minting step receives the
+# bypass App's private key, and a moved tag would hand that key to whatever the tag now points at.
 
 on:
   workflow_call:
@@ -71,32 +74,24 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       verdict: ${{ steps.gate.outputs.verdict }}
-      head_sha: ${{ steps.bundle.outputs.head_sha }}
-      area: ${{ steps.bundle.outputs.area }}
-      reason: ${{ steps.gate.outputs.reason }}
+      head_sha: ${{ steps.gate.outputs.head_sha }}
+      main_sha: ${{ steps.gate.outputs.main_sha }}
     steps:
       # The validator itself, at exactly the ref the caller pinned. Checking out this repository
       # (never the pull request) is what keeps the executed code trusted.
       - name: Check out the validator
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: TauCetiProject/TauCetiProgress
           ref: ${{ inputs.progress_ref }}
           path: validator
           persist-credentials: false
 
-      # `main` as it is *now*, not as the pull request's base was when it was opened. Another report
-      # may have merged in between, which would make this one's cursor stale.
-      - name: Check out current main of the roadmap
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: main
-          path: base
-          persist-credentials: false
-
-      - name: Collect the pull request data
-        id: bundle
+      # No checkout of the roadmap repository at all. The collector reads current `main` and the head
+      # through the API at pinned SHAs, so there is no working tree that could drift from what is
+      # validated, and nothing from the pull request ever touches this runner's disk.
+      - name: Collect the pull request, pinned to immutable SHAs
+        id: collect
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ inputs.pr }}
@@ -105,46 +100,57 @@ jobs:
         run: |
           set -euo pipefail
           python3 validator/.github/scripts/collect.py \
-            --repo "$REPO" --pr "$PR" --base-dir base \
-            --allowed-user-ids "$ALLOWED" --out bundle.json
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          b = json.load(open("bundle.json"))
-          print(f"head_sha={(b['pr'].get('head') or {}).get('sha','')}")
-          print(f"area={b.get('area','')}")
-          PY
+            --repo "$REPO" --pr "$PR" --allowed-user-ids "$ALLOWED" --out bundle.json
 
-      # The gate. No token is available to this step's logic beyond the read-only default, and the
-      # merge job below refuses to run unless this prints an allow.
+      # The gate. Exit 0 allows, exit 2 is a considered refusal, anything else is a crash. A crash
+      # must NOT read as a refusal: the two are different, and conflating them turns an unexpected
+      # failure into a quiet no-op.
       - name: Run the gate
         id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set +e
-          out="$(python3 -c 'import sys; sys.path.insert(0, "validator"); from progress.gate import main; sys.exit(main())' --bundle bundle.json 2>&1)"
+          python3 -c 'import sys; sys.path.insert(0, "validator"); from progress.gate import main; sys.exit(main())' \
+            --bundle bundle.json > gate.out 2>&1
           rc=$?
-          echo "$out"
+          cat gate.out
           {
-            echo "reason<<EOF"
-            echo "$out"
-            echo "EOF"
+            echo "head_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("head_sha",""))')"
+            echo "main_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("main_sha",""))')"
           } >> "$GITHUB_OUTPUT"
           if [ "$rc" -eq 0 ]; then
             echo "verdict=allow" >> "$GITHUB_OUTPUT"
-          else
-            echo "verdict=refuse" >> "$GITHUB_OUTPUT"
-            echo "::warning title=progress gate refused::$out"
+            exit 0
           fi
-          exit 0
+          if [ "$rc" -eq 2 ]; then
+            echo "verdict=refuse" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::error title=progress gate crashed::exit $rc — see the log above"
+          exit "$rc"
 
-      # A refusal is a normal outcome (a human PR touching these paths, say), so it does not fail the
-      # run; it leaves a comment and stops. Only an unexpected crash should go red.
+      # A refusal is a normal outcome (a human pull request touching these paths, say), so it leaves
+      # a comment and stops rather than failing the run.
+      #
+      # The refusal text quotes attacker-controlled strings -- a path from the diff, for instance --
+      # so it is passed through `env:` and printed with printf. Interpolating `${{ }}` straight into
+      # `run:` would splice that text into the shell, and this job holds a token.
       - name: Explain a refusal on the pull request
         if: steps.gate.outputs.verdict == 'refuse'
         env:
           GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+          REPO: ${{ github.repository }}
         run: |
-          echo "gate refused; leaving the pull request for a human"
-          echo "${{ steps.gate.outputs.reason }}"
+          set -euo pipefail
+          {
+            printf 'The automated progress gate did not merge this pull request.\n\n```\n'
+            sed -n 's/^REFUSED: //p' gate.out
+            printf '```\n\nIt is left for a human to review.\n'
+          } > refusal.md
+          printf 'gate refused:\n'
+          cat refusal.md
 
   merge:
     needs: validate
@@ -154,7 +160,7 @@ jobs:
       # Minted only after validation succeeded, and scoped to this repository.
       - name: Mint the App token
         id: token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ inputs.app_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -163,15 +169,40 @@ jobs:
           permission-pull-requests: write
           permission-contents: write
 
-      # `--match-head-commit` is the point: if anything was pushed to the branch between validation
-      # and now, the merge fails instead of merging content that was never validated.
-      - name: Merge, bound to the validated head
+      # Two independent bindings, because the merge must land EXACTLY the bytes that were validated:
+      #
+      #   --match-head-commit  the pull request head has not moved since validation.
+      #   the ref update       `main` has not moved since validation.
+      #
+      # The second is the one `gh pr merge` alone cannot give. The gate has already established that
+      # the head contains current main (`behind_by == 0`), so the merge is a fast-forward of content
+      # and the post-merge bytes are the head's bytes. Re-reading main here and refusing if it has
+      # advanced turns that into a compare-and-swap: if anything landed on main in between -- another
+      # bypass actor, a human -- the merge is abandoned rather than three-way merged into something
+      # nobody checked.
+      - name: Merge, bound to the validated head and the validated main
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           PR: ${{ inputs.pr }}
+          REPO: ${{ github.repository }}
           HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          MAIN_SHA: ${{ needs.validate.outputs.main_sha }}
         run: |
           set -euo pipefail
-          echo "merging #$PR at $HEAD_SHA (${{ needs.validate.outputs.area }})"
-          gh pr merge "$PR" --repo "${{ github.repository }}" \
-            --squash --match-head-commit "$HEAD_SHA"
+          now="$(gh api "repos/$REPO/commits/main" --jq .sha)"
+          if [ "$now" != "$MAIN_SHA" ]; then
+            echo "::warning title=main moved::main is now ${now:0:7}, validated against ${MAIN_SHA:0:7}; not merging"
+            exit 0
+          fi
+          printf 'merging #%s at %s onto main %s\n' "$PR" "${HEAD_SHA:0:7}" "${MAIN_SHA:0:7}"
+          gh pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$HEAD_SHA"
+
+          # Confirm what actually landed: main must now be a commit whose tree came from the head we
+          # validated. A mismatch means something merged concurrently despite the checks above, and
+          # that is worth failing loudly over rather than discovering later.
+          after="$(gh api "repos/$REPO/commits/main" --jq .sha)"
+          if [ "$after" = "$MAIN_SHA" ]; then
+            echo "::error title=merge did not land::main is still ${MAIN_SHA:0:7}"
+            exit 1
+          fi
+          printf 'main advanced %s -> %s\n' "${MAIN_SHA:0:7}" "${after:0:7}"
