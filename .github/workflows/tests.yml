@@ -1,0 +1,23 @@
+name: tests
+
+# Byte-compile everything and run the plain-script test suites, matching TauCetiReview's minimal CI.
+# There is no test framework and no PyPI dependency: each tests/test_*.py exits non-zero on failure.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run the suites
+        run: ./tests/run

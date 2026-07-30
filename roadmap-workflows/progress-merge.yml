@@ -1,0 +1,89 @@
+name: progress-merge
+
+# Auto-merge generated progress reports (STATUS.md / PROGRESS.md) in this repository.
+#
+# All the validation, and the merge itself, live in a SHA-pinned reusable workflow in
+# TauCetiProgress -- the same discipline TauCeti uses for TauCetiReview, and for the same reason: an
+# unpinned `@main` would let an upstream change alter what is allowed to merge here without review.
+# The pin must be bumped deliberately, in step with the `progress_ref` input and with the version the
+# worker runs (see TauCetiProgress' README).
+#
+# `pull_request_target` rather than `pull_request` so the App secrets are available for the events we
+# care about. That is safe here only because the called workflow never checks out or executes pull
+# request content: it reads the PR through the API and merges. Note that `opened` fires for drafts
+# too, hence the explicit draft guard below as well as inside the called workflow.
+#
+# Anyone may open a pull request against this repository. A pull request that fails any check is
+# simply left alone for a human to review, which is the normal path for roadmap contributions.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  # A progress PR usually opens before its `build` check finishes, so re-check when a check completes.
+  check_suite:
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to consider.
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: progress-merge
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      pr: ${{ steps.pick.outputs.pr }}
+    steps:
+      - name: Decide which pull request to consider
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request_target)
+              if [ "${{ github.event.pull_request.draft }}" = "true" ]; then
+                echo "draft pull request; nothing to do"; echo "pr=" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              echo "pr=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT" ;;
+            workflow_dispatch)
+              echo "pr=${{ inputs.pr }}" >> "$GITHUB_OUTPUT" ;;
+            check_suite)
+              # Find the open progress pull request for this head, if any.
+              pr="$(gh pr list --repo "${{ github.repository }}" --state open \
+                     --json number,headRefName,headRefOid \
+                     --jq '[.[] | select(.headRefName | startswith("progress/"))
+                                | select(.headRefOid == "${{ github.event.check_suite.head_sha }}")
+                                | .number][0] // ""')"
+              echo "pr=$pr" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  gate:
+    needs: resolve
+    if: needs.resolve.outputs.pr != ''
+    # Pinned to a full TauCetiProgress SHA. `progress_ref` must be the SAME SHA: it selects the
+    # validator code checked out inside, and a mismatch would validate with different rules than the
+    # ones reviewed here.
+    uses: TauCetiProject/TauCetiProgress/.github/workflows/merge.yml@REPLACE_WITH_FULL_SHA
+    with:
+      pr: ${{ fromJSON(needs.resolve.outputs.pr) }}
+      progress_ref: REPLACE_WITH_FULL_SHA
+      # Numeric user ids permitted to author progress pull requests. Ids, never logins: a login can
+      # be renamed and the old name re-registered by someone else.
+      #   477956 = kim-em, the account the worker authenticates as.
+      # This grants no privilege that account lacks -- it is already an OrganizationAdmin bypass
+      # actor on this ruleset -- so the check's real job is excluding everyone else.
+      allowed_user_ids: "477956"
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}

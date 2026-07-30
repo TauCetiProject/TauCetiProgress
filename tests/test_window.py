@@ -210,12 +210,17 @@ def test_read_area_files_missing_is_none():
 # ----- attribution and duplicate rejection -----------------------------------------------------
 
 
-def test_area_window_filters_by_label():
+def test_area_window_is_git_range_intersect_label_set():
+    """Attribution is an intersection: git says which PRs are in the range, one label query per
+    area says which PRs belong to it. #2 here is `roadmap/none`, so it is absent from the set."""
     with tempfile.TemporaryDirectory() as tmp:
         shas = make_repo(tmp, ["init", "a (#1)", "b (#2)", "c (#3)"])
-        area_of = {1: "PDE", 2: None, 3: "PDE"}   # #2 is roadmap/none
-        got = plan.area_window(tmp, "PDE", shas[0], shas[3], area_of)
+        area_prs = {1, 3}
+        got = plan.area_window(tmp, area_prs, shas[0], shas[3])
         assert got == [3, 1], got
+        # A PR labelled for the area but outside the window must not appear.
+        got_narrow = plan.area_window(tmp, area_prs, shas[2], shas[3])
+        assert got_narrow == [3], got_narrow
 
 
 def test_already_reported_prs_are_excluded():

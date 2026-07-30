@@ -1,0 +1,116 @@
+name: progress-announce
+
+# Post a newly-merged PROGRESS.md section to Zulip.
+#
+# Separate from the merge workflow on purpose, for two reasons:
+#
+#   * The App token that can write to the roadmap repository and the Zulip key never sit in the same
+#     job.
+#   * Merging and announcing cannot be made atomic, so they are decoupled instead: this runs off the
+#     push to `main`, and the post is idempotent (each section carries a stable id, and posting
+#     searches the topic for that id first). A failed announcement can be re-run safely, and a
+#     re-triggered workflow cannot double-post.
+#
+# It fails loudly on a transient error, unlike the PR-reaction mirror in TauCeti which correctly
+# exits 0 because a later reconcile heals it. There is no later reconcile here, so a swallowed error
+# would mean an announcement lost for good.
+
+on:
+  workflow_call:
+    inputs:
+      progress_ref:
+        description: The TauCetiProgress ref to run (must equal the `uses:` SHA).
+        required: true
+        type: string
+      channel:
+        required: false
+        default: Tau Ceti
+        type: string
+      topic:
+        required: false
+        default: Progress logs
+        type: string
+    secrets:
+      ZULIP_EMAIL:
+        required: true
+      ZULIP_API_KEY:
+        required: true
+      ZULIP_SITE:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: progress-announce
+  cancel-in-progress: false
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the announcer
+        uses: actions/checkout@v4
+        with:
+          repository: TauCetiProject/TauCetiProgress
+          ref: ${{ inputs.progress_ref }}
+          path: announcer
+          persist-credentials: false
+
+      # Two commits of history are enough: the section to announce is exactly what this push added
+      # to a PROGRESS.md file.
+      - name: Check out the roadmap at this commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          path: roadmap
+          persist-credentials: false
+
+      - name: Extract the appended section
+        id: extract
+        working-directory: roadmap
+        run: |
+          set -euo pipefail
+          # Every PROGRESS.md this push touched. Normally exactly one.
+          mapfile -t changed < <(git diff --name-only HEAD^ HEAD -- '*/PROGRESS.md' || true)
+          if [ "${#changed[@]}" -eq 0 ]; then
+            echo "no PROGRESS.md changed in this push; nothing to announce"
+            echo "found=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p ../sections
+          i=0
+          for path in "${changed[@]}"; do
+            # The added text is the tail of the new file beyond the old one. Reconstructing it this
+            # way (rather than parsing diff hunks) matches the append-only guarantee the merge gate
+            # enforced: the new file is the old file plus a suffix.
+            git show "HEAD^:$path" > /tmp/old.md 2>/dev/null || : > /tmp/old.md
+            python3 - "$path" "$i" <<'PY'
+          import pathlib, sys
+          path, idx = sys.argv[1], sys.argv[2]
+          old = pathlib.Path("/tmp/old.md").read_text(encoding="utf-8")
+          new = pathlib.Path(path).read_text(encoding="utf-8")
+          if not new.startswith(old):
+              raise SystemExit(f"{path} is not an append; refusing to announce")
+          added = new[len(old):]
+          pathlib.Path(f"../sections/{idx}.md").write_text(added, encoding="utf-8")
+          print(f"extracted {len(added)} bytes from {path}")
+          PY
+            i=$((i+1))
+          done
+          echo "found=$i" >> "$GITHUB_OUTPUT"
+
+      - name: Post to Zulip
+        if: steps.extract.outputs.found != '0'
+        env:
+          ZULIP_EMAIL: ${{ secrets.ZULIP_EMAIL }}
+          ZULIP_API_KEY: ${{ secrets.ZULIP_API_KEY }}
+          ZULIP_SITE: ${{ secrets.ZULIP_SITE }}
+          CHANNEL: ${{ inputs.channel }}
+          TOPIC: ${{ inputs.topic }}
+        run: |
+          set -euo pipefail
+          for f in sections/*.md; do
+            python3 -c 'import sys; sys.path.insert(0, "announcer"); from progress.cli import main; sys.exit(main())' \
+              announce --section "$f" --channel "$CHANNEL" --topic "$TOPIC"
+          done

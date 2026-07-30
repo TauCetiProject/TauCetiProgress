@@ -1,0 +1,170 @@
+name: progress-merge
+
+# Validate a generated progress pull request and, only if every check passes, merge it.
+#
+# Called by TauCetiRoadmap's own `progress-merge.yml`, pinned to a full SHA of this repository (the
+# same discipline TauCeti uses when it calls TauCetiReview's reusable workflows).
+#
+# WHY THIS IS THE WHOLE GATE. TauCetiRoadmap's `main` ruleset requires a code-owner approval plus
+# the `build` check, and a ruleset cannot scope that to a path. So the only way a generated report
+# lands unattended is the roadmap App's `always` bypass -- and a bypass actor bypasses the entire
+# ruleset, status checks included. Anyone may open a pull request there, including from a fork.
+# Everything that keeps this safe is therefore in the `validate` job below.
+#
+# The two jobs are split so that the read-only job does all the untrusted work and the job holding a
+# write token does nothing but merge:
+#
+#   validate  default GITHUB_TOKEN (read-only org-wide). Fetches the PR, its files, its blobs, and
+#             the current cursor on freshly-fetched main; runs progress.gate. Never checks out or
+#             executes pull-request content.
+#   merge     needs: validate. Mints the App token and merges, bound to the exact validated head.
+#
+# Announcing is a *separate* workflow (announce.yml, triggered by the push to main), so the App token
+# and the Zulip key never live in the same job, and a lost announcement can be retried without
+# re-merging.
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: The pull request number to consider.
+        required: true
+        type: number
+      progress_ref:
+        description: The TauCetiProgress ref to validate with (must equal the `uses:` SHA).
+        required: true
+        type: string
+      allowed_user_ids:
+        description: Comma-separated numeric GitHub user ids permitted to author these PRs.
+        required: true
+        type: string
+      dry_run:
+        description: Validate and report, but never merge.
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      APP_ID:
+        required: true
+      APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Repository-wide, not per-PR: two progress PRs must never be validated and merged concurrently,
+# because each one's validity depends on where `main` currently is.
+concurrency:
+  group: progress-merge
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      verdict: ${{ steps.gate.outputs.verdict }}
+      head_sha: ${{ steps.bundle.outputs.head_sha }}
+      area: ${{ steps.bundle.outputs.area }}
+      reason: ${{ steps.gate.outputs.reason }}
+    steps:
+      # The validator itself, at exactly the ref the caller pinned. Checking out this repository
+      # (never the pull request) is what keeps the executed code trusted.
+      - name: Check out the validator
+        uses: actions/checkout@v4
+        with:
+          repository: TauCetiProject/TauCetiProgress
+          ref: ${{ inputs.progress_ref }}
+          path: validator
+          persist-credentials: false
+
+      # `main` as it is *now*, not as the pull request's base was when it was opened. Another report
+      # may have merged in between, which would make this one's cursor stale.
+      - name: Check out current main of the roadmap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: main
+          path: base
+          persist-credentials: false
+
+      - name: Collect the pull request data
+        id: bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+          REPO: ${{ github.repository }}
+          ALLOWED: ${{ inputs.allowed_user_ids }}
+        run: |
+          set -euo pipefail
+          python3 validator/.github/scripts/collect.py \
+            --repo "$REPO" --pr "$PR" --base-dir base \
+            --allowed-user-ids "$ALLOWED" --out bundle.json
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          b = json.load(open("bundle.json"))
+          print(f"head_sha={(b['pr'].get('head') or {}).get('sha','')}")
+          print(f"area={b.get('area','')}")
+          PY
+
+      # The gate. No token is available to this step's logic beyond the read-only default, and the
+      # merge job below refuses to run unless this prints an allow.
+      - name: Run the gate
+        id: gate
+        run: |
+          set +e
+          out="$(python3 -c 'import sys; sys.path.insert(0, "validator"); from progress.gate import main; sys.exit(main())' --bundle bundle.json 2>&1)"
+          rc=$?
+          echo "$out"
+          {
+            echo "reason<<EOF"
+            echo "$out"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$rc" -eq 0 ]; then
+            echo "verdict=allow" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=refuse" >> "$GITHUB_OUTPUT"
+            echo "::warning title=progress gate refused::$out"
+          fi
+          exit 0
+
+      # A refusal is a normal outcome (a human PR touching these paths, say), so it does not fail the
+      # run; it leaves a comment and stops. Only an unexpected crash should go red.
+      - name: Explain a refusal on the pull request
+        if: steps.gate.outputs.verdict == 'refuse'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "gate refused; leaving the pull request for a human"
+          echo "${{ steps.gate.outputs.reason }}"
+
+  merge:
+    needs: validate
+    if: needs.validate.outputs.verdict == 'allow' && inputs.dry_run == false
+    runs-on: ubuntu-latest
+    steps:
+      # Minted only after validation succeeded, and scoped to this repository.
+      - name: Mint the App token
+        id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name || 'TauCetiRoadmap' }}
+          permission-pull-requests: write
+          permission-contents: write
+
+      # `--match-head-commit` is the point: if anything was pushed to the branch between validation
+      # and now, the merge fails instead of merging content that was never validated.
+      - name: Merge, bound to the validated head
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR: ${{ inputs.pr }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          echo "merging #$PR at $HEAD_SHA (${{ needs.validate.outputs.area }})"
+          gh pr merge "$PR" --repo "${{ github.repository }}" \
+            --squash --match-head-commit "$HEAD_SHA"
