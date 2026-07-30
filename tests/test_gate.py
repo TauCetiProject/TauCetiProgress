@@ -191,7 +191,51 @@ def test_refuses_no_change():
     refuses(lambda: call(changed=[]), "no files changed")
 
 
+def test_refuses_writing_into_two_parent_directories():
+    """An area name can exist under BOTH `TauCetiRoadmap/` and `Completed/` (that is where a finished
+    roadmap is archived). Keying only on the basename let a PR change all FOUR paths and pass, because
+    both basenames were present and every path matched; the content validators then looked at only one
+    pair, so the other two would have merged unexamined."""
+    changed = make_files() + [
+        {"filename": f"Completed/{AREA}/STATUS.md", "status": "modified"},
+        {"filename": f"Completed/{AREA}/PROGRESS.md", "status": "modified"},
+    ]
+    refuses(lambda: call(changed=changed), "one directory")
+
+
+def test_refuses_a_duplicated_path():
+    changed = make_files() + [{"filename": f"TauCetiRoadmap/{AREA}/STATUS.md", "status": "modified"}]
+    refuses(lambda: call(changed=changed), "appears twice")
+
+
+def test_refuses_more_files_than_allowed():
+    """Belt and braces alongside the both-files check: a repeated path is caught too."""
+    changed = make_files()
+    changed.append({"filename": f"TauCetiRoadmap/{AREA}/STATUS.md", "status": "added"})
+    refuses(lambda: call(changed=changed), "appears twice")
+
+
 # ----- modes -----------------------------------------------------------------------------------
+
+
+def test_refuses_when_a_tree_entry_is_missing():
+    """FAIL-CLOSED. Iterating only over the entries handed in meant an EMPTY list passed vacuously --
+    and the collector produced exactly that whenever a per-path fetch failed, so the symlink defence
+    (the one check that must never fail open) could be skipped by making a fetch fail."""
+    refuses(lambda: call(tree=[]), "no tree entry")
+    partial = [{"path": f"TauCetiRoadmap/{AREA}/STATUS.md", "mode": "100644", "type": "blob"}]
+    refuses(lambda: call(tree=partial), "no tree entry")
+
+
+def test_refuses_an_executable_mode():
+    """The contents api reports a 100755 blob as plain type "file", so modes now come from the tree
+    api. Harmless in itself for markdown, but the gate claimed to check modes and did not."""
+    refuses(lambda: call(tree=make_tree(mode="100755")), "not a regular file")
+
+
+def test_refuses_unexpected_tree_entries():
+    tree = make_tree() + [{"path": "README.md", "mode": "100644", "type": "blob"}]
+    refuses(lambda: call(tree=tree), "unexpected tree entries")
 
 
 def test_refuses_a_symlink():
@@ -278,6 +322,24 @@ def test_refuses_a_pending_build():
 
 def test_refuses_a_missing_build():
     refuses(lambda: call(checks=[]), "has not reported")
+
+
+def test_refuses_a_failing_build_listed_after_a_success():
+    """A head can carry BOTH a check-run and a commit status named `build` (the collector appends
+    check-runs, then statuses). Returning on the first match let a success hide a later failure."""
+    checks = [
+        {"name": "build", "head_sha": HEAD, "conclusion": "success"},
+        {"name": "build", "head_sha": HEAD, "conclusion": "failure"},
+    ]
+    refuses(lambda: call(checks=checks), "concluded FAILURE")
+
+
+def test_allows_when_every_build_entry_is_green():
+    checks = [
+        {"name": "build", "head_sha": HEAD, "conclusion": "success"},
+        {"name": "build", "head_sha": HEAD, "conclusion": "success"},
+    ]
+    assert call(checks=checks)["area"] == AREA
 
 
 def test_refuses_a_build_for_another_commit():

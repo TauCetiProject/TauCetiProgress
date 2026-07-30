@@ -26,10 +26,14 @@ import re
 
 from . import files
 
-# Only these two basenames, and only inside one area directory.
+# Only these two basenames, and only inside ONE area directory.
 ALLOWED_BASENAMES = ("STATUS.md", "PROGRESS.md")
 BRANCH_RE = re.compile(r"\Aprogress/[0-9a-f]{7}-[0-9a-f]{7}/([A-Za-z0-9]+)\Z")
-PATH_RE = re.compile(r"\A(?:TauCetiRoadmap|Completed)/([A-Za-z0-9]+)/(STATUS\.md|PROGRESS\.md)\Z")
+# Group 1 is the parent (an area lives under one or the other, never both), group 2 the area name,
+# group 3 the basename. The parent is captured because an area name can legitimately exist under
+# BOTH parents -- `Completed/` is where a finished roadmap is archived -- so matching on the area and
+# basename alone would let one update write to two directories at once.
+PATH_RE = re.compile(r"\A(TauCetiRoadmap|Completed)/([A-Za-z0-9]+)/(STATUS\.md|PROGRESS\.md)\Z")
 
 # A blob mode other than a regular file means a symlink (120000), a gitlink/submodule (160000), or
 # an executable. A symlink named STATUS.md pointing at something else is the classic way to make a
@@ -81,21 +85,33 @@ def check_provenance(pr, allowed_user_ids, base_repo, base_branch="main"):
 
 
 def check_files(changed_files, area):
-    """Diff shape: exactly the two generated files, for exactly `area`, as regular files.
+    """Diff shape: exactly the two generated files, in exactly ONE `area` directory, as regular files.
 
     Requiring *both* is deliberate. A `STATUS.md`-only update would move the snapshot forward while
     the window's prose was never written, and because the reporting cursor is the last `PROGRESS.md`
     section, no later run could reconstruct the gap. "Either file" is unsafe; "both files" is not.
+
+    Requiring exactly *two* files in *one* parent is equally deliberate, and was a real hole: keying
+    only on the basename let a pull request change four paths -- `TauCetiRoadmap/<area>/{STATUS,
+    PROGRESS}.md` **and** `Completed/<area>/{STATUS,PROGRESS}.md` -- and pass, because both basenames
+    were present and every path matched the pattern. The content validators then inspected only one
+    pair, so the other two would have merged unexamined.
+
+    Returns `{basename: file}` plus the resolved parent directory.
     """
     if not changed_files:
         _refuse("no files changed")
-    seen = {}
+
+    # First pass: every path must be an allowed generated file in the branch's own area, added or
+    # modified, never renamed in.
+    parsed = []
     for f in changed_files:
         path = f.get("filename") or ""
         m = PATH_RE.match(path)
         if not m:
             _refuse(f"path {path!r} is not an allowed generated file")
-        if m.group(1) != area:
+        parent, path_area, basename = m.group(1), m.group(2), m.group(3)
+        if path_area != area:
             _refuse(f"path {path!r} is not in the {area} directory")
         status = f.get("status")
         if status not in ("added", "modified"):
@@ -103,24 +119,48 @@ def check_files(changed_files, area):
         # `previous_filename` present means a rename, which could move a file out of the area.
         if f.get("previous_filename"):
             _refuse(f"path {path!r} is a rename from {f['previous_filename']!r}")
-        seen[m.group(2)] = f
+        parsed.append((parent, basename, f))
+
+    # Second pass, in order of how much the message tells a reader: one directory, then no
+    # duplicates, then both files present.
+    parents = {parent for parent, _, _ in parsed}
+    if len(parents) != 1:
+        _refuse(f"update spans {sorted(parents)}; it must change one directory, not several")
+    seen = {}
+    for _, basename, f in parsed:
+        if basename in seen:
+            _refuse(f"{basename} appears twice; an update changes each file once")
+        seen[basename] = f
     missing = [name for name in ALLOWED_BASENAMES if name not in seen]
     if missing:
         _refuse(f"missing required file(s): {', '.join(missing)}; an update must change both")
-    return seen
+    return seen, parents.pop()
 
 
-def check_modes(tree_entries):
+def check_modes(tree_entries, required_paths):
     """Every changed blob must be an ordinary file: no symlink, submodule, or mode flip.
 
-    `tree_entries` is `[{path, mode, type}]` for the two paths at the head commit. The TauCeti build
-    workflow rejects symlinks for the same reason.
+    `tree_entries` is `[{path, mode, type}]` read from the git TREE api at the head commit, which
+    reports true modes (`100644`, `100755`, `120000`, `160000`). The TauCeti build workflow rejects
+    symlinks for the same reason.
+
+    `required_paths` must be supplied and every one of them must have an entry. Iterating only over
+    whatever was handed in was a fail-OPEN hole: an empty list -- which `collect.py` produced whenever
+    a per-path fetch failed -- passed vacuously, and the symlink defence is precisely the check that
+    must never fail open.
     """
-    for entry in tree_entries:
+    by_path = {e.get("path"): e for e in tree_entries}
+    for path in sorted(required_paths):
+        entry = by_path.get(path)
+        if entry is None:
+            _refuse(f"no tree entry for {path!r}; cannot confirm it is a regular file")
         if entry.get("type") != "blob":
-            _refuse(f"{entry.get('path')!r} is a {entry.get('type')!r}, not a file")
+            _refuse(f"{path!r} is a {entry.get('type')!r}, not a file")
         if entry.get("mode") not in REGULAR_MODES:
-            _refuse(f"{entry.get('path')!r} has mode {entry.get('mode')!r}, not a regular file")
+            _refuse(f"{path!r} has mode {entry.get('mode')!r}, not a regular file")
+    extra = sorted(set(by_path) - set(required_paths))
+    if extra:
+        _refuse(f"unexpected tree entries: {extra}")
     return True
 
 
@@ -146,17 +186,24 @@ def check_build(check_runs, head_sha, required="build"):
 
     The App bypasses required status checks, so this is asserted rather than relied upon -- the same
     reasoning as `decide_merge` in TauCetiReview, which refuses when `ci_build` is not success.
+
+    EVERY entry named `build` must pass, not merely the first one found. A head can carry both a
+    check-run and a commit status under that name (the collector appends check-runs, then statuses),
+    so returning on the first match meant a success listed ahead of a failure hid it entirely.
     """
-    for run in check_runs:
-        if (run.get("name") or "") != required:
-            continue
-        if (run.get("head_sha") or head_sha) != head_sha:
-            continue
+    matching = [
+        r for r in check_runs
+        if (r.get("name") or "") == required and (r.get("head_sha") or head_sha) == head_sha
+    ]
+    if not matching:
+        _refuse(f"{required} has not reported on {head_sha[:7]}")
+    seen = []
+    for run in matching:
         concl = (run.get("conclusion") or "").upper()
-        if concl in ("SUCCESS", "NEUTRAL", "SKIPPED"):
-            return concl
-        _refuse(f"{required} concluded {concl or 'pending'} on {head_sha[:7]}")
-    _refuse(f"{required} has not reported on {head_sha[:7]}")
+        if concl not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+            _refuse(f"{required} concluded {concl or 'pending'} on {head_sha[:7]}")
+        seen.append(concl)
+    return ",".join(seen)
 
 
 def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_progress,
@@ -173,8 +220,8 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     if not head_sha:
         _refuse("pull request has no head sha")
 
-    check_files(changed_files, area)
-    check_modes(tree_entries)
+    seen, parent = check_files(changed_files, area)
+    check_modes(tree_entries, [f"{parent}/{area}/{name}" for name in ALLOWED_BASENAMES])
     section = check_content(
         area, old_status, new_status_bytes, old_progress, new_progress_bytes,
         expect_from_sha=current_main_cursor,

@@ -86,32 +86,38 @@ def main(argv=None):
     area = m.group(1) if m else ""
 
     # Tree entries for the changed paths, so modes and types can be checked.
+    #
+    # This reads the git TREE api, not the contents api. The contents api reports only a coarse
+    # `type` ("file" / "symlink" / "submodule") and no mode, so a `100755` blob comes back as plain
+    # "file" and an executable-bit flip on a generated file would have been invisible. The tree api
+    # returns the real mode. It is also fetched in ONE recursive request, so there is no per-path
+    # failure to swallow -- the previous version's `except SystemExit: continue` silently dropped an
+    # entry whenever a fetch failed, and the gate's mode check then passed vacuously on the empty
+    # list. The gate now requires an entry per changed path, so a truncated tree fails closed.
     tree_entries = []
     if head_sha:
-        for f in changed:
-            path = f.get("filename") or ""
-            if not gate.PATH_RE.match(path):
-                # Left for the gate to refuse; do not fetch anything for it.
-                continue
-            try:
-                info = gh_api(f"repos/{args.repo}/contents/{path}?ref={head_sha}")
-            except SystemExit:
-                continue
-            tree_entries.append({
-                "path": path,
-                "mode": {"file": "100644", "symlink": "120000", "submodule": "160000"}.get(
-                    info.get("type"), "100644" if info.get("type") == "file" else "?"
-                ),
-                "type": "blob" if info.get("type") == "file" else info.get("type"),
-                "sha": info.get("sha"),
-            })
+        tree = gh_api(f"repos/{args.repo}/git/trees/{head_sha}?recursive=1")
+        if tree.get("truncated"):
+            # A truncated tree could omit exactly the path we need to inspect. Say so and let the
+            # gate refuse for want of an entry rather than guessing.
+            print("::warning::git tree was truncated; mode checks may be incomplete")
+        wanted = {f.get("filename") or "" for f in changed if gate.PATH_RE.match(f.get("filename") or "")}
+        for entry in tree.get("tree") or []:
+            if entry.get("path") in wanted:
+                tree_entries.append({
+                    "path": entry.get("path"),
+                    "mode": entry.get("mode"),
+                    "type": entry.get("type"),
+                    "sha": entry.get("sha"),
+                })
 
     by_name = {}
     for f in changed:
         path = f.get("filename") or ""
         m2 = gate.PATH_RE.match(path)
         if m2:
-            by_name[m2.group(2)] = f
+            # group(3) is the basename; group(1) is the parent, which the gate checks is unique.
+            by_name.setdefault(m2.group(3), f)
 
     new_status = blob_text(args.repo, (by_name.get("STATUS.md") or {}).get("sha"))
     new_progress = blob_text(args.repo, (by_name.get("PROGRESS.md") or {}).get("sha"))
