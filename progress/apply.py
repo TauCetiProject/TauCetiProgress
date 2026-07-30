@@ -191,13 +191,21 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
         print(f"[dry-run] branch {branch}\n{diff}")
         return 0
 
-    # Create-only for a fresh branch; if our own branch already exists (a prior run died before
-    # opening the PR) update it with a lease rather than clobbering blindly.
+    # The branch already existing means a previous run (ours, or a peer racing us for the same window)
+    # got this far and then died before opening the pull request. Leave its content alone and just open
+    # the pull request for it: the branch name is a pure function of the window, so whatever is there is
+    # a valid report for exactly this window, and overwriting it could clobber a peer's push moments
+    # after it happened. Only push when nothing is there, and create-only so a concurrent push loses
+    # rather than being silently overwritten.
     if remote_branch_exists(roadmap_dir, branch):
-        print(f"branch {branch} already exists remotely; updating it (a previous run was interrupted)")
-        _run(["git", "push", "--force-with-lease", "origin", f"HEAD:refs/heads/{branch}"], roadmap_dir)
+        print(f"branch {branch} already exists remotely (an earlier run was interrupted); "
+              f"opening the pull request for it rather than rewriting it")
     else:
-        _run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], roadmap_dir)
+        proc = _run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], roadmap_dir, check=False)
+        if proc.returncode != 0:
+            # Most likely a peer created the same branch between the check and the push. That is fine:
+            # fall through and let the pull-request step reconcile.
+            print(f"create-only push declined ({proc.stderr.strip()[:200]}); reconciling instead")
 
     # Re-check between push and create: another worker may have opened the PR for this exact window
     # in the meantime, and the branch name is deterministic so it would be the same branch.
