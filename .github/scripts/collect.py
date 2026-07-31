@@ -34,6 +34,7 @@ import base64
 import datetime
 import json
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -182,81 +183,79 @@ def rev_parse(repo, ref):
     return proc.stdout.strip() or None if proc.returncode == 0 else None
 
 
-def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
-    """The one legitimate `from_sha` for a roadmap's FIRST report, or None if it cannot be computed.
+def walk_pr_numbers(from_sha, repo=CODE_REPO, ref=CODE_REF, max_pages=60):
+    """`(after, everywhere)` pull-request numbers on `ref`, or None if the walk could not finish.
 
-    A first report has no cursor on `main` to continue from, so without this whoever files it also
-    chooses where that roadmap's history begins -- and because windows only move forward, everything
-    before the chosen point becomes unreportable for good. Refusing first reports outright would have
-    been safe but useless: thirteen of the fourteen roadmaps have never been reported, so automation
-    would have had almost nothing left to do.
+    `everywhere` is every pull request whose merge appears anywhere in `ref`'s history; `after` is the
+    subset merged more recently than `from_sha`. Both come from one newest-first walk.
 
-    So the cursor is computed here instead, by the same rule the planner uses: the first parent of the
-    merge commit of the area's earliest merged pull request carrying its `roadmap/<area>` label. The
-    window is half-open, hence the parent rather than the merge itself -- otherwise every roadmap's
-    first report would silently omit its first pull request.
-
-    Everything the API hands back is then checked against `ref` rather than trusted: `merge_commit_sha`
-    means different things for different merge methods, and a pull request merged elsewhere need not
-    touch this history at all. A cursor that does not sit in the documented history, strictly before
-    the merge it precedes, is rejected outright and the roadmap is left for a human to bootstrap.
-
-    A handful of requests, and only for a first report, so at most once per roadmap ever.
+    Not the compare endpoint: it returns at most 250 commits however it is paginated, and a roadmap's
+    first window is its whole history -- over a thousand commits here -- so compare would silently
+    answer about a prefix of it.
     """
-    # Ordered by when pull requests MERGED, not by number. Numbers are assigned at open time and
-    # pull requests do not merge in the order they were opened, so the lowest-numbered one may have
-    # merged after another carrying the same label -- which would put this cursor past that one and
-    # make its work unreportable for good. Two of the fourteen roadmaps had exactly that shape when
-    # this was written, so it is a live case and not a theoretical one.
+    after, everywhere, passed, page = set(), set(), False, 1
+    while page <= max_pages:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{repo}/commits?sha={ref}&per_page=100&page={page}",
+             "--jq", '.[] | [.sha, (.commit.message | split("\n")[0])] | @tsv'],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            return None
+        lines = proc.stdout.splitlines()
+        if not lines:
+            return after, everywhere
+        for line in lines:
+            sha, _, subject = line.partition("\t")
+            if sha == from_sha:
+                passed = True
+            m = re.search(r"\(#(\d+)\)\s*$", subject) or re.match(r"Merge pull request #(\d+)", subject)
+            if m:
+                number = int(m.group(1))
+                everywhere.add(number)
+                if not passed:
+                    after.add(number)
+        page += 1
+    return None                      # too much history to confirm; the gate refuses rather than guess
+
+
+def bootstrap_missing(area, from_sha, repo=CODE_REPO, ref=CODE_REF):
+    """Labelled pull requests this proposed starting point would strand, or None if unknown.
+
+    A first report has no cursor on `main` to continue from, so its `from_sha` has to be justified
+    some other way. Two earlier attempts tried to RECOMPUTE the planner's answer here -- first by
+    lowest pull-request number, then by merge time -- and both were wrong, because what the planner
+    takes is a position on `ref`'s first-parent chain and the API cannot express first-parent
+    membership at all. This history is not linear (fourteen merge commits when this was written), so
+    a commit can be reachable through a second parent without lying on that chain.
+
+    So stop reproducing, and check the property that was wanted all along: a starting point is
+    acceptable exactly when nothing labelled for this roadmap merged at or before it. That is
+    indifferent to merge method and topology, and cannot be fooled by a second-parent path.
+
+    Only pull requests already IN `ref` count. A labelled pull request merged after the documented
+    tip is not stranded -- it is simply not documented yet, and a later window will cover it -- and an
+    earlier version of this check wrongly counted those, which would have refused every bootstrap
+    whenever documentation lagged (four such on RepresentationTheory at the time of writing).
+    """
+    walked = walk_pr_numbers(from_sha, repo=repo, ref=ref)
+    if walked is None:
+        return None
+    after, everywhere = walked
     proc = subprocess.run(
         ["gh", "pr", "list", "--repo", repo, "--state", "merged",
-         "--label", f"{ROADMAP_LABEL_PREFIX}{area}", "--limit", "100000",
-         "--json", "number,mergedAt"],
+         "--label", f"{ROADMAP_LABEL_PREFIX}{area}", "--limit", "100000", "--json", "number"],
         capture_output=True, text=True,
     )
-    if proc.returncode != 0 or not proc.stdout.strip():
+    if proc.returncode != 0:
         return None
     try:
-        rows = [r for r in json.loads(proc.stdout) if r.get("mergedAt")]
-    except json.JSONDecodeError:
+        labelled = {int(r["number"]) for r in json.loads(proc.stdout)}
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
-    if not rows:
+    if not labelled:
         return None
-    # Ties broken by number so the choice is deterministic if two merged in the same second.
-    number = str(min(rows, key=lambda r: (r["mergedAt"], r["number"]))["number"])
-    merge = subprocess.run(
-        ["gh", "api", f"repos/{repo}/pulls/{number}", "--jq", ".merge_commit_sha"],
-        capture_output=True, text=True,
-    )
-    if merge.returncode != 0 or not merge.stdout.strip():
-        return None
-    merge_sha = merge.stdout.strip()
-
-    # `merge_commit_sha` means different things for different merge methods, and for a pull request
-    # merged into some other branch it need not be on this history at all. Rather than trust it,
-    # confirm it is genuinely part of the documented history before deriving anything from it. If it
-    # is not, return None: the gate then refuses the report and a human bootstraps the roadmap, which
-    # is the right outcome for a once-per-roadmap decision that cannot be checked automatically.
-    if compare_status(repo, merge_sha, ref) not in ("ahead", "identical"):
-        return None
-
-    parent = subprocess.run(
-        ["gh", "api", f"repos/{repo}/commits/{merge_sha}", "--jq", ".parents[0].sha"],
-        capture_output=True, text=True,
-    )
-    if parent.returncode != 0:
-        return None
-    cursor = parent.stdout.strip() or None
-    if cursor is None:
-        # A root commit has no parent, so there is nothing before the first report; that is a real
-        # case but not one this can express, and guessing would be worse than refusing.
-        return None
-    # The cursor must itself be documented history, and strictly before the merge it precedes.
-    if compare_status(repo, cursor, ref) not in ("ahead", "identical"):
-        return None
-    if compare_status(repo, cursor, merge_sha) != "ahead":
-        return None
-    return cursor
+    return (labelled & everywhere) - after
 
 
 def compare_status(repo, base, head):
@@ -394,7 +393,8 @@ def main(argv=None):
     # wholesale replacement of the archived log then looked like a valid append.
     old_status = old_progress = last_report_at = None
     area_exists = False
-    expected_bootstrap = None
+    bootstrap_ok = None
+    bootstrap_missing_prs = []
     old_paths = {}
     current_cursor = None
     parents = {gate.PATH_RE.match(p).group(1) for p in by_path}
@@ -422,9 +422,18 @@ def main(argv=None):
                 # An unparseable log on main is a real problem, but saying so is the gate's job.
                 current_cursor = None
         if current_cursor is None and area_exists:
-            # Only for a first report, and therefore at most once per roadmap ever: the one
-            # `from_sha` such a report is allowed to claim.
-            expected_bootstrap = bootstrap_cursor(area)
+            # Only for a first report, and therefore at most once per roadmap ever: does the starting
+            # point it proposes strand any labelled work behind it?
+            proposed = None
+            try:
+                sections = files.parse_sections(new_progress or "")
+                proposed = sections[-1]["from_sha"] if sections else None
+            except files.FormatError:
+                proposed = None
+            if proposed:
+                missing = bootstrap_missing(area, proposed)
+                bootstrap_ok = missing == set()
+                bootstrap_missing_prs = sorted(missing)[:20] if missing else []
 
     # Only check-runs, and only from the head we pinned. Commit statuses are deliberately NOT
     # collected: any repository writer can POST one under any context, so they are not evidence, and
@@ -446,7 +455,8 @@ def main(argv=None):
         "base_repo": args.repo,
         "code_window": resolve_window(new_progress),
         "area_exists": area_exists,
-        "expected_bootstrap_from_sha": expected_bootstrap,
+        "bootstrap_ok": bootstrap_ok,
+        "bootstrap_missing_prs": bootstrap_missing_prs,
         "last_report_at": last_report_at,
         # The collector's own clock, never anything from the pull request.
         "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),

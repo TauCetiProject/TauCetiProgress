@@ -146,104 +146,87 @@ def test_the_newest_section_is_the_one_checked():
 
 
 
-# ----- the bootstrap cursor ---------------------------------------------------------------------
+# ----- the bootstrap check ----------------------------------------------------------------------
+#
+# Two earlier versions tried to RECOMPUTE the planner's starting point here, first by lowest pull
+# request number and then by merge time. Both were wrong: the planner takes a position on the
+# first-parent chain, and the API cannot express first-parent membership. This verifies the property
+# that was actually wanted instead -- nothing labelled merged at or before the proposed start.
 
 
-def _bootstrap(number="45", merge_sha="m" * 40, parent="p" * 40, statuses=None):
-    """Drive `bootstrap_cursor` against canned responses."""
-    statuses = statuses or {}
-    orig_run, orig_cmp = collect.subprocess.run, collect.compare_status
-
-    class P:
-        def __init__(self, out, rc=0):
-            self.stdout, self.returncode, self.stderr = out, rc, ""
-
-    def fake_run(args, **kw):
-        joined = " ".join(args)
-        if args[:2] == ["gh", "pr"]:
-            # Deliberately NOT in number order, and the lowest number is not the earliest merge:
-            # the selection under test is by `mergedAt`, which is the bug this guards.
-            if not number:
-                return P("[]")
-            return P(json.dumps([
-                {"number": int(number) + 3, "mergedAt": "2026-01-01T00:00:00Z"},
-                {"number": int(number), "mergedAt": "2026-02-01T00:00:00Z"},
-            ]))
-        if "/pulls/" in joined:
-            return P(merge_sha + "\n")
-        if "/commits/" in joined:
-            return P(parent + "\n")
-        return P("")
-
-    collect.subprocess.run = fake_run
-    collect.compare_status = lambda repo, base, head: statuses.get((base, head))
-    try:
-        return collect.bootstrap_cursor("PDE")
-    finally:
-        collect.subprocess.run, collect.compare_status = orig_run, orig_cmp
-
-
-M, PARENT = "m" * 40, "p" * 40
-
-
-def test_a_verified_bootstrap_cursor_is_returned():
-    assert _bootstrap(statuses={(M, "docgen"): "ahead", (PARENT, "docgen"): "ahead",
-                                (PARENT, M): "ahead"}) == PARENT
-
-
-def test_the_earliest_merged_pull_request_is_the_one_used():
-    """Not the lowest-numbered: the stub returns a lower number that merged LATER."""
-    seen = []
-    orig_run, orig_cmp = collect.subprocess.run, collect.compare_status
+def _walk(pages, from_sha, labelled=(1, 2, 3)):
+    """Drive `bootstrap_missing` over canned pages of `(sha, subject)` rows."""
+    orig = collect.subprocess.run
 
     class P:
         def __init__(self, out, rc=0):
             self.stdout, self.returncode, self.stderr = out, rc, ""
 
-    def fake_run(args, **kw):
-        joined = " ".join(args)
+    def fake(args, **kw):
         if args[:2] == ["gh", "pr"]:
-            return P(json.dumps([{"number": 100, "mergedAt": "2026-02-01T00:00:00Z"},
-                                 {"number": 101, "mergedAt": "2026-01-01T00:00:00Z"}]))
-        if "/pulls/" in joined:
-            seen.append(joined)
-            return P(M + "\n")
-        return P(PARENT + "\n")
+            return P(json.dumps([{"number": n} for n in labelled]))
+        page = int([a for a in args if "page=" in a][0].split("page=")[-1])
+        rows = pages[page - 1] if page - 1 < len(pages) else []
+        return P("".join(f"{s}\t{m}\n" for s, m in rows))
 
-    collect.subprocess.run = fake_run
-    collect.compare_status = lambda repo, base, head: "ahead"
+    collect.subprocess.run = fake
     try:
-        collect.bootstrap_cursor("PDE")
+        return collect.bootstrap_missing("PDE", from_sha)
     finally:
-        collect.subprocess.run, collect.compare_status = orig_run, orig_cmp
-    assert any("/pulls/101" in s for s in seen), seen
-    assert not any("/pulls/100" in s for s in seen), seen
+        collect.subprocess.run = orig
 
 
-def test_a_merge_commit_off_the_documented_history_is_refused():
-    """`merge_commit_sha` means different things per merge method, and a pull request merged
-    elsewhere need not touch this history at all, so it is checked rather than trusted."""
-    for status in (None, "behind", "diverged"):
-        assert _bootstrap(statuses={(M, "docgen"): status, (PARENT, "docgen"): "ahead",
-                                    (PARENT, M): "ahead"}) is None, status
+def test_a_start_before_everything_labelled_strands_nothing():
+    pages = [[("c3", "feat: c (#3)"), ("c2", "feat: b (#2)"), ("c1", "feat: a (#1)"), ("root", "root")]]
+    assert _walk(pages, from_sha="root") == set()
 
 
-def test_a_cursor_off_the_documented_history_is_refused():
-    assert _bootstrap(statuses={(M, "docgen"): "ahead", (PARENT, "docgen"): None,
-                                (PARENT, M): "ahead"}) is None
+def test_a_start_that_skips_labelled_work_is_caught():
+    """The bug that survived four review rounds: a cursor placed after labelled history."""
+    pages = [[("c3", "feat: c (#3)"), ("c2", "feat: b (#2)"), ("c1", "feat: a (#1)"), ("root", "root")]]
+    assert _walk(pages, from_sha="c1") == {1}
+    assert _walk(pages, from_sha="c2") == {1, 2}
 
 
-def test_a_cursor_not_before_its_merge_is_refused():
-    assert _bootstrap(statuses={(M, "docgen"): "ahead", (PARENT, "docgen"): "ahead",
-                                (PARENT, M): "identical"}) is None
+def test_work_merged_after_the_documented_tip_is_not_stranded():
+    """It is simply not documented yet; a later window covers it.
+
+    An earlier version of this check counted those, which would have refused every bootstrap whenever
+    documentation lagged -- four such pull requests on RepresentationTheory at the time.
+    """
+    pages = [[("c2", "feat: b (#2)"), ("c1", "feat: a (#1)"), ("root", "root")]]
+    assert _walk(pages, from_sha="root", labelled=(1, 2, 99)) == set()
 
 
-def test_a_root_commit_with_no_parent_is_refused_rather_than_guessed():
-    assert _bootstrap(parent="", statuses={(M, "docgen"): "ahead"}) is None
+def test_the_older_merge_subject_form_is_recognised():
+    pages = [[("c9", "Merge pull request #9 from x/y"), ("root", "root")]]
+    assert _walk(pages, from_sha="root", labelled=(9,)) == set()
+    assert _walk(pages, from_sha="c9", labelled=(9,)) == {9}
 
 
-def test_no_labelled_pull_requests_means_no_cursor():
-    assert _bootstrap(number="") is None
+def test_pagination_is_followed():
+    pages = [[("c4", "feat: d (#4)")], [("c3", "feat: c (#3)")], [("c1", "feat: a (#1)"), ("root", "root")]]
+    assert _walk(pages, from_sha="root", labelled=(1, 3, 4)) == set()
+    assert _walk(pages, from_sha="c3", labelled=(1, 3, 4)) == {1, 3}
+
+
+def test_a_walk_that_cannot_finish_returns_unknown():
+    """The gate treats unknown as a refusal rather than guessing."""
+    orig = collect.subprocess.run
+
+    class P:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode, self.stderr = out, rc, ""
+
+    # Never yields the requested sha and never runs out: the page cap must stop it.
+    collect.subprocess.run = lambda args, **kw: (
+        P(json.dumps([{"number": 1}])) if args[:2] == ["gh", "pr"] else P("x\tfeat: q (#1)\n"))
+    try:
+        assert collect.walk_pr_numbers("never", max_pages=3) is None
+        assert collect.bootstrap_missing("PDE", "never") is None
+    finally:
+        collect.subprocess.run = orig
+
 
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):

@@ -408,7 +408,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
            new_progress_bytes, check_runs, base_repo,
            current_main_cursor=None, compare_status=None, behind_by=None, main_sha="",
            old_paths=None, code_window=None, last_report_at=None, now=None,
-           area_exists=None, expected_bootstrap_from_sha=None):
+           area_exists=None, bootstrap_ok=None, bootstrap_missing_prs=None):
     """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
@@ -433,13 +433,16 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     # outright would have been safe and useless: thirteen of the fourteen roadmaps have never been
     # reported, so almost nothing would be left for automation to do.
     if not current_main_cursor:
-        expect = expected_bootstrap_from_sha or ""
-        if not expect:
+        if bootstrap_ok is not True:
+            missing = ", ".join(f"#{n}" for n in (bootstrap_missing_prs or [])[:10])
             _refuse(
-                f"{parent}/{area} has no reported history yet and the start of its history could "
-                f"not be determined, so a first report cannot be checked"
+                f"{parent}/{area} has no reported history yet, and the window this report starts "
+                f"from leaves labelled work behind it"
+                + (f" ({missing}{', ...' if len(bootstrap_missing_prs or []) > 10 else ''})"
+                   if missing else
+                   " (or that could not be confirmed)")
+                + "; a first report must start before every pull request labelled for the roadmap"
             )
-        current_main_cursor = expect
     check_modes(tree_entries, [f"{parent}/{area}/{name}" for name in ALLOWED_BASENAMES])
     section = check_content(
         area, old_status, new_status_bytes, old_progress, new_progress_bytes,
@@ -508,7 +511,8 @@ def main(argv=None):
             # not silently skip the window check.
             code_window=data.get("code_window"),
             area_exists=data.get("area_exists"),
-            expected_bootstrap_from_sha=data.get("expected_bootstrap_from_sha"),
+            bootstrap_ok=data.get("bootstrap_ok"),
+            bootstrap_missing_prs=data.get("bootstrap_missing_prs"),
             last_report_at=data.get("last_report_at"),
             now=data.get("collected_at"),
             current_main_cursor=data.get("current_main_cursor"),
