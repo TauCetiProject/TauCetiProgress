@@ -66,9 +66,9 @@ GITHUB_ACTIONS_APP_ID = 15368
 EX_REFUSED = 3
 
 # The minimum gap between two reports for the SAME roadmap, enforced here rather than only in the
-# planner. Set below the planner's 24h cadence so it never refuses a legitimate report, while still
-# capping how fast the announcement channel can be driven.
-MIN_REPORT_INTERVAL_HOURS = 20.0
+# planner. Kept below `plan.IDLE_HOURS` so it never refuses a report the planner considered due,
+# while still capping how fast one roadmap can drive the announcement channel.
+MIN_REPORT_INTERVAL_HOURS = 6.0
 
 
 def _parse_iso(text):
@@ -408,7 +408,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
            new_progress_bytes, check_runs, base_repo,
            current_main_cursor=None, compare_status=None, behind_by=None, main_sha="",
            old_paths=None, code_window=None, last_report_at=None, now=None,
-           area_exists=None):
+           area_exists=None, expected_bootstrap_from_sha=None):
     """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
@@ -432,30 +432,23 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     # area's earliest labelled pull request) and it is required exactly. Refusing first reports
     # outright would have been safe and useless: thirteen of the fourteen roadmaps have never been
     # reported, so almost nothing would be left for automation to do.
-    # A roadmap's FIRST report is not auto-merged, and this is a considered retreat rather than an
-    # oversight.
+    # A roadmap's FIRST report has no cursor on `main` to continue from, so its starting point is
+    # pinned against the code repository instead: the collector clones it and asks git, using the same
+    # functions the planner uses over the same data, so the two agree by construction.
     #
-    # Every later report is pinned: `from_sha` must equal the cursor already on `main`. A first report
-    # has no cursor to continue from, so whoever files it also decides where that roadmap's history
-    # begins, and because windows only move forward, everything before that point is unreportable for
-    # good. Checking that choice means asking whether any labelled pull request merged before it --
-    # an ancestry question about the first-parent chain.
-    #
-    # Three implementations tried to answer it here and all three were wrong: by lowest pull request
-    # number (numbers are assigned at open time, not merge time), by merge timestamp (no relation to
-    # position), and by walking the commits endpoint (which offers neither first-parent traversal nor
-    # any ordering guarantee). The REST API cannot express first-parent membership, and this history
-    # is not linear, so it cannot be recovered by ancestry checks either.
-    #
-    # An uncheckable property should not be pretended to be checked. A human bootstraps each roadmap
-    # once -- fourteen reviews, ever -- and every report after that is unattended. The generator still
-    # writes the first report; only merging it needs a person.
+    # Three earlier versions tried to answer this through the REST API -- by lowest pull request
+    # number, by merge timestamp, and by walking the commits endpoint -- and all three were wrong,
+    # because the question is about position on the first-parent chain and the API expresses neither
+    # first-parent traversal nor any ordering guarantee. A fourth refused first reports outright,
+    # which was sound but made a person merge fourteen of them by hand.
     if not current_main_cursor:
-        _refuse(
-            f"{parent}/{area} has no reported history yet. A first report decides where that "
-            f"roadmap's log begins, which cannot be verified mechanically, so it is left for human "
-            f"review; every later report for it merges unattended"
-        )
+        expect = expected_bootstrap_from_sha or ""
+        if not expect:
+            _refuse(
+                f"{parent}/{area} has no reported history yet, and where that history begins could "
+                f"not be determined, so a first report cannot be checked"
+            )
+        current_main_cursor = expect
     check_modes(tree_entries, [f"{parent}/{area}/{name}" for name in ALLOWED_BASENAMES])
     section = check_content(
         area, old_status, new_status_bytes, old_progress, new_progress_bytes,
@@ -524,6 +517,7 @@ def main(argv=None):
             # not silently skip the window check.
             code_window=data.get("code_window"),
             area_exists=data.get("area_exists"),
+            expected_bootstrap_from_sha=data.get("expected_bootstrap_from_sha"),
             last_report_at=data.get("last_report_at"),
             now=data.get("collected_at"),
             current_main_cursor=data.get("current_main_cursor"),
