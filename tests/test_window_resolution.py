@@ -6,6 +6,7 @@ walk the cursor to arbitrary values, announcing every step.
 """
 
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -159,8 +160,15 @@ def _bootstrap(number="45", merge_sha="m" * 40, parent="p" * 40, statuses=None):
 
     def fake_run(args, **kw):
         joined = " ".join(args)
-        if "search/issues" in joined:
-            return P(number + "\n")
+        if args[:2] == ["gh", "pr"]:
+            # Deliberately NOT in number order, and the lowest number is not the earliest merge:
+            # the selection under test is by `mergedAt`, which is the bug this guards.
+            if not number:
+                return P("[]")
+            return P(json.dumps([
+                {"number": int(number) + 3, "mergedAt": "2026-01-01T00:00:00Z"},
+                {"number": int(number), "mergedAt": "2026-02-01T00:00:00Z"},
+            ]))
         if "/pulls/" in joined:
             return P(merge_sha + "\n")
         if "/commits/" in joined:
@@ -181,6 +189,35 @@ M, PARENT = "m" * 40, "p" * 40
 def test_a_verified_bootstrap_cursor_is_returned():
     assert _bootstrap(statuses={(M, "docgen"): "ahead", (PARENT, "docgen"): "ahead",
                                 (PARENT, M): "ahead"}) == PARENT
+
+
+def test_the_earliest_merged_pull_request_is_the_one_used():
+    """Not the lowest-numbered: the stub returns a lower number that merged LATER."""
+    seen = []
+    orig_run, orig_cmp = collect.subprocess.run, collect.compare_status
+
+    class P:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode, self.stderr = out, rc, ""
+
+    def fake_run(args, **kw):
+        joined = " ".join(args)
+        if args[:2] == ["gh", "pr"]:
+            return P(json.dumps([{"number": 100, "mergedAt": "2026-02-01T00:00:00Z"},
+                                 {"number": 101, "mergedAt": "2026-01-01T00:00:00Z"}]))
+        if "/pulls/" in joined:
+            seen.append(joined)
+            return P(M + "\n")
+        return P(PARENT + "\n")
+
+    collect.subprocess.run = fake_run
+    collect.compare_status = lambda repo, base, head: "ahead"
+    try:
+        collect.bootstrap_cursor("PDE")
+    finally:
+        collect.subprocess.run, collect.compare_status = orig_run, orig_cmp
+    assert any("/pulls/101" in s for s in seen), seen
+    assert not any("/pulls/100" in s for s in seen), seen
 
 
 def test_a_merge_commit_off_the_documented_history_is_refused():
