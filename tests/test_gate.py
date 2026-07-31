@@ -105,8 +105,11 @@ def make_window(**over):
     return w
 
 
+NOW = "2026-07-30T12:00:00Z"
+
+
 def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=None, window=-1,
-         compare_status="ahead", behind_by=0, old_paths=None):
+         compare_status="ahead", behind_by=0, old_paths=None, last_report_at=None, now=NOW):
     old_status, new_status, old_progress, new_progress = content or make_content()
     return gate.decide(
         pr=pr or make_pr(),
@@ -119,6 +122,8 @@ def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=Non
         check_runs=checks if checks is not None else CHECKS_OK,
         base_repo=REPO,
         code_window=make_window() if window == -1 else window,
+        last_report_at=last_report_at,
+        now=now,
         current_main_cursor=cursor,
         compare_status=compare_status,
         behind_by=behind_by,
@@ -191,6 +196,29 @@ def test_a_fork_that_force_pushes_after_opening_gains_nothing():
     """
     pr = make_pr(head={"ref": BRANCH, "sha": HEAD, "repo": {"full_name": "someone/TauCetiRoadmap"}})
     refuses(lambda: call(pr=pr, checks=[build_run(head_sha="0" * 40)]), "names head")
+
+
+def test_refuses_a_second_report_for_the_same_roadmap_too_soon():
+    """Bounding WHERE a report may point does not bound HOW MANY may be sent.
+
+    An area whose cursor is far behind the documentation branch has over a thousand commits of room
+    in front of it, and that room can be cut into as many single-commit windows as there are commits.
+    Every one would pass every other check, and every one would post to Zulip. The cadence is
+    therefore enforced here as well as in the planner.
+    """
+    refuses(lambda: call(last_report_at="2026-07-30T02:00:00Z"), "reported 10.0h ago")
+
+
+def test_allows_a_report_once_the_interval_has_passed():
+    assert call(last_report_at="2026-07-29T00:00:00Z")["area"] == AREA
+
+
+def test_a_first_report_for_an_area_has_no_predecessor():
+    assert call(last_report_at=None)["area"] == AREA
+
+
+def test_an_unreadable_last_report_time_does_not_disable_the_limit():
+    refuses(lambda: call(last_report_at="whenever"), "could not read when")
 
 
 def test_refuses_a_draft():

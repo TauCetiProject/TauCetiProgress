@@ -30,6 +30,7 @@ message, since every merged section is announced automatically. That second sink
 radius and is named here so it is not overlooked.
 """
 
+import datetime
 import json
 import re
 
@@ -63,6 +64,15 @@ GITHUB_ACTIONS_APP_ID = 15368
 # considered refusal. The workflow additionally requires the output to start with `REFUSED:`, so the
 # two signals have to agree.
 EX_REFUSED = 3
+
+# The minimum gap between two reports for the SAME roadmap, enforced here rather than only in the
+# planner. Set below the planner's 24h cadence so it never refuses a legitimate report, while still
+# capping how fast the announcement channel can be driven.
+MIN_REPORT_INTERVAL_HOURS = 20.0
+
+
+def _parse_iso(text):
+    return datetime.datetime.fromisoformat(str(text).replace("Z", "+00:00"))
 
 
 class Refused(Exception):
@@ -261,6 +271,11 @@ def check_window(code_window, section):
             f"the window checked against history ({checked[:7]}) is not the section's to_sha "
             f"({section['to_sha'][:7]})"
         )
+    if (code_window.get("from_sha") or "") != section["from_sha"]:
+        _refuse(
+            f"the window checked against history starts at {(code_window.get('from_sha') or '')[:7]}, "
+            f"not the section's from_sha ({section['from_sha'][:7]})"
+        )
     if not code_window.get("to_reachable"):
         _refuse(
             f"to_sha {section['to_sha'][:7]} is not a commit reachable from TauCeti's "
@@ -270,6 +285,39 @@ def check_window(code_window, section):
         _refuse(
             f"to_sha {section['to_sha'][:7]} does not come after from_sha "
             f"{section['from_sha'][:7]}; a window must move forward"
+        )
+    return True
+
+
+def check_rate(last_report_at, now, area, min_hours=MIN_REPORT_INTERVAL_HOURS):
+    """An area may not be reported again until `min_hours` after its last report landed.
+
+    The window check bounds where a report may point, but not how many may be sent. An area whose
+    cursor is far behind the documentation branch has a lot of room in front of it -- over a thousand
+    commits, for one never yet reported -- and that room can be cut into as many single-commit windows
+    as there are commits. Every one of them would satisfy every other check here, and every one would
+    post to Zulip. Bounding where without bounding how often leaves the announcement channel wide
+    open.
+
+    So the cadence is enforced on the server, not just in the planner that decides what to write. At
+    most one report per area per interval, whoever sends it, which is the rate the project intends
+    anyway. The first report for an area has no predecessor and is always allowed.
+
+    `now` is the collector's own clock, not anything from the pull request.
+    """
+    if not last_report_at or not now:
+        return True
+    try:
+        then = _parse_iso(last_report_at)
+        current = _parse_iso(now)
+    except ValueError:
+        # An unreadable timestamp must not silently disable the limit.
+        _refuse(f"could not read when {area} was last reported ({last_report_at!r})")
+    hours = (current - then).total_seconds() / 3600.0
+    if hours < min_hours:
+        _refuse(
+            f"{area} was reported {hours:.1f}h ago; reports for one roadmap are at least "
+            f"{min_hours:g}h apart"
         )
     return True
 
@@ -339,7 +387,7 @@ def check_baseline_paths(old_paths, parent, area):
 def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_progress,
            new_progress_bytes, check_runs, base_repo,
            current_main_cursor=None, compare_status=None, behind_by=None, main_sha="",
-           old_paths=None, code_window=None):
+           old_paths=None, code_window=None, last_report_at=None, now=None):
     """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
@@ -361,6 +409,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     )
     check_build(check_runs, head_sha)
     check_window(code_window, section)
+    check_rate(last_report_at, now, area)
 
     # The branch name encodes the window it reports, and `apply` derives it from the same plan that
     # produced the header. Requiring them to agree binds the branch to its content, so a branch
@@ -420,6 +469,8 @@ def main(argv=None):
             # `.get`, but the gate refuses when it is absent: a bundle from an older collector must
             # not silently skip the window check.
             code_window=data.get("code_window"),
+            last_report_at=data.get("last_report_at"),
+            now=data.get("collected_at"),
             current_main_cursor=data.get("current_main_cursor"),
             compare_status=data.get("compare_status"),
             behind_by=data.get("behind_by"),

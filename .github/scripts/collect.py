@@ -31,6 +31,7 @@ Run as: collect.py --repo O/R --pr N --out bundle.json
 
 import argparse
 import base64
+import datetime
 import json
 import pathlib
 import subprocess
@@ -152,6 +153,23 @@ def file_at(repo, ref, path):
     if encoding == "base64":
         return base64.b64decode(content).decode("utf-8", "surrogateescape")
     return content
+
+
+def last_commit_date(repo, ref, path):
+    """When `path` was last changed on `ref`, or None if never.
+
+    Used to enforce the per-roadmap reporting cadence on the server. Read from the base branch, so it
+    reflects reports that actually landed rather than anything the pull request claims.
+    """
+    proc = subprocess.run(
+        ["gh", "api", f"repos/{repo}/commits?sha={ref}&path={path}&per_page=1",
+         "--jq", ".[0].commit.committer.date"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise CollectError(f"reading the history of {path} failed: {proc.stderr.strip()}")
+    out = proc.stdout.strip()
+    return out if out and out != "null" else None
 
 
 def compare_status(repo, base, head):
@@ -280,7 +298,7 @@ def main(argv=None):
     # `TauCetiRoadmap/` first was a real hole: an area can exist under both parents, so a pull request
     # changing `Completed/<area>/` would be handed the ACTIVE log as its append-only baseline, and a
     # wholesale replacement of the archived log then looked like a valid append.
-    old_status = old_progress = None
+    old_status = old_progress = last_report_at = None
     old_paths = {}
     current_cursor = None
     parents = {gate.PATH_RE.match(p).group(1) for p in by_path}
@@ -295,6 +313,8 @@ def main(argv=None):
         }
         old_status = file_at(args.repo, main_sha, old_paths["STATUS.md"])
         old_progress = file_at(args.repo, main_sha, old_paths["PROGRESS.md"])
+        # When this roadmap was last reported, for the server-side cadence limit.
+        last_report_at = last_commit_date(args.repo, main_sha, old_paths["PROGRESS.md"])
         if old_progress:
             try:
                 current_cursor = files.cursor(old_progress)
@@ -321,6 +341,9 @@ def main(argv=None):
     bundle = {
         "base_repo": args.repo,
         "code_window": resolve_window(new_progress),
+        "last_report_at": last_report_at,
+        # The collector's own clock, never anything from the pull request.
+        "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "pr": pr,
         "area": area,
         "head_sha": head_sha,
