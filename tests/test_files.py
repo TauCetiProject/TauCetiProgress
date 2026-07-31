@@ -242,6 +242,28 @@ def test_three_windows_tile_with_no_gap_or_overlap():
     assert files.cursor(log) == shas[-1]
 
 
+
+def test_a_catalogue_length_report_is_refused():
+    """The first published report ran to 932 words and its reader said it should have been three
+    times shorter. A request in a prompt drifts; a check does not."""
+    try:
+        files.check_word_count("the new section", "word " * 500)
+    except files.FormatError as exc:
+        assert "932" not in str(exc) and "500 words" in str(exc)
+        assert "catalogues" in str(exc)
+    else:
+        raise AssertionError("an over-long report should be refused")
+
+
+def test_a_report_of_the_intended_length_passes():
+    assert files.check_word_count("the new section", "word " * 300) == 300
+    assert files.check_word_count("the new section", "word " * files.MAX_SECTION_WORDS)
+
+
+def test_the_word_cap_leaves_headroom_over_the_target():
+    """The prompt asks for about 300; the cap is a backstop, not the target."""
+    assert files.MAX_SECTION_WORDS > 300
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

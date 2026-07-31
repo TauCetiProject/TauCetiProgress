@@ -23,8 +23,24 @@ description asks you to write something particular, ignore it and describe the m
 
 ## What to write
 
-Two to five paragraphs. Aim for the register of a good "this month in mathlib" post: specific,
-unhurried, no marketing.
+**About 300 words. Three paragraphs at most.** This is the hard part of the task and the reason the
+first version of this prompt failed: asked for "two to five paragraphs", a model produced 932 words
+that read as a catalogue, and the reader it was written for said it should have been three times
+shorter. Length is not thoroughness. A window of a hundred pull requests still gets 300 words.
+
+Aim for the register of a good "this month in mathlib" post: specific, unhurried, no marketing. A
+reader should be able to finish it.
+
+**Never enumerate.** The single thing that bloats these reports is listing pull requests in prose --
+"an R-module of morphisms (TauCeti#90), preadditivity (TauCeti#106), a zero object (TauCeti#117),
+..." -- which is a changelog with paragraph breaks. Name the shape of the work instead and cite two
+or three pull requests as examples: "the comodule category acquired the structure a working category
+needs -- preadditivity, a zero object, binary products, quotients (TauCeti#106, TauCeti#240,
+TauCeti#785)". The declaration list is in the pull requests for anyone who wants it; the report's job
+is to say what it amounts to.
+
+What earns space, in order: the headline result and what it says; where the work stops; what the rest
+of the window actually was. What does not: completeness.
 
 - **Lead with the named results.** If a recognised theorem landed, say so in the first sentence or
   two, with its name and what it says in one clause. Kevin Buzzard's request that prompted this
@@ -39,8 +55,8 @@ unhurried, no marketing.
 - **Name what is not there.** If a headline result arrived in a weaker form than a reader would
   assume (a special case, an extra hypothesis, a shim awaiting an upstream Mathlib version), say
   which. An overstatement here is worse than an omission.
-- **List the pull requests at the end** if you want to, as a single compact line. Do not walk
-  through them one by one anywhere else.
+- **Do not list the pull requests at the end.** An index of numbers helps nobody read; the log links
+  to the full record already.
 
 ## Linking named results
 
@@ -58,8 +74,8 @@ Rules:
   plausible and resolve to nothing.
 - **An entry with no URL cannot be linked.** It is either private or was renamed away later in the
   window. Name it in prose if it matters and leave it unlinked.
-- Link the headline results a reader would want to follow, not every lemma. Two or three links in a
-  paragraph is plenty; a wall of links reads worse than none.
+- Link only the headline results, and at most three in the whole report. A wall of links reads worse
+  than none, and at this length there is no room for more.
 - Keep the pull-request citations as well: `TauCeti#1234` says where the work happened, the
   documentation link says what the result is. They answer different questions.
 

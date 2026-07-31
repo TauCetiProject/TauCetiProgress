@@ -43,6 +43,14 @@ MAX_PROGRESS_BYTES = 4 * 1024 * 1024
 # message to Zulip. The bar is deliberately low: a real section is several paragraphs, so this only
 # catches output that is empty or a stub, never a terse but genuine report.
 MIN_PROSE_CHARS = 200
+# A ceiling on a single report, in words. The prompt asks for about 300; this is the backstop, set
+# with headroom so an occasional longer window is fine and a catalogue is not.
+#
+# It exists because the failure it prevents actually happened: the first report published ran to 932
+# words, and the reader it was written for said it should have been three times shorter. A request
+# in a prompt drifts; a check does not. Enforced in `validate_update`, so `apply` refuses on the
+# worker before a pull request is opened rather than the gate refusing one that already exists.
+MAX_SECTION_WORDS = 450
 
 # Markdown that renders as nothing. An unclosed `<!--` swallows everything after it, so a body could
 # clear the prose floor while displaying no report at all -- and the same comment hides the footer of
@@ -412,6 +420,21 @@ def check_prose(name, body):
     return prose
 
 
+def check_word_count(name, body, cap=MAX_SECTION_WORDS):
+    """Refuse a report that has become a catalogue.
+
+    Words rather than bytes: the byte cap is a safety limit measured in kilobytes, which a report
+    can be four times too long without approaching. This one is about whether a person will read it.
+    """
+    words = len(body.split())
+    if words > cap:
+        raise FormatError(
+            f"{name} is {words} words; the limit is {cap}. Reports are summaries, not catalogues -- "
+            f"name what the work amounts to and cite a few pull requests, rather than listing them"
+        )
+    return words
+
+
 def check_size(name, text, cap):
     n = len(text.encode("utf-8"))
     if n > cap:
@@ -482,6 +505,7 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
         raise FormatError("new section records no PRs")
 
     check_size("the new section", added, MAX_SECTION_BYTES)
+    check_word_count("the new section", strip_one_header(added, PROGRESS_MARKER))
 
     # Shape before content: both files must carry their canonical framing, so a generation cannot
     # drop the heading or the disclaimer and still parse. Each returns the body that follows it.
