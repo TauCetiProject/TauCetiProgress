@@ -40,6 +40,17 @@ PUBLISHERS_PATH = ".github/progress-publishers.txt"
 # thing that should fail loudly here.
 _ID_RE = re.compile(r"\A[0-9]{1,20}\Z")
 
+# Characters that Python's `str.splitlines` treats as line breaks but a reviewer's eyes, a terminal
+# and GitHub's diff view generally do not. Left in, they let an entry hide inside what renders as a
+# single comment line:
+#
+#     # looks like one comment<U+2028>999999 attacker
+#
+# splits into a comment AND a live allowlist entry. Since the whole security value of this file is
+# that a human reviewed the diff, anything that makes the file read differently to a human than to
+# this parser is rejected outright rather than normalised.
+_EXOTIC_BREAKS = "\v\f\x1c\x1d\x1e\x85  "
+
 
 class NotAPublisher(RuntimeError):
     """This identity cannot land a progress report, so a round would waste its work."""
@@ -56,8 +67,18 @@ def parse_publishers(text):
     shrink the allowlist, and a too-small allowlist fails as "reports quietly stopped", which is far
     harder to diagnose than a parse error naming the line.
     """
+    if text.startswith("﻿"):  # a byte-order mark is cosmetic, not an entry
+        text = text[1:]
+    for ch in _EXOTIC_BREAKS:
+        if ch in text:
+            raise ValueError(
+                f"{PUBLISHERS_PATH}: contains U+{ord(ch):04X}, which some tools treat as a line "
+                f"break and others do not; the file must read the same way to a reviewer as to this "
+                f"parser"
+            )
     ids = set()
-    for lineno, raw in enumerate(text.splitlines(), 1):
+    # `split("\n")`, never `splitlines()`: the latter breaks on the characters rejected above.
+    for lineno, raw in enumerate(text.replace("\r\n", "\n").split("\n"), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue

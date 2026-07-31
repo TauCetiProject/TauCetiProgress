@@ -83,6 +83,39 @@ def test_non_ascii_digits_are_rejected():
         raise AssertionError(f"{bad!r} should not parse as a user id")
 
 
+def test_an_entry_cannot_hide_inside_an_apparent_comment():
+    """The file's whole security value is that a human reviewed the diff.
+
+    `str.splitlines` breaks on U+2028 and friends; a terminal, an editor and GitHub's diff view
+    generally do not. Left in, `# comment<U+2028>999999 attacker` reads as one comment line to the
+    reviewer and as a comment *plus a live entry* to the parser.
+    """
+    sneaky = "# looks like one comment 999999 attacker\n477956 kim-em\n"
+    try:
+        publisher.parse_publishers(sneaky)
+    except ValueError as exc:
+        assert "U+2028" in str(exc)
+    else:
+        raise AssertionError("an id hidden behind U+2028 must not be honoured")
+
+
+def test_every_exotic_line_break_is_rejected():
+    for ch in "\v\f\x1c\x1d\x1e\x85  ":
+        try:
+            publisher.parse_publishers(f"477956{ch}999999\n")
+        except ValueError:
+            continue
+        raise AssertionError(f"U+{ord(ch):04X} should be rejected")
+
+
+def test_ordinary_line_endings_still_work():
+    assert publisher.parse_publishers("477956\r\n1234\n") == {477956, 1234}
+
+
+def test_a_byte_order_mark_is_not_an_entry():
+    assert publisher.parse_publishers("﻿477956 kim-em\n") == {477956}
+
+
 def test_an_absurdly_long_run_of_digits_is_rejected():
     try:
         publisher.parse_publishers("9" * 21 + "\n")
