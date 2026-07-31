@@ -41,6 +41,16 @@ class NotDue(Exception):
     worker's `EX_NOPROGRESS`, so a round falls through to other work."""
 
 
+def docs_source_commit():
+    """The TauCeti commit the published documentation was built from, or None if unreadable."""
+    from .docs import Docs, DocsError
+
+    try:
+        return Docs().source_commit()
+    except DocsError:
+        return None
+
+
 def _utcnow():
     return datetime.datetime.now(datetime.timezone.utc)
 
@@ -183,7 +193,24 @@ def build_plan(
             raise NotDue(f"{only_area} is not a roadmap area in this checkout")
         areas = {only_area: areas[only_area]}
 
-    to_sha = window.head_sha(code_dir, ref=ref)
+    # The window ends at the commit the PUBLISHED DOCUMENTATION describes, not at the branch tip.
+    #
+    # `docgen` nominates the most recent commit with a published build, but the deploy is
+    # independent, so the branch can sit ahead of the site for a while. Ending the window at the tip
+    # would record a cursor covering work the report never described -- the next window starts after
+    # it, so that work would never be reported at all -- and would offer links for results whose
+    # pages do not exist yet. Ending it at the documented commit makes the header, the prose and the
+    # links describe one and the same state.
+    docs_sha = docs_source_commit()
+    if docs_sha is None:
+        raise NotDue("the published documentation could not be read, so no window can be closed")
+    tip = window.head_sha(code_dir, ref=ref)
+    if docs_sha != tip and not window.is_ancestor(code_dir, docs_sha, tip):
+        raise NotDue(
+            f"the documentation was built from {docs_sha[:7]}, which is not an ancestor of {ref} "
+            f"({tip[:7]}); they describe different histories"
+        )
+    to_sha = docs_sha
 
     candidates = []
     skipped = []

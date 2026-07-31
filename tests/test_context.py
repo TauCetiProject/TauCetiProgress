@@ -23,17 +23,21 @@ def check(name, fn):
 A, B = "a" * 40, "b" * 40
 
 
-def make(n_decls=3, n_prs=3, truncated=0, bootstrapped=False):
+def make(n_decls=3, n_prs=3, truncated=0, bootstrapped=False, docs_sha=B):
     plan = {"roadmap": "PDE", "from_sha": A, "to_sha": B, "bootstrapped": bootstrapped}
     decls = [
         {"name": f"d{i}", "kind": "theorem", "doc": f"Doc {i}." if i % 2 == 0 else "",
-         "file": f"TauCeti/PDE/F{i}.lean", "pr": 100 + i}
+         "file": f"TauCeti/PDE/F{i}.lean", "pr": 100 + i, "new": True,
+         "url": f"https://docs.example/TauCeti/PDE/F{i}.html#d{i}"}
         for i in range(n_decls)
     ]
     fact_data = {
         "declarations": decls,
-        "counts": {"prs": n_prs, "declarations": n_decls, "documented": sum(1 for d in decls if d["doc"]),
-                   "files": n_decls, "truncated_declarations": truncated},
+        "docs_sha": docs_sha,
+        "counts": {"prs": n_prs, "declarations": n_decls, "new": n_decls,
+                   "documented": sum(1 for d in decls if d["doc"]),
+                   "files": n_decls, "truncated_declarations": truncated,
+                   "truncated_modules": 0},
     }
     prs = [{"number": 100 + i, "title": f"feat: thing {i}", "body": f"Body {i}."} for i in range(n_prs)]
     return plan, fact_data, prs
@@ -98,6 +102,28 @@ def test_per_pr_declaration_drop_is_reported():
     plan, fact_data, prs = make(truncated=7)
     text = context.render(plan, fact_data, prs)
     assert "7 further declarations were dropped" in text
+
+
+def test_documentation_lagging_the_window_end_is_stated():
+    """The report must not read as covering work the documentation has not caught up with."""
+    plan, fact_data, prs = make(docs_sha="c" * 40)
+    text = context.render(plan, fact_data, prs)
+    assert "behind the window end" in text
+    assert "is NOT covered" in text
+
+
+def test_revised_declarations_are_marked_in_the_listing():
+    plan, fact_data, prs = make()
+    fact_data["declarations"][0]["new"] = False
+    text = context.render(plan, fact_data, prs)
+    assert "[revised, not new]" in text
+
+
+def test_urls_are_listed_for_linking():
+    plan, fact_data, prs = make()
+    text = context.render(plan, fact_data, prs)
+    assert "<https://docs.example/TauCeti/PDE/F0.html#d0>" in text
+    assert "VERBATIM" in text
 
 
 def test_bootstrap_is_flagged():

@@ -43,16 +43,27 @@ the worker's convention. `plan` runs at most once a day.
 A window is the half-open commit range `(from_sha, to_sha]` on TauCeti's **`docgen`** branch, where
 `from_sha` is the `to_sha` of the previous `PROGRESS.md` section.
 
-`docgen` follows the most recent commit on `main` whose API documentation has actually been
-published. Reporting against it means every result a report can name already has a documentation
-page, so the links it emits are guaranteed to resolve; reporting against `main` would routinely name
-results whose docs had not been built yet. The cost is latency — a report describes the project as of
-the last published docs build rather than the tip — which is the right trade for a document whose
-whole purpose is to be read, and the header records the exact commit either way.
+`docgen` nominates the most recent commit on `main` whose API documentation has been published, and
+the window ends at **the commit the published documentation actually reports** — read from the site
+itself, since the deploy is independent and the branch can sit ahead of it. Ending at the branch tip
+instead would record a cursor covering work the report never described, and because the next window
+starts after that cursor, the work in between would never be reported at all.
 
-Links themselves are computed, never written by the model: `facts` derives each URL from the module
-path and the declaration's fully-qualified name, and drops it for anything private or renamed away
-before the window ends, so a link that appears in a report resolves. PR numbers come from the squash-merge commit
+The cost is latency: a report describes the project as of the last published docs build rather than
+the tip. That is the right trade for a document whose whole purpose is to be read, and the header
+records the exact commit, so nothing is misdated.
+
+Links are not computed by this project at all, and neither are declaration names. Both are read from
+doc-gen4's own published output — the declaration index and each module page, which carry the exact
+name, kind, source file and line range — so a link resolves because it was read from the page it
+points at. `git blame` over those line ranges is what decides whether a declaration belongs to the
+window.
+
+There is deliberately no Lean parser here. Qualifying a name correctly means resolving `namespace`
+against `section`, `end`, `open ... in` and `_root_`, and many real declarations (projections,
+constructors, `deriving` output) are never written in the source at all. An approximation gets most
+names right, which is the worst outcome available: the wrong ones are indistinguishable from the
+right ones, and a link built from a wrong name is a plausible dead link. PR numbers come from the squash-merge commit
 subjects in that range and are attributed by their `roadmap/<Area>` label.
 
 Wall-clock time is used only for display. A cursor made of timestamps would be wrong: a worker

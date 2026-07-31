@@ -57,8 +57,9 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
     intro = [
         f"# Window: {plan['roadmap']}, {plan['from_sha'][:7]} to {plan['to_sha'][:7]}",
         "",
-        f"{counts['prs']} merged pull requests, {counts['declarations']} new declarations "
-        f"({counts['documented']} documented) across {counts['files']} files.",
+        f"{counts['prs']} merged pull requests, {counts['declarations']} declarations "
+        f"({counts['new']} newly written, {counts['documented']} documented) across "
+        f"{counts['files']} files.",
     ]
     if plan.get("bootstrapped"):
         intro.append(
@@ -73,12 +74,15 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
             f"Only {len(shown)} of {len(decls)} new declarations are listed (documented ones "
             f"first). Do not imply the report surveyed the rest."
         )
-    gone = counts.get("gone_by_end") or 0
-    if gone:
+    if fact_data.get("docs_sha") and fact_data["docs_sha"] != plan.get("to_sha"):
         notes.append(
-            f"{gone} declarations landed during this window but are no longer present at its end "
-            f"(renamed or refactored away). They are listed without a documentation link."
+            f"The published documentation was built from {fact_data['docs_sha'][:7]}, which is "
+            f"behind the window end {str(plan.get('to_sha'))[:7]}. Everything below is as of the "
+            f"documented commit, so anything merged after it is NOT covered."
         )
+    mods = counts.get("truncated_modules") or 0
+    if mods:
+        notes.append(f"{mods} further modules in this window were not inspected.")
     dropped = counts.get("truncated_declarations") or 0
     if dropped:
         notes.append(
@@ -110,17 +114,18 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
         "This list comes from git, not from anyone's description. Treat it as authoritative: if a",
         "result is not here, it did not land in this window.",
         "",
-        "Each entry ends with the declaration's documentation URL in angle brackets, where one",
-        "exists. Those URLs are computed and checked, not guessed: use them VERBATIM when you link a",
-        "result, and never construct or adapt one yourself. An entry with no URL has no published",
-        "page -- it is private, or it was renamed away later in the window -- so mention it in prose",
-        "if it matters, but do not link it.",
+        "Names, kinds and URLs here are the published documentation's own, not anything inferred",
+        "from the source. Each entry ends with its documentation URL in angle brackets: use it",
+        "VERBATIM when you link a result, and never construct or adapt one. An entry marked",
+        "[revised, not new] existed before this window and was changed in it, so do not present it",
+        "as a new result.",
         "",
     ]
     for d in shown:
         doc = f" -- {d['doc']}" if d["doc"] else ""
         url = f" <{d['url']}>" if d.get("url") else ""
-        body.append(f"- `{d['name']}` ({d['kind']}, TauCeti#{d['pr']}, {d['file']}){doc}{url}")
+        state = "" if d.get("new") else " [revised, not new]"
+        body.append(f"- `{d['name']}` ({d['kind']}, TauCeti#{d['pr']}, {d['file']}){state}{doc}{url}")
 
     body += [
         "",
