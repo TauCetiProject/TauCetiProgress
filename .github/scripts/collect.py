@@ -26,20 +26,19 @@ them explicitly:
 * The previous contents of the two files are read at `main_sha`, not from a working checkout that
   could have drifted.
 
-Run as: collect.py --repo O/R --pr N --allowed-user-ids 1,2 --out bundle.json
+Run as: collect.py --repo O/R --pr N --out bundle.json
 """
 
 import argparse
 import base64
 import json
 import pathlib
-import re
 import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from progress import files, gate  # noqa: E402
+from progress import files, gate, publisher  # noqa: E402
 
 # `compare` returns at most 300 files. More than that cannot be a progress report, and a truncated
 # list could HIDE a path from the gate, so anything approaching the limit is refused outright rather
@@ -154,7 +153,6 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
     ap.add_argument("--pr", required=True, type=int)
-    ap.add_argument("--allowed-user-ids", required=True)
     ap.add_argument("--base-branch", default="main")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
@@ -167,6 +165,24 @@ def main(argv=None):
     main_sha = gh_api(f"repos/{args.repo}/commits/{args.base_branch}").get("sha") or ""
     if not main_sha:
         raise CollectError(f"could not resolve {args.base_branch}")
+
+    # The allowlist, read from the base commit rather than the head. Reading it at the head would let
+    # a pull request add its own author and merge itself; reading it here means changing it is an
+    # ordinary roadmap pull request against a path CODEOWNERS assigns to the core team.
+    #
+    # Both failures below are fatal rather than a refusal. A missing or malformed allowlist is a
+    # misconfiguration of the repository, and the run going red is the signal; refusing quietly would
+    # look exactly like "no reports were due", which is the failure mode hardest to notice.
+    publishers_text = file_at(args.repo, main_sha, publisher.PUBLISHERS_PATH)
+    if publishers_text is None:
+        raise CollectError(
+            f"{publisher.PUBLISHERS_PATH} does not exist at {main_sha[:7]}; without it no author can "
+            f"be authorised and every report would be refused"
+        )
+    try:
+        allowed_user_ids = sorted(publisher.parse_publishers(publishers_text))
+    except ValueError as exc:
+        raise CollectError(str(exc))
 
     # The area comes from the branch and is validated by the gate's own pattern. Reading it here with
     # the gate's regex keeps the two from disagreeing.
@@ -256,7 +272,7 @@ def main(argv=None):
 
     bundle = {
         "base_repo": args.repo,
-        "allowed_user_ids": [int(x) for x in re.split(r"[,\s]+", args.allowed_user_ids) if x],
+        "allowed_user_ids": allowed_user_ids,
         "pr": pr,
         "area": area,
         "head_sha": head_sha,

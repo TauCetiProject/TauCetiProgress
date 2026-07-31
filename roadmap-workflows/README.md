@@ -9,7 +9,8 @@ deliberate human act.
 
 ## Installing
 
-1. Commit the two files into `TauCetiRoadmap/.github/workflows/`.
+1. Commit the two workflow files into `TauCetiRoadmap/.github/workflows/`, and
+   `progress-publishers.txt` into `TauCetiRoadmap/.github/`.
 2. Replace every `REPLACE_WITH_FULL_SHA` with the full 40-character SHA of the TauCetiProgress commit
    you are pinning. Each file uses it **twice** — once in `uses:` and once in `progress_ref:` — and
    both must be that same SHA. `uses:` selects the workflow definition; `progress_ref` selects the
@@ -19,6 +20,28 @@ deliberate human act.
    (`APP_ID` / `APP_PRIVATE_KEY` are already present, used by the existing `auto-merge.yml`.)
 4. Subscribe the Zulip bot to the **Tau Ceti** channel.
 5. Add the machine-owned declaration to the repository `README.md` — see `readme-snippet.md`.
+
+## Who may publish
+
+`.github/progress-publishers.txt` in TauCetiRoadmap lists the numeric user ids whose progress pull
+requests may merge unattended. It is a file rather than a workflow input for two reasons: adding a
+publisher is then an ordinary reviewed pull request instead of an edit to a workflow, and an
+operator's own tooling can read the same list to decide, before spending anything, whether a round
+could ever land.
+
+The merge check reads it at the pull request's **base** commit, never its head, so a pull request
+cannot list its own author. `/.github/` belongs to `@TauCetiProject/humans` in CODEOWNERS, so an
+addition takes a core-team review.
+
+A listed account also needs push access to TauCetiRoadmap, because the report branch is pushed to
+this repository directly and the merge check refuses fork heads. The two conditions are independent,
+and `tauceti-progress due` checks both.
+
+Listing someone does grant privilege they would not otherwise have: everyone except an organization
+admin currently needs a second reviewer to land anything here, and a publisher can land two
+machine-owned markdown files alone. The blast radius is bounded by the merge check to exactly those
+files, in one roadmap directory, with the log append-only, but the prose itself is not validated.
+Treat a listing as the same order of trust as roadmap review.
 
 ## Keeping versions in step
 

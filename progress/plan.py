@@ -22,6 +22,10 @@ from .window import CODE_REF
 
 IDLE_HOURS = 24.0
 MIN_PRS = 10
+# How long an open progress pull request keeps marking its area in flight. Past this it is assumed
+# stuck rather than pending: one full cadence period is long enough for any pull request that was
+# going to merge to have merged, and the merge check re-runs on every push and on CI completing.
+STALE_PR_HOURS = 24.0
 
 # The commit-subject prefix that marks a merged progress update. `apply` uses it as the PR title
 # prefix, and a squash merge carries the PR title into the commit subject, so this one string links
@@ -159,6 +163,46 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     return window.first_parent_before(repo_dir, merge)
 
 
+def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS):
+    """`({area: pr}, [stale_note])` from the open progress pull requests.
+
+    The branch is `progress/<from7>-<to7>/<Area>`, so the area is the last segment.
+
+    An open progress pull request marks its area in flight, but only for a while. One that the merge
+    check refuses permanently never merges and never closes itself, and treating it as in flight
+    forever would stop that roadmap being reported by *anyone*, including the maintainer, with no
+    signal beyond the area quietly never appearing again. Past `stale_hours` it stops blocking and is
+    reported as a note instead, so the next round covers the area over a wider window and the
+    abandoned pull request becomes visible rather than merely obstructive.
+
+    A pull request with no or unreadable `createdAt` keeps blocking. Age is the only evidence that it
+    is stuck, and without it the safe assumption is that it is still in flight: opening a duplicate is
+    worse than waiting.
+    """
+    now = now or _utcnow()
+    blocked, stale = {}, []
+    for pr in open_prs:
+        parts = (pr.get("headRefName") or "").split("/")
+        if len(parts) < 3:
+            continue
+        area_name = parts[-1]
+        age_hours = None
+        created = pr.get("createdAt")
+        if created:
+            try:
+                age_hours = (now - _parse_iso(created)).total_seconds() / 3600.0
+            except ValueError:
+                age_hours = None
+        if age_hours is not None and age_hours > stale_hours:
+            stale.append(
+                f"{area_name}: PR #{pr.get('number')} has been open {age_hours / 24:.1f} days "
+                f"without merging, so it no longer marks the area in flight -- close it if it is dead"
+            )
+            continue
+        blocked[area_name] = pr
+    return blocked, stale
+
+
 def build_plan(
     roadmap_dir,
     code_dir,
@@ -167,6 +211,7 @@ def build_plan(
     ref=CODE_REF,
     idle_hours=IDLE_HOURS,
     min_prs=MIN_PRS,
+    stale_hours=STALE_PR_HOURS,
     now=None,
     only_area=None,
 ):
@@ -180,12 +225,7 @@ def build_plan(
     cadence_reason = check_cadence(commits, idle_hours=idle_hours, now=now)
 
     open_prs = gh.open_progress_prs() if open_prs is None else open_prs
-    # `progress/<from7>-<to7>/<Area>` -- the area is the last segment.
-    blocked = {}
-    for pr in open_prs:
-        parts = (pr.get("headRefName") or "").split("/")
-        if len(parts) >= 3:
-            blocked[parts[-1]] = pr
+    blocked, stale = in_flight_areas(open_prs, now=now, stale_hours=stale_hours)
 
     areas = discover_areas(roadmap_dir)
     if only_area:
@@ -213,7 +253,7 @@ def build_plan(
     to_sha = docs_sha
 
     candidates = []
-    skipped = []
+    skipped = list(stale)
     for area, rel_dir in areas.items():
         if area in blocked:
             skipped.append(f"{area}: PR #{blocked[area]['number']} is still open")

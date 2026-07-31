@@ -100,12 +100,14 @@ jobs:
     with:
       pr: ${{ fromJSON(needs.resolve.outputs.pr) }}
       progress_ref: REPLACE_WITH_FULL_SHA
-      # Numeric user ids permitted to author progress pull requests. Ids, never logins: a login can
-      # be renamed and the old name re-registered by someone else.
-      #   477956 = kim-em, the account the worker authenticates as.
-      # This grants no privilege that account lacks -- it is already an OrganizationAdmin bypass
-      # actor on this ruleset -- so the check's real job is excluding everyone else.
-      allowed_user_ids: "477956"
+      # Who may author these pull requests is NOT set here. It is read from
+      # `.github/progress-publishers.txt` at the base commit of `main`, so that adding a publisher is
+      # an ordinary reviewed pull request rather than an edit to this workflow, and so an operator's
+      # own tooling can check the same list before spending a round.
+      #
+      # Read at the BASE, never the head: otherwise a pull request could add its own author and merge
+      # itself. `/.github/` belongs to @TauCetiProject/humans in CODEOWNERS, so changing the list
+      # takes a core-team review.
       # `tau-ceti-roadmap-sync`, the App this repository's ruleset lists as a bypass actor. It must be
       # this one and not `secrets.APP_ID` (the review bot, which auto-merge.yml uses): the review bot
       # bypasses TauCeti's ruleset, not this one, so a direct merge with its token would be refused

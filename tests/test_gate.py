@@ -145,7 +145,7 @@ def test_refuses_an_unlisted_author():
     pr = make_pr(user={"id": 999999, "login": "kim-em"})
     # Note the login still says kim-em: identity is the numeric id precisely so that a renamed or
     # impersonated login cannot pass.
-    refuses(lambda: call(pr=pr), "not in the allowlist")
+    refuses(lambda: call(pr=pr), "progress-publishers.txt")
 
 
 def test_refuses_a_draft():

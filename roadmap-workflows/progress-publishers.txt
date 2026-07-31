@@ -1,0 +1,24 @@
+# Accounts permitted to publish automated progress reports.
+#
+# This file is the allowlist for `progress-merge.yml`. A pull request that changes only a roadmap's
+# STATUS.md and PROGRESS.md, and passes every other check, merges without human review when its
+# author is listed here. Anything else is left for a human like any other contribution.
+#
+# The list is read from `main` at the pull request's BASE commit, never from its head, so a pull
+# request cannot list its own author. `/.github/` belongs to @TauCetiProject/humans in CODEOWNERS,
+# so adding an entry takes a core-team review.
+#
+# Entries are numeric GitHub user ids, one per line, with the login as a comment for readability.
+# Ids rather than logins because a login can be renamed and the old name claimed by someone else,
+# which would silently transfer publishing rights. Find an id with:
+#
+#     gh api users/<login> --jq .id
+#
+# A listed account also needs push access to this repository: the report branch is pushed here
+# directly, because the merge check refuses pull requests opened from forks.
+#
+# Being listed grants the ability to land two machine-owned markdown files per roadmap without a
+# second pair of eyes. Their prose is not security-validated (see the README), so treat a listing as
+# the same kind of trust as roadmap review, not as a lesser one.
+
+477956   kim-em

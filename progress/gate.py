@@ -94,7 +94,14 @@ def check_provenance(pr, allowed_user_ids, base_repo, base_branch="main"):
 
     author_id = ((pr.get("user") or {}).get("id"))
     if author_id not in set(allowed_user_ids):
-        _refuse(f"author id {author_id} is not in the allowlist")
+        # Name the file: this refusal is posted as a comment, and an operator whose round produced a
+        # report they are not permitted to land needs to know where the list is, not just that they
+        # failed. `tauceti-progress due` checks the same list before a round starts, so reaching this
+        # point at all means the two disagree, usually a stale local checkout.
+        _refuse(
+            f"author id {author_id} is not listed in .github/progress-publishers.txt on the base "
+            f"branch, so this report cannot merge unattended"
+        )
 
     branch = head.get("ref") or ""
     m = BRANCH_RE.match(branch)
