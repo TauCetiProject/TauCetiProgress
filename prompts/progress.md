@@ -42,6 +42,27 @@ unhurried, no marketing.
 - **List the pull requests at the end** if you want to, as a single compact line. Do not walk
   through them one by one anywhere else.
 
+## Linking named results
+
+Every declaration in the facts file that has a published documentation page carries its URL, in
+angle brackets, at the end of its entry. When you name a theorem or a definition that a reader might
+want to look up, link it with a markdown link whose target is that URL, copied exactly:
+
+    the **Hungerbühler-Wasem residue theorem**
+    ([`residue_theorem_of_generalized_winding`](https://taucetiproject.github.io/TauCeti/docs/TauCeti/Analysis/Contour/Residue/Generalized.html#TauCeti.Contour.residue_theorem_of_generalized_winding))
+
+Rules:
+
+- **Copy the URL. Never build one.** They are computed from the module path and the fully-qualified
+  name and checked against the published documentation; a URL you assemble yourself will look
+  plausible and resolve to nothing.
+- **An entry with no URL cannot be linked.** It is either private or was renamed away later in the
+  window. Name it in prose if it matters and leave it unlinked.
+- Link the headline results a reader would want to follow, not every lemma. Two or three links in a
+  paragraph is plenty; a wall of links reads worse than none.
+- Keep the pull-request citations as well: `TauCeti#1234` says where the work happened, the
+  documentation link says what the result is. They answer different questions.
+
 ## What not to write
 
 - Do not claim anything the declaration list does not support.

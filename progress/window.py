@@ -1,8 +1,8 @@
-"""Commit windows: turning a range of TauCeti `main` into the set of PRs it contains.
+"""Commit windows: turning a range of TauCeti history into the set of PRs it contains.
 
-A window is the half-open commit range `(from_sha, to_sha]` on `main`. `from_sha` is the previous
-section's `to_sha`, so consecutive windows tile exactly with no gap and no overlap, and the
-identity of a window does not depend on anyone's clock.
+A window is the half-open commit range `(from_sha, to_sha]` on the docs-tracking branch (see
+`CODE_REF`). `from_sha` is the previous section's `to_sha`, so consecutive windows tile exactly with
+no gap and no overlap, and the identity of a window does not depend on anyone's clock.
 
 Timestamps are used only for display and for the "is an update due" cadence, never as the cursor.
 A cursor made of timestamps is wrong in a way that loses work silently: a worker whose clock runs
@@ -20,6 +20,19 @@ import subprocess
 # history, so both are recognised; anything else contributes no PR number.
 _SQUASH_RE = re.compile(r"\(#(\d+)\)\s*\Z")
 _MERGE_RE = re.compile(r"\AMerge pull request #(\d+)\b")
+
+
+# Windows track the `docgen` branch of TauCeti, NOT `main`.
+#
+# `docgen` follows the most recent commit on `main` for which the API documentation has actually been
+# published. Reporting against it means every declaration a report can mention already has a page, so
+# a link to it is guaranteed to resolve. Reporting against `main` would routinely name results whose
+# documentation had not been built yet, and every such link would 404 until the next docs build.
+#
+# The cost is latency: a report describes the project as of the last published docs build rather than
+# the tip. That is the right trade for a document whose whole purpose is to be readable, and the
+# header records the exact commit either way, so nothing is misdated.
+CODE_REF = "origin/docgen"
 
 
 class GitError(RuntimeError):
@@ -99,9 +112,9 @@ def window_prs(repo_dir, from_sha, to_sha):
     return pr_numbers_from_log(log)
 
 
-def head_sha(repo_dir, ref="origin/main"):
-    """One observed SHA for `ref`. Read once per plan and reused everywhere downstream, so that
-    the PR set and the recorded `to_sha` are guaranteed to describe the same history."""
+def head_sha(repo_dir, ref=CODE_REF):
+    """One observed SHA for `ref` (the docs-tracking branch by default). Read once per plan and reused
+    everywhere downstream, so the PR set and the recorded `to_sha` describe the same history."""
     return git(["rev-parse", ref], repo_dir).strip()
 
 
@@ -121,7 +134,7 @@ def commit_date(repo_dir, sha):
     return git(["log", "-1", "--format=%cI", sha], repo_dir).strip()
 
 
-def find_merge_commit(repo_dir, pr_number, ref="origin/main"):
+def find_merge_commit(repo_dir, pr_number, ref=CODE_REF):
     """The mainline commit that merged `pr_number`, or None.
 
     Used only for bootstrap, where an area's earliest labelled PR must be located in history.

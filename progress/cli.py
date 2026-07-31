@@ -120,7 +120,8 @@ def build_parser():
     p = sub.add_parser("plan", help="pick the roadmap and the PR window")
     p.add_argument("--roadmap-dir", required=True, help="a TauCetiRoadmap checkout")
     p.add_argument("--code-dir", required=True, help="a full-history TauCeti checkout")
-    p.add_argument("--ref", default="origin/main", help="the code ref to read (default origin/main)")
+    p.add_argument("--ref", default=None,
+                   help="the code ref to read (default: the docs-tracking branch, origin/docgen)")
     p.add_argument("--idle-hours", type=float, default=None)
     p.add_argument("--min-prs", type=int, default=None)
     p.add_argument("--area", default=None, help="force a single area (testing)")
@@ -160,6 +161,8 @@ def main(argv=None):
         args.idle_hours = plan_mod.IDLE_HOURS
     if getattr(args, "min_prs", None) is None:
         args.min_prs = plan_mod.MIN_PRS
+    if getattr(args, "ref", None) is None:
+        args.ref = plan_mod.CODE_REF
     try:
         return args.fn(args)
     except KeyboardInterrupt:

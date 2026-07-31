@@ -18,6 +18,7 @@ import pathlib
 import re
 
 from . import files, gh, window
+from .window import CODE_REF
 
 IDLE_HOURS = 24.0
 MIN_PRS = 10
@@ -127,7 +128,7 @@ def area_window(repo_dir, area_prs, from_sha, to_sha):
     return [n for n in numbers if n in wanted]
 
 
-def bootstrap_from_sha(repo_dir, area, area_prs, ref="origin/main"):
+def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     """A `from_sha` for an area that has never been reported, or None if it has no merged PRs.
 
     The window is half-open, so the cursor must be the *parent* of the area's earliest labelled
@@ -153,7 +154,7 @@ def build_plan(
     code_dir,
     commits=None,
     open_prs=None,
-    ref="origin/main",
+    ref=CODE_REF,
     idle_hours=IDLE_HOURS,
     min_prs=MIN_PRS,
     now=None,

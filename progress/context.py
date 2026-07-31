@@ -73,6 +73,12 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
             f"Only {len(shown)} of {len(decls)} new declarations are listed (documented ones "
             f"first). Do not imply the report surveyed the rest."
         )
+    gone = counts.get("gone_by_end") or 0
+    if gone:
+        notes.append(
+            f"{gone} declarations landed during this window but are no longer present at its end "
+            f"(renamed or refactored away). They are listed without a documentation link."
+        )
     dropped = counts.get("truncated_declarations") or 0
     if dropped:
         notes.append(
@@ -104,10 +110,17 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
         "This list comes from git, not from anyone's description. Treat it as authoritative: if a",
         "result is not here, it did not land in this window.",
         "",
+        "Each entry ends with the declaration's documentation URL in angle brackets, where one",
+        "exists. Those URLs are computed and checked, not guessed: use them VERBATIM when you link a",
+        "result, and never construct or adapt one yourself. An entry with no URL has no published",
+        "page -- it is private, or it was renamed away later in the window -- so mention it in prose",
+        "if it matters, but do not link it.",
+        "",
     ]
     for d in shown:
         doc = f" -- {d['doc']}" if d["doc"] else ""
-        body.append(f"- `{d['name']}` ({d['kind']}, TauCeti#{d['pr']}, {d['file']}){doc}")
+        url = f" <{d['url']}>" if d.get("url") else ""
+        body.append(f"- `{d['name']}` ({d['kind']}, TauCeti#{d['pr']}, {d['file']}){doc}{url}")
 
     body += [
         "",

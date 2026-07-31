@@ -123,6 +123,51 @@ def test_non_lean_changes_contribute_nothing():
         assert got["counts"]["prs"] == 1
 
 
+def test_doc_url_is_derived_from_module_and_full_name():
+    """Verified against the live documentation while this was written: every public declaration in a
+    sampled module has an anchor under its FULLY-QUALIFIED name, and no private one does."""
+    url = facts.doc_url("TauCeti/Analysis/Fredholm/Basic.lean", "TauCeti.IsFredholm")
+    assert url == (
+        "https://taucetiproject.github.io/TauCeti/docs/"
+        "TauCeti/Analysis/Fredholm/Basic.html#TauCeti.IsFredholm"
+    ), url
+    assert facts.doc_url("scripts/x.py", "whatever") is None
+    assert facts.doc_url("TauCeti/A.txt", "whatever") is None
+
+
+def test_private_declarations_get_no_url():
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
+        root = commit(tmp, "init", {"README.md": "x"})
+        src = ("namespace TauCeti\n"
+               "/-- Public. -/\ntheorem pub : True := trivial\n"
+               "/-- Hidden. -/\nprivate lemma priv : True := trivial\n"
+               "end TauCeti\n")
+        head = commit(tmp, "feat: both (#5)", {"TauCeti/A.lean": src})
+        got = facts.collect(tmp, root, head)
+        by = {d["name"]: d for d in got["declarations"]}
+        assert by["TauCeti.pub"]["url"], by["TauCeti.pub"]
+        assert by["TauCeti.priv"]["url"] is None, by["TauCeti.priv"]
+
+
+def test_declarations_gone_by_the_end_lose_their_url():
+    """A declaration added mid-window and renamed away later still landed -- the mathematics
+    happened -- but it has no page at the commit the docs were built from, so it must not be linked."""
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
+        root = commit(tmp, "init", {"README.md": "x"})
+        commit(tmp, "feat: add it (#1)", {
+            "TauCeti/A.lean": "namespace TauCeti\n/-- D. -/\ntheorem transient : True := trivial\nend TauCeti\n"})
+        end = commit(tmp, "refactor: rename it (#2)", {
+            "TauCeti/A.lean": "namespace TauCeti\n/-- D. -/\ntheorem renamed : True := trivial\nend TauCeti\n"})
+        got = facts.collect(tmp, root, end)
+        by = {d["name"]: d for d in got["declarations"]}
+        assert by["TauCeti.transient"]["url"] is None, by["TauCeti.transient"]
+        assert by["TauCeti.transient"].get("gone_by_end") is True
+        assert by["TauCeti.renamed"]["url"], by["TauCeti.renamed"]
+        assert got["counts"]["gone_by_end"] == 1, got["counts"]
+
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

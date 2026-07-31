@@ -159,6 +159,72 @@ def test_added_declarations_from_nothing():
     assert added["x"]["doc"] == "Doc."
 
 
+def test_names_are_fully_qualified():
+    """Documentation anchors use the FULL name (`TauCeti.IsFredholm`), so a bare name cannot be
+    turned into a link."""
+    src = """
+namespace TauCeti
+theorem foo : True := trivial
+namespace Inner
+theorem bar : True := trivial
+end Inner
+theorem baz : True := trivial
+end TauCeti
+theorem top : True := trivial
+"""
+    d = lean.declarations(src)
+    assert set(d) == {"TauCeti.foo", "TauCeti.Inner.bar", "TauCeti.baz", "top"}, sorted(d)
+    assert d["TauCeti.Inner.bar"]["name"] == "bar"
+
+
+def test_dotted_namespace_is_one_scope():
+    src = "namespace A.B\ntheorem x : True := trivial\nend A.B\ntheorem y : True := trivial\n"
+    assert set(lean.declarations(src)) == {"A.B.x", "y"}
+
+
+def test_sections_do_not_qualify_but_are_closed_by_end():
+    """`end` closes sections and namespaces alike, so sections must be tracked or a later `end`
+    would pop the namespace early and mis-qualify everything after it."""
+    src = """
+namespace N
+section S
+theorem a : True := trivial
+end S
+theorem b : True := trivial
+end N
+theorem c : True := trivial
+"""
+    assert set(lean.declarations(src)) == {"N.a", "N.b", "c"}, sorted(lean.declarations(src))
+
+
+def test_anonymous_section_is_popped_by_a_bare_end():
+    src = "namespace N\nsection\ntheorem a : True := trivial\nend\ntheorem b : True := trivial\nend N\n"
+    assert set(lean.declarations(src)) == {"N.a", "N.b"}
+
+
+def test_root_escapes_the_namespace():
+    """`_root_.Foo` is absolute; prefixing it would produce a name that does not exist."""
+    src = "namespace TauCeti\ntheorem _root_.Other.thing : True := trivial\nend TauCeti\n"
+    assert set(lean.declarations(src)) == {"Other.thing"}
+
+
+def test_private_is_recorded():
+    src = "namespace N\nprivate lemma hidden : True := trivial\ntheorem shown : True := trivial\nend N\n"
+    d = lean.declarations(src)
+    assert d["N.hidden"]["private"] is True
+    assert d["N.shown"]["private"] is False
+
+
+def test_namespace_keyword_inside_a_docstring_is_ignored():
+    src = """
+/-- Discussion of the
+namespace Evil
+and its uses. -/
+theorem real : True := trivial
+"""
+    assert set(lean.declarations(src)) == {"real"}, sorted(lean.declarations(src))
+
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

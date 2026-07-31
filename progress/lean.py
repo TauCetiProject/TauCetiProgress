@@ -19,6 +19,9 @@ import re
 
 # Modifiers that may precede the declaration keyword, and attribute blocks like `@[simp]`.
 _PREFIX = r"(?:@\[[^\]]*\]\s*)*(?:(?:public|private|protected|noncomputable|partial|unsafe|scoped|local)\s+)*"
+# `private` matters beyond parsing: doc-gen4 publishes no page for a private declaration, so one
+# must never be turned into a documentation link.
+_PRIVATE_RE = re.compile(r"\A(?:@\[[^\]]*\]\s*)*private\b")
 _KINDS = "theorem|lemma|def|abbrev|instance|structure|class|inductive|opaque|axiom"
 
 # A declaration must start at column zero: everything in this library is top-level, and requiring
@@ -27,6 +30,13 @@ _DECL_RE = re.compile(rf"\A{_PREFIX}({_KINDS})\b[ \t]*([^\s:({{\[|]*)")
 
 # `instance` may be anonymous (`instance : Foo Bar := ...`), which is legitimate and unnameable.
 ANONYMOUS = "<anonymous>"
+
+# Scope openers and closers. `namespace` contributes to a declaration's full name; `section` does not,
+# but both are closed by `end`, and `end` may name what it closes or (for an anonymous section) not.
+# Tracking them together is the only way to know what a bare `end` pops.
+_NAMESPACE_RE = re.compile(r"\Anamespace\s+([A-Za-z_][A-Za-z0-9_.']*)")
+_SECTION_RE = re.compile(r"\Asection(?:\s+([A-Za-z_][A-Za-z0-9_.']*))?\s*\Z")
+_END_RE = re.compile(r"\Aend(?:\s+([A-Za-z_][A-Za-z0-9_.']*))?\s*\Z")
 
 
 def _strip_to_segments(text):
@@ -120,20 +130,57 @@ def _first_sentence(doc):
 
 
 def declarations(text):
-    """`{name: {"kind", "doc"}}` for the declarations `text` introduces.
+    """`{full_name: {"kind", "doc", "name"}}` for the declarations `text` introduces.
+
+    Names are FULLY QUALIFIED, because that is what identifies a declaration everywhere outside its
+    own file: the generated documentation anchors on `TauCeti.IsFredholm`, not `IsFredholm`, so a bare
+    name cannot be turned into a link. `name` keeps the short form for prose.
 
     Anonymous instances are collected under a single `<anonymous>` key and carry no useful identity;
     callers generally drop them.
     """
     docs, code_lines = _strip_to_segments(text)
     out = {}
+    scopes = []  # [(is_namespace, name)] -- sections are tracked too, since `end` closes both
     for line_no, line in code_lines:
+        m = _NAMESPACE_RE.match(line)
+        if m:
+            scopes.append((True, m.group(1)))
+            continue
+        m = _SECTION_RE.match(line)
+        if m:
+            scopes.append((False, m.group(1) or ""))
+            continue
+        m = _END_RE.match(line)
+        if m:
+            closing = m.group(1)
+            if closing is None:
+                if scopes:
+                    scopes.pop()
+            else:
+                # `end A.B` closes the scope opened as `namespace A.B`; pop back to and including it.
+                for i in range(len(scopes) - 1, -1, -1):
+                    if scopes[i][1] == closing:
+                        del scopes[i:]
+                        break
+                else:
+                    # An `end` naming something we never saw open: the file is not one we can track
+                    # reliably, so stop qualifying rather than guess.
+                    scopes.clear()
+            continue
+
         m = _DECL_RE.match(line)
         if not m:
             continue
         kind, name = m.group(1), (m.group(2) or "").strip()
         if not name:
             name = ANONYMOUS
+        # `_root_.Foo` deliberately escapes the enclosing namespace, so it is already absolute.
+        if name.startswith("_root_."):
+            full, name = name[len("_root_."):], name[len("_root_."):]
+        else:
+            prefix = ".".join(n for is_ns, n in scopes if is_ns and n)
+            full = f"{prefix}.{name}" if (prefix and name != ANONYMOUS) else name
         # The docstring is the one that closed on an earlier line with only blanks in between;
         # `docs` is keyed by the line the comment ended on, so look back a little.
         doc = ""
@@ -141,8 +188,13 @@ def declarations(text):
             if back in docs:
                 doc = docs[back]
                 break
-        if name not in out:
-            out[name] = {"kind": kind, "doc": _first_sentence(doc)}
+        if full not in out:
+            out[full] = {
+                "kind": kind,
+                "doc": _first_sentence(doc),
+                "name": name,
+                "private": bool(_PRIVATE_RE.match(line)),
+            }
     return out
 
 

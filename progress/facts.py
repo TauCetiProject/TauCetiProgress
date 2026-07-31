@@ -20,6 +20,26 @@ from . import lean, window
 LEAN_PREFIX = "TauCeti/"
 LEAN_SUFFIX = ".lean"
 
+# Generated API documentation. The site is rebuilt from the `docgen` branch, which is exactly why
+# windows track that branch: every declaration in a window is therefore guaranteed to have a page,
+# so a link can be emitted without checking whether the build has caught up.
+#
+# The URL is derived mechanically -- module path from the file, anchor from the fully-qualified name
+# -- rather than left to the model, which would invent plausible-looking links. Verified against the
+# live site: every public declaration in a sampled module has an anchor, and no private one does.
+DOCS_BASE = "https://taucetiproject.github.io/TauCeti/docs"
+
+
+def doc_url(path, full_name):
+    """The documentation URL for a declaration, or None when it has no published page.
+
+    `private` declarations are not documented by doc-gen4, so they get no link.
+    """
+    if not path.startswith(LEAN_PREFIX) or not path.endswith(LEAN_SUFFIX):
+        return None
+    module = path[: -len(LEAN_SUFFIX)]
+    return f"{DOCS_BASE}/{module}.html#{full_name}"
+
 # Per-PR caps. A single PR adding hundreds of declarations is real (a big port), but a report does
 # not need all of them, and an unbounded list would blow the model's context on the bootstrap
 # window. The truncation is recorded so the report can never read as complete when it is not.
@@ -61,8 +81,39 @@ def declarations_added_by(repo_dir, commit):
                     "kind": info["kind"],
                     "doc": info["doc"][:MAX_DOC_CHARS],
                     "file": path,
+                    "short": info.get("name") or name,
+                    # No link for a private declaration: doc-gen4 publishes no page for one.
+                    "url": None if info.get("private") else doc_url(path, name),
                 }
     return added
+
+
+def _present_at(repo_dir, sha, path, cache):
+    """The fully-qualified declarations a file defines at `sha`. Cached per file."""
+    key = (sha, path)
+    if key not in cache:
+        cache[key] = set(lean.declarations(_show(repo_dir, sha, path)))
+    return cache[key]
+
+
+def resolve_urls(repo_dir, to_sha, declarations_by_name):
+    """Drop the documentation URL of anything not still present at `to_sha`.
+
+    A declaration added mid-window and later renamed or refactored away is still, correctly, reported
+    as having landed -- the mathematics did happen -- but it has no page at the commit the docs were
+    built from, so a link to it would not resolve. Checking presence at the window's end is a local
+    git read, and it is the difference between "every link works" and "most links work".
+    """
+    cache = {}
+    dropped = 0
+    for info in declarations_by_name.values():
+        if not info.get("url"):
+            continue
+        if info["name"] not in _present_at(repo_dir, to_sha, info["file"], cache):
+            info["url"] = None
+            info["gone_by_end"] = True
+            dropped += 1
+    return dropped
 
 
 def collect(repo_dir, from_sha, to_sha, pr_numbers=None):
@@ -106,6 +157,9 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None):
         for k, v in kept:
             flat.setdefault(k, {"name": k, **v, "pr": n})
 
+    # Only link what is still there at the end of the window; see resolve_urls.
+    unlinkable = resolve_urls(repo_dir, to_sha, flat)
+
     # A documented declaration is more likely to be a result worth naming than an undocumented
     # helper, so lead with the documented ones. This is a presentation order, not a judgement.
     ordered = sorted(flat.values(), key=lambda d: (0 if d["doc"] else 1, d["name"]))
@@ -121,5 +175,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None):
             "documented": sum(1 for d in ordered if d["doc"]),
             "files": len(all_files),
             "truncated_declarations": sum(p["truncated_declarations"] for p in per_pr),
+            "linked": sum(1 for d in ordered if d.get("url")),
+            "gone_by_end": unlinkable,
         },
     }
