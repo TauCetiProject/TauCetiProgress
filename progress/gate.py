@@ -408,7 +408,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
            new_progress_bytes, check_runs, base_repo,
            current_main_cursor=None, compare_status=None, behind_by=None, main_sha="",
            old_paths=None, code_window=None, last_report_at=None, now=None,
-           area_exists=None):
+           area_exists=None, expected_bootstrap_from_sha=None):
     """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
@@ -424,19 +424,22 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     seen, parent = check_files(changed_files, area)
     check_area_exists(area_exists, parent, area)
     check_baseline_paths(old_paths or {}, parent, area)
-    # A roadmap's FIRST report is not auto-mergeable, on purpose.
+    # A roadmap's FIRST report has no cursor on `main` to continue from, so its `from_sha` has to be
+    # pinned some other way or whoever files it also chooses where that roadmap's history begins --
+    # and because windows only move forward, everything earlier becomes unreportable for good.
     #
-    # Every later report is pinned: its `from_sha` must equal the cursor already on `main`. A first
-    # report has no cursor to continue from, so whoever files it chooses where that roadmap's history
-    # begins -- and everything before the chosen point becomes unreportable for good, since windows
-    # only ever move forward. That is a one-time, irreversible editorial decision, and it is the one
-    # thing here a human should make rather than whoever gets there first. There are fourteen
-    # roadmaps, so this costs fourteen reviews, once.
+    # The collector computes the one legitimate answer (the first parent of the merge commit of the
+    # area's earliest labelled pull request) and it is required exactly. Refusing first reports
+    # outright would have been safe and useless: thirteen of the fourteen roadmaps have never been
+    # reported, so almost nothing would be left for automation to do.
     if not current_main_cursor:
-        _refuse(
-            f"{parent}/{area} has no reported history yet, so this report chooses where that "
-            f"roadmap's log begins; a first report is left for human review"
-        )
+        expect = expected_bootstrap_from_sha or ""
+        if not expect:
+            _refuse(
+                f"{parent}/{area} has no reported history yet and the start of its history could "
+                f"not be determined, so a first report cannot be checked"
+            )
+        current_main_cursor = expect
     check_modes(tree_entries, [f"{parent}/{area}/{name}" for name in ALLOWED_BASENAMES])
     section = check_content(
         area, old_status, new_status_bytes, old_progress, new_progress_bytes,
@@ -505,6 +508,7 @@ def main(argv=None):
             # not silently skip the window check.
             code_window=data.get("code_window"),
             area_exists=data.get("area_exists"),
+            expected_bootstrap_from_sha=data.get("expected_bootstrap_from_sha"),
             last_report_at=data.get("last_report_at"),
             now=data.get("collected_at"),
             current_main_cursor=data.get("current_main_cursor"),

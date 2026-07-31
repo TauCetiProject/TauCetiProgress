@@ -45,6 +45,7 @@ from progress import files, gate  # noqa: E402
 # tracks the newest TauCeti commit with published documentation.
 CODE_REPO = "TauCetiProject/TauCeti"
 CODE_REF = "docgen"
+ROADMAP_LABEL_PREFIX = "roadmap/"
 
 # `compare` returns at most 300 files. More than that cannot be a progress report, and a truncated
 # list could HIDE a path from the gate, so anything approaching the limit is refused outright rather
@@ -179,6 +180,47 @@ def rev_parse(repo, ref):
         capture_output=True, text=True,
     )
     return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+def bootstrap_cursor(area, repo=CODE_REPO):
+    """The one legitimate `from_sha` for a roadmap's FIRST report, or None if it cannot be computed.
+
+    A first report has no cursor on `main` to continue from, so without this whoever files it also
+    chooses where that roadmap's history begins -- and because windows only move forward, everything
+    before the chosen point becomes unreportable for good. Refusing first reports outright would have
+    been safe but useless: thirteen of the fourteen roadmaps have never been reported, so automation
+    would have had almost nothing left to do.
+
+    So the cursor is computed here instead, by the same rule the planner uses: the first parent of the
+    merge commit of the area's earliest merged pull request carrying its `roadmap/<area>` label. The
+    window is half-open, hence the parent rather than the merge itself -- otherwise every roadmap's
+    first report would silently omit its first pull request.
+
+    Three requests, and only for a first report, so at most once per roadmap ever.
+    """
+    query = f'repo:{repo} label:"{ROADMAP_LABEL_PREFIX}{area}" is:pr is:merged'
+    proc = subprocess.run(
+        ["gh", "api", "-X", "GET", "search/issues", "-f", f"q={query}",
+         "-f", "sort=created", "-f", "order=asc", "-f", "per_page=1",
+         "--jq", ".items[0].number"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    number = proc.stdout.strip()
+    merge = subprocess.run(
+        ["gh", "api", f"repos/{repo}/pulls/{number}", "--jq", ".merge_commit_sha"],
+        capture_output=True, text=True,
+    )
+    if merge.returncode != 0 or not merge.stdout.strip():
+        return None
+    parent = subprocess.run(
+        ["gh", "api", f"repos/{repo}/commits/{merge.stdout.strip()}", "--jq", ".parents[0].sha"],
+        capture_output=True, text=True,
+    )
+    if parent.returncode != 0:
+        return None
+    return parent.stdout.strip() or None
 
 
 def compare_status(repo, base, head):
@@ -316,6 +358,7 @@ def main(argv=None):
     # wholesale replacement of the archived log then looked like a valid append.
     old_status = old_progress = last_report_at = None
     area_exists = False
+    expected_bootstrap = None
     old_paths = {}
     current_cursor = None
     parents = {gate.PATH_RE.match(p).group(1) for p in by_path}
@@ -342,6 +385,10 @@ def main(argv=None):
             except files.FormatError:
                 # An unparseable log on main is a real problem, but saying so is the gate's job.
                 current_cursor = None
+        if current_cursor is None and area_exists:
+            # Only for a first report, and therefore at most once per roadmap ever: the one
+            # `from_sha` such a report is allowed to claim.
+            expected_bootstrap = bootstrap_cursor(area)
 
     # Only check-runs, and only from the head we pinned. Commit statuses are deliberately NOT
     # collected: any repository writer can POST one under any context, so they are not evidence, and
@@ -363,6 +410,7 @@ def main(argv=None):
         "base_repo": args.repo,
         "code_window": resolve_window(new_progress),
         "area_exists": area_exists,
+        "expected_bootstrap_from_sha": expected_bootstrap,
         "last_report_at": last_report_at,
         # The collector's own clock, never anything from the pull request.
         "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
