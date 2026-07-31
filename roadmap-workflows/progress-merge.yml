@@ -35,12 +35,11 @@ on:
         required: true
         type: number
 
-# A called workflow can never exceed what the caller grants, so `pull-requests: write` has to be
-# here as well as in the called workflow -- which narrows it again to the single job that explains a
-# refusal on the pull request. Nothing here checks out or executes pull-request content.
+# The floor. `resolve` needs no more than this; the `gate` job raises its own, because a called
+# workflow can never exceed what the caller grants.
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
 
 
 jobs:
@@ -123,6 +122,11 @@ jobs:
     # Pinned to a full TauCetiProgress SHA. `progress_ref` must be the SAME SHA: it selects the
     # validator code checked out inside, and a mismatch would validate with different rules than the
     # ones reviewed here.
+    # `write` here and nowhere else: the called workflow narrows it again to the one job that
+    # explains a refusal on the pull request, and a called workflow cannot exceed what this grants.
+    permissions:
+      contents: read
+      pull-requests: write
     uses: TauCetiProject/TauCetiProgress/.github/workflows/merge.yml@REPLACE_WITH_FULL_SHA
     with:
       pr: ${{ fromJSON(needs.resolve.outputs.pr) }}

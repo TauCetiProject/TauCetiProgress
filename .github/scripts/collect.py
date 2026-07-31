@@ -182,7 +182,7 @@ def rev_parse(repo, ref):
     return proc.stdout.strip() or None if proc.returncode == 0 else None
 
 
-def bootstrap_cursor(area, repo=CODE_REPO):
+def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
     """The one legitimate `from_sha` for a roadmap's FIRST report, or None if it cannot be computed.
 
     A first report has no cursor on `main` to continue from, so without this whoever files it also
@@ -196,7 +196,12 @@ def bootstrap_cursor(area, repo=CODE_REPO):
     window is half-open, hence the parent rather than the merge itself -- otherwise every roadmap's
     first report would silently omit its first pull request.
 
-    Three requests, and only for a first report, so at most once per roadmap ever.
+    Everything the API hands back is then checked against `ref` rather than trusted: `merge_commit_sha`
+    means different things for different merge methods, and a pull request merged elsewhere need not
+    touch this history at all. A cursor that does not sit in the documented history, strictly before
+    the merge it precedes, is rejected outright and the roadmap is left for a human to bootstrap.
+
+    A handful of requests, and only for a first report, so at most once per roadmap ever.
     """
     query = f'repo:{repo} label:"{ROADMAP_LABEL_PREFIX}{area}" is:pr is:merged'
     proc = subprocess.run(
@@ -214,13 +219,33 @@ def bootstrap_cursor(area, repo=CODE_REPO):
     )
     if merge.returncode != 0 or not merge.stdout.strip():
         return None
+    merge_sha = merge.stdout.strip()
+
+    # `merge_commit_sha` means different things for different merge methods, and for a pull request
+    # merged into some other branch it need not be on this history at all. Rather than trust it,
+    # confirm it is genuinely part of the documented history before deriving anything from it. If it
+    # is not, return None: the gate then refuses the report and a human bootstraps the roadmap, which
+    # is the right outcome for a once-per-roadmap decision that cannot be checked automatically.
+    if compare_status(repo, merge_sha, ref) not in ("ahead", "identical"):
+        return None
+
     parent = subprocess.run(
-        ["gh", "api", f"repos/{repo}/commits/{merge.stdout.strip()}", "--jq", ".parents[0].sha"],
+        ["gh", "api", f"repos/{repo}/commits/{merge_sha}", "--jq", ".parents[0].sha"],
         capture_output=True, text=True,
     )
     if parent.returncode != 0:
         return None
-    return parent.stdout.strip() or None
+    cursor = parent.stdout.strip() or None
+    if cursor is None:
+        # A root commit has no parent, so there is nothing before the first report; that is a real
+        # case but not one this can express, and guessing would be worse than refusing.
+        return None
+    # The cursor must itself be documented history, and strictly before the merge it precedes.
+    if compare_status(repo, cursor, ref) not in ("ahead", "identical"):
+        return None
+    if compare_status(repo, cursor, merge_sha) != "ahead":
+        return None
+    return cursor
 
 
 def compare_status(repo, base, head):

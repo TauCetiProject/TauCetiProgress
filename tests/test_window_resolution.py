@@ -144,6 +144,70 @@ def test_the_newest_section_is_the_one_checked():
     assert w["from_sha"] == TO and w["to_sha"] == "c" * 40
 
 
+
+# ----- the bootstrap cursor ---------------------------------------------------------------------
+
+
+def _bootstrap(number="45", merge_sha="m" * 40, parent="p" * 40, statuses=None):
+    """Drive `bootstrap_cursor` against canned responses."""
+    statuses = statuses or {}
+    orig_run, orig_cmp = collect.subprocess.run, collect.compare_status
+
+    class P:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode, self.stderr = out, rc, ""
+
+    def fake_run(args, **kw):
+        joined = " ".join(args)
+        if "search/issues" in joined:
+            return P(number + "\n")
+        if "/pulls/" in joined:
+            return P(merge_sha + "\n")
+        if "/commits/" in joined:
+            return P(parent + "\n")
+        return P("")
+
+    collect.subprocess.run = fake_run
+    collect.compare_status = lambda repo, base, head: statuses.get((base, head))
+    try:
+        return collect.bootstrap_cursor("PDE")
+    finally:
+        collect.subprocess.run, collect.compare_status = orig_run, orig_cmp
+
+
+M, PARENT = "m" * 40, "p" * 40
+
+
+def test_a_verified_bootstrap_cursor_is_returned():
+    assert _bootstrap(statuses={(M, "docgen"): "ahead", (PARENT, "docgen"): "ahead",
+                                (PARENT, M): "ahead"}) == PARENT
+
+
+def test_a_merge_commit_off_the_documented_history_is_refused():
+    """`merge_commit_sha` means different things per merge method, and a pull request merged
+    elsewhere need not touch this history at all, so it is checked rather than trusted."""
+    for status in (None, "behind", "diverged"):
+        assert _bootstrap(statuses={(M, "docgen"): status, (PARENT, "docgen"): "ahead",
+                                    (PARENT, M): "ahead"}) is None, status
+
+
+def test_a_cursor_off_the_documented_history_is_refused():
+    assert _bootstrap(statuses={(M, "docgen"): "ahead", (PARENT, "docgen"): None,
+                                (PARENT, M): "ahead"}) is None
+
+
+def test_a_cursor_not_before_its_merge_is_refused():
+    assert _bootstrap(statuses={(M, "docgen"): "ahead", (PARENT, "docgen"): "ahead",
+                                (PARENT, M): "identical"}) is None
+
+
+def test_a_root_commit_with_no_parent_is_refused_rather_than_guessed():
+    assert _bootstrap(parent="", statuses={(M, "docgen"): "ahead"}) is None
+
+
+def test_no_labelled_pull_requests_means_no_cursor():
+    assert _bootstrap(number="") is None
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

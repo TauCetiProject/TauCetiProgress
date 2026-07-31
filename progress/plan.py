@@ -201,7 +201,13 @@ def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None)
     unable to report at all is the worse failure.
     """
     now = now or _utcnow()
-    owners = {gh.ROADMAP_REPO.split("/")[0], _own_login()} if owners is None else set(owners)
+    if owners is None:
+        # Only non-empty logins. A pull request whose `headRepositoryOwner` is absent -- a deleted
+        # fork, say -- reads as `""`, so putting `""` in the trusted set (which is what an
+        # unreadable `/user` would do) would let exactly those block an area.
+        owners = {gh.ROADMAP_REPO.split("/")[0]} | {x for x in (_own_login(),) if x}
+    else:
+        owners = {x for x in owners if x}
     blocked, stale = {}, []
     for pr in open_prs:
         parts = (pr.get("headRefName") or "").split("/")
