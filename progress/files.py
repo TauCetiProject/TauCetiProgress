@@ -44,6 +44,21 @@ MAX_PROGRESS_BYTES = 4 * 1024 * 1024
 # catches output that is empty or a stub, never a terse but genuine report.
 MIN_PROSE_CHARS = 200
 
+# Markdown that renders as nothing. An unclosed `<!--` swallows everything after it, so a body could
+# clear the prose floor while displaying no report at all -- and the same comment hides the footer of
+# the Zulip announcement. Generated prose has no legitimate use for an HTML comment (the machine
+# headers are added by the renderer, outside the body), so any is refused.
+HTML_COMMENT_RE = re.compile(r"<!--")
+
+# Control characters other than newline and tab: invisible, and a stray CR can split a line in ways a
+# reader does not see.
+CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# `ts` is interpolated verbatim into the canonical prefix, so it is restricted to the characters an
+# ISO-8601 timestamp uses. Otherwise it could itself open an HTML comment and hide the disclaimer
+# that follows it.
+TS_RE = re.compile(r"\A[0-9A-Za-z:.+\- ]{0,40}\Z")
+
 # The standing disclaimer every STATUS.md must carry. It is the only thing telling a reader that the
 # prose below is machine-written and unverified, so the gate REQUIRES it verbatim: a generation that
 # dropped it would read as reviewed roadmap content. Split into lines so wrapping cannot change it
@@ -135,6 +150,16 @@ def parse_headers(text, marker):
 # ----- STATUS.md -------------------------------------------------------------------------------
 
 
+def _require_ts(value):
+    """`ts` is display-only, but it is interpolated verbatim into the canonical prefix, so it must not
+    be able to open an HTML comment and hide the disclaimer that follows it."""
+    if value is None:
+        return ""
+    if not isinstance(value, str) or not TS_RE.match(value):
+        raise FormatError(f"ts must be a short ISO-8601-style string, got {value!r}")
+    return value
+
+
 def status_prefix(area, to_sha, ts):
     """The exact bytes a `STATUS.md` must begin with, given its own header values.
 
@@ -144,7 +169,8 @@ def status_prefix(area, to_sha, ts):
     could satisfy every check and still render as no report at all.
     """
     header = json.dumps(
-        {"roadmap": _require_area(area, "roadmap"), "to_sha": _require_sha(to_sha, "to_sha"), "ts": ts},
+        {"roadmap": _require_area(area, "roadmap"), "to_sha": _require_sha(to_sha, "to_sha"),
+         "ts": _require_ts(ts)},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -177,7 +203,7 @@ def parse_status(text):
     return {
         "roadmap": _require_area(h.get("roadmap"), "roadmap"),
         "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
-        "ts": h.get("ts"),
+        "ts": _require_ts(h.get("ts")),
     }
 
 
@@ -352,6 +378,24 @@ def check_section_shape(added, area, from_sha, to_sha):
     return added[m.end():]
 
 
+def check_visible(name, body):
+    """Generated prose must actually render.
+
+    Two ways it might not, both reproduced against an earlier version: an unclosed HTML comment
+    swallows the remainder of the document (and, in the announcement, everything after the lead-in),
+    and control characters are invisible. Neither has any legitimate use in a report body.
+    """
+    m = HTML_COMMENT_RE.search(body)
+    if m:
+        raise FormatError(
+            f"{name} contains an HTML comment at offset {m.start()}; generated prose must render"
+        )
+    m = CONTROL_CHARS_RE.search(body)
+    if m:
+        raise FormatError(f"{name} contains a control character at offset {m.start()}")
+    return True
+
+
 def check_prose(name, body):
     """`body` -- the text AFTER the canonical framing -- must carry real prose.
 
@@ -455,6 +499,8 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
 
     # Last, so a more specific failure (an injected marker, an unadvanced snapshot) reports its own
     # reason rather than being masked by a complaint about length.
+    check_visible("the new section", section_body)
+    check_visible("STATUS.md", status_body)
     check_prose("the new section", section_body)
     check_prose("STATUS.md", status_body)
 

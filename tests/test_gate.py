@@ -447,6 +447,46 @@ def test_refuses_padded_framing_with_no_real_body():
             "characters of prose")
 
 
+def test_refuses_an_unclosed_html_comment_in_the_body():
+    """An unclosed `<!--` swallows the rest of the document, so a body could clear the prose floor
+    while rendering nothing -- and the same comment hides the footer of the Zulip announcement."""
+    hidden = "<!-- " + ("padding text that is never seen " * 12)
+    old_progress = files.new_progress_file(AREA)
+    status = files.render_status(AREA, TO, "t", PROSE)
+    section = files.render_section(AREA, FROM, TO, [1], "w", hidden)
+    refuses(lambda: call(content=(None, status, old_progress, old_progress + section)),
+            "must render")
+    bad_status = files.render_status(AREA, TO, "t", hidden)
+    good_section = files.render_section(AREA, FROM, TO, [1], "w", PROSE)
+    refuses(lambda: call(content=(None, bad_status, old_progress, old_progress + good_section)),
+            "must render")
+
+
+def test_refuses_control_characters_in_the_body():
+    old_progress = files.new_progress_file(AREA)
+    status = files.render_status(AREA, TO, "t", PROSE)
+    section = files.render_section(AREA, FROM, TO, [1], "w", PROSE + "\x00hidden")
+    refuses(lambda: call(content=(None, status, old_progress, old_progress + section)),
+            "control character")
+
+
+def test_refuses_a_ts_that_could_open_a_comment():
+    """`ts` is interpolated verbatim into the canonical prefix, so it must not be able to open an
+    HTML comment and hide the disclaimer that follows it."""
+    try:
+        files.render_status(AREA, TO, "<!-- ", PROSE)
+    except files.FormatError as exc:
+        assert "ISO-8601" in str(exc), str(exc)
+        return
+    raise AssertionError("expected a FormatError")
+
+
+def test_refuses_a_string_app_id():
+    """`int()` coercion accepted "15368" and 15368.9 alike."""
+    refuses(lambda: call(checks=[build_run(app_id="15368")]), "reported by app")
+    refuses(lambda: call(checks=[build_run(app_id=15368.9)]), "reported by app")
+
+
 def test_refuses_unknown_header_fields():
     """Headers are a closed schema shared with the gate; an ignored field is a field a later reader
     might not ignore."""

@@ -258,7 +258,8 @@ def check_build(check_runs, head_sha, required="build", app_id=GITHUB_ACTIONS_AP
         if run.get("head_sha") != head_sha:
             _refuse(f"{required} names head {run.get('head_sha')!r}, not {head_sha}")
         got_app = run.get("app_id")
-        if got_app is None or int(got_app) != int(app_id):
+        # Compared as an integer, not coerced into one: `int()` accepted "15368" and 15368.9 alike.
+        if isinstance(got_app, bool) or not isinstance(got_app, int) or got_app != app_id:
             _refuse(f"{required} on {head_sha[:7]} was reported by app {got_app!r}, not {app_id}")
         if run.get("status") != "completed":
             _refuse(f"{required} is {run.get('status')!r} on {head_sha[:7]}, not completed")

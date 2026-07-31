@@ -34,6 +34,20 @@ If the worker runs a newer version than the gate, it can emit headers the gate d
 every report wedges. Bump them together, and note that `apply` records the version it ran in each
 pull request body so a mismatch is diagnosable after the fact.
 
+## A standing invariant: `main` must never rewind
+
+The landing step is a compare-and-swap: the commit is built on the validated `main` SHA and the ref
+is updated with `force=false`, which GitHub rejects unless the update is a fast-forward. That is an
+exact swap for every ordinary case, with one residual the REST API cannot express — there is no
+"expected old SHA" parameter, only "must be a fast-forward". So if another bypass actor *rewound*
+`main` to an ancestor of the validated SHA, this commit would still be a fast-forward of the rewound
+tip and would be accepted, even though `main` was no longer where it was validated.
+
+Keep `main` non-rewindable. The `main` ruleset already carries `non_fast_forward`, which forbids
+exactly this for everyone the ruleset applies to; the residual is limited to the bypass actors
+(organisation admins and the sync App). Treat "nobody force-pushes `main`" as a rule of the
+repository rather than something the workflow can enforce.
+
 ## What the gate actually guarantees
 
 It proves the *shape* of an update: which paths changed, that both generated files are present, that

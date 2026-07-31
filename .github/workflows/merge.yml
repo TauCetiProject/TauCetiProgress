@@ -223,20 +223,43 @@ jobs:
 
           # force=false is the compare-and-swap. It fails if main is no longer at MAIN_SHA, because
           # then this commit is not a fast-forward of it.
-          if ! gh api -X PATCH "repos/$REPO/git/refs/heads/main" \
-                 -f sha="$commit" -F force=false > /dev/null 2> update.err; then
-            echo "::warning title=main moved::compare-and-swap refused; nothing was landed"
-            cat update.err
-            echo "landed=false" >> "$GITHUB_OUTPUT"
+          #
+          # A failed PATCH is ambiguous on its own: the update may have been applied server-side and
+          # the response lost. Believing "it failed" in that case would leave the report on main with
+          # its pull request still open, which the planner then treats as permanently in flight. So on
+          # any error the ref is re-read and the three cases are distinguished explicitly.
+          if gh api -X PATCH "repos/$REPO/git/refs/heads/main" \
+               -f sha="$commit" -F force=false > /dev/null 2> update.err; then
+            landed=true
+          else
+            after="$(gh api "repos/$REPO/commits/main" --jq .sha || echo unknown)"
+            if [ "$after" = "$commit" ]; then
+              echo "::notice::the update landed despite the error response"
+              landed=true
+            elif [ "$after" = "$MAIN_SHA" ]; then
+              echo "::warning title=not landed::main is unchanged at ${MAIN_SHA:0:7}"
+              cat update.err
+              landed=false
+            else
+              echo "::warning title=main moved::main is now ${after:0:7}; this report was not landed"
+              cat update.err
+              landed=false
+            fi
+          fi
+          echo "landed=$landed" >> "$GITHUB_OUTPUT"
+          if [ "$landed" != "true" ]; then
             exit 0
           fi
-          echo "landed=true" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           printf 'main advanced %s -> %s\n' "${MAIN_SHA:0:7}" "${commit:0:7}"
 
       # The content is on main, but the pull request is not "merged" in GitHub's sense, so close it
-      # explicitly and say where its content went. Leaving it open would make the next planning run
-      # treat the area as still in flight.
+      # explicitly. Leaving it open would make the next planning run treat the area as permanently in
+      # flight -- the window can never be revalidated, because main has moved past it.
+      #
+      # Closing comes FIRST and is retried; the comment and the branch deletion are cosmetic and must
+      # never be the reason the pull request stays open. The step also fails loudly if the close did
+      # not take, because a stranded open pull request needs a human.
       - name: Close the pull request now its content has landed
         if: steps.land.outputs.landed == 'true'
         env:
@@ -245,7 +268,22 @@ jobs:
           REPO: ${{ github.repository }}
           COMMIT: ${{ steps.land.outputs.commit }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            state="$(gh pr view "$PR" --repo "$REPO" --json state --jq .state || echo UNKNOWN)"
+            if [ "$state" = "CLOSED" ] || [ "$state" = "MERGED" ]; then
+              printf 'pull request #%s is %s\n' "$PR" "$state"
+              break
+            fi
+            gh pr close "$PR" --repo "$REPO" || true
+            sleep "$attempt"
+          done
+          state="$(gh pr view "$PR" --repo "$REPO" --json state --jq .state || echo UNKNOWN)"
+          if [ "$state" != "CLOSED" ] && [ "$state" != "MERGED" ]; then
+            echo "::error title=pull request stranded::#$PR is $state but its content landed as $COMMIT"
+            exit 1
+          fi
+          # Best effort from here: neither of these affects correctness.
           gh pr comment "$PR" --repo "$REPO" \
-            --body "Landed on \`main\` as $COMMIT by compare-and-swap on the validated tree."
-          gh pr close "$PR" --repo "$REPO" --delete-branch
+            --body "Landed on \`main\` as $COMMIT by compare-and-swap on the validated tree." || true
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq .headRefName)" > /dev/null 2>&1 || true

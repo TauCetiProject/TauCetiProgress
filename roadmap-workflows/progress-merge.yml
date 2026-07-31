@@ -74,11 +74,19 @@ jobs:
               # The result is also restricted to a head IN THIS REPOSITORY. A fork can create a branch
               # at the very same commit, and "first match wins" would let it shadow the real one: the
               # gate would refuse the fork, correctly, and the report would never be considered.
-              pr="$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/pulls" \
-                     --jq '[.[] | select(.state == "open")
-                                | select(.head.ref | startswith("progress/"))
-                                | select(.head.repo.full_name == env.REPO)
-                                | .number] | first // ""' 2>/dev/null | head -n1)"
+              # `--slurp` so the pages arrive as ONE array and the filter runs over all of them.
+              # Without it `--jq` is applied page by page: page one emits an empty line, `head -n1`
+              # takes it, and a legitimate match on page two is discarded -- the same starvation the
+              # 30-item default allowed, just moved.
+              # `--slurp` so the pages arrive as ONE array; the filter then runs over all of them.
+              # Without it `--jq` is applied page by page: page one emits an empty line, and a
+              # legitimate match on a later page is lost -- the same starvation the 30-item default
+              # allowed, just moved. `--slurp` cannot be combined with `--jq`, hence the pipe.
+              pr="$(gh api --paginate --slurp "repos/$REPO/commits/$HEAD_SHA/pulls" \
+                    | jq -r '[.[][] | select(.state == "open")
+                                    | select(.head.ref | startswith("progress/"))
+                                    | select(.head.repo.full_name == env.REPO)
+                                    | .number] | first // ""')"
               echo "pr=$pr" >> "$GITHUB_OUTPUT" ;;
           esac
 
