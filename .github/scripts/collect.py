@@ -36,11 +36,12 @@ import json
 import pathlib
 import re
 import subprocess
+import tempfile
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from progress import files, gate  # noqa: E402
+from progress import files, gate, window  # noqa: E402
 
 # Where the reported window has to live. `to_sha` is checked for reachability from this branch, which
 # tracks the newest TauCeti commit with published documentation.
@@ -183,6 +184,59 @@ def rev_parse(repo, ref):
     return proc.stdout.strip() or None if proc.returncode == 0 else None
 
 
+def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
+    """The one legitimate `from_sha` for a roadmap's FIRST report, or None if it cannot be computed.
+
+    A first report has no cursor on `main` to continue from, so its starting point has to be pinned
+    some other way, or whoever files it also decides where that roadmap's history begins -- and
+    windows only move forward, so everything earlier becomes unreportable for good.
+
+    Three earlier attempts tried to answer this through the REST API, by lowest pull request number,
+    by merge timestamp, and by walking the commits endpoint, and all three were wrong. The question is
+    about position on the first-parent chain; the API offers neither first-parent traversal nor any
+    ordering guarantee, and this history is not linear, so ancestry checks cannot recover it.
+
+    So do not ask the API. Clone the code repository and ask git, which is what the planner does, with
+    the SAME functions over the same data -- so the two agree by construction rather than by luck,
+    which is what the previous attempts got wrong.
+
+    `--filter=blob:none --no-checkout` fetches commits without file contents: about a second and three
+    megabytes, since only commit subjects are read. This is not a checkout of pull-request content --
+    it is the upstream code repository, nothing from the pull request reaches it, and nothing in it is
+    executed.
+    """
+    proc = subprocess.run(
+        ["gh", "pr", "list", "--repo", repo, "--state", "merged",
+         "--label", f"{ROADMAP_LABEL_PREFIX}{area}", "--limit", "100000", "--json", "number"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        labelled = [int(r["number"]) for r in json.loads(proc.stdout)]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    if not labelled:
+        return None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        clone = pathlib.Path(tmp) / "code"
+        cloned = subprocess.run(
+            ["git", "clone", "--filter=blob:none", "--no-checkout", "--single-branch",
+             "--branch", ref, "-q", f"https://github.com/{repo}", str(clone)],
+            capture_output=True, text=True,
+        )
+        if cloned.returncode != 0:
+            return None
+        try:
+            found = window.earliest_merged(clone, labelled, ref=ref)
+            if found is None:
+                return None
+            return window.first_parent_before(clone, found[1])
+        except window.GitError:
+            return None
+
+
 def compare_status(repo, base, head):
     """`status` from a two-dot-three comparison, or None when either end is not a commit.
 
@@ -318,6 +372,7 @@ def main(argv=None):
     # wholesale replacement of the archived log then looked like a valid append.
     old_status = old_progress = last_report_at = None
     area_exists = False
+    expected_bootstrap = None
     old_paths = {}
     current_cursor = None
     parents = {gate.PATH_RE.match(p).group(1) for p in by_path}
@@ -344,6 +399,9 @@ def main(argv=None):
             except files.FormatError:
                 # An unparseable log on main is a real problem, but saying so is the gate's job.
                 current_cursor = None
+        if current_cursor is None and area_exists:
+            # Only for a first report, so at most once per roadmap ever.
+            expected_bootstrap = bootstrap_cursor(area)
 
     # Only check-runs, and only from the head we pinned. Commit statuses are deliberately NOT
     # collected: any repository writer can POST one under any context, so they are not evidence, and
@@ -365,6 +423,7 @@ def main(argv=None):
         "base_repo": args.repo,
         "code_window": resolve_window(new_progress),
         "area_exists": area_exists,
+        "expected_bootstrap_from_sha": expected_bootstrap,
         "last_report_at": last_report_at,
         # The collector's own clock, never anything from the pull request.
         "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),

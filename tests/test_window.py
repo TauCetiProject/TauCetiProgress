@@ -142,8 +142,8 @@ def test_cadence_never_updated():
 
 
 def test_cadence_too_recent_raises():
-    commits = [("2026-07-30T02:00:00Z", "progress: PDE 2026-07-30 (#9)")]
-    raises(plan.NotDue, lambda: plan.check_cadence(commits, now=NOW), "10.0h ago")
+    commits = [("2026-07-30T09:00:00Z", "progress: PDE 2026-07-30 (#9)")]
+    raises(plan.NotDue, lambda: plan.check_cadence(commits, now=NOW), "3.0h ago")
 
 
 def test_cadence_old_enough_passes():

@@ -59,9 +59,9 @@ def test_the_stale_note_says_what_to_do():
 
 
 def test_the_cutoff_boundary_still_blocks():
-    blocked, _ = plan.in_flight_areas([pr(hours_old=24.0)], now=NOW, stale_hours=24.0, owners={OURS})
+    blocked, _ = plan.in_flight_areas([pr(hours_old=8.0)], now=NOW, stale_hours=8.0, owners={OURS})
     assert set(blocked) == {"PDE"}, "exactly at the cutoff is still in flight"
-    blocked, _ = plan.in_flight_areas([pr(hours_old=24.1)], now=NOW, stale_hours=24.0, owners={OURS})
+    blocked, _ = plan.in_flight_areas([pr(hours_old=8.1)], now=NOW, stale_hours=8.0, owners={OURS})
     assert blocked == {}
 
 
@@ -94,6 +94,13 @@ def test_only_the_stale_area_is_released():
 def test_the_default_cutoff_matches_the_cadence():
     """A report that has not merged within a full cadence period is stuck, not pending."""
     assert plan.STALE_PR_HOURS == plan.IDLE_HOURS
+
+
+def test_the_server_side_limit_never_refuses_a_report_the_planner_thinks_due():
+    """The gate's per-roadmap gap must stay under the planner's cadence, or reports are generated
+    and then refused."""
+    from progress import gate
+    assert gate.MIN_REPORT_INTERVAL_HOURS < plan.IDLE_HOURS
 
 
 

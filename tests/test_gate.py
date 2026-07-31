@@ -110,7 +110,7 @@ NOW = "2026-07-30T12:00:00Z"
 
 def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FROM, window=-1,
          compare_status="ahead", behind_by=0, old_paths=None, last_report_at=None, now=NOW,
-         area_exists=True):
+         area_exists=True, expected_bootstrap=None):
     old_status, new_status, old_progress, new_progress = content or make_content()
     return gate.decide(
         pr=pr or make_pr(),
@@ -126,6 +126,7 @@ def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FRO
         last_report_at=last_report_at,
         now=now,
         area_exists=area_exists,
+        expected_bootstrap_from_sha=expected_bootstrap,
         current_main_cursor=cursor,
         compare_status=compare_status,
         behind_by=behind_by,
@@ -200,16 +201,20 @@ def test_a_fork_that_force_pushes_after_opening_gains_nothing():
     refuses(lambda: call(pr=pr, checks=[build_run(head_sha="0" * 40)]), "names head")
 
 
-def test_a_first_report_is_never_auto_merged():
-    """Where a roadmap's log begins cannot be verified mechanically, so a human decides it once.
+def test_a_first_report_must_start_where_the_roadmap_starts():
+    """A bootstrap has no cursor to continue from, so it would otherwise pick its own start, and
+    windows only move forward -- anything before it is unreportable for good.
 
-    Three implementations tried: by lowest pull request number, by merge timestamp, and by walking
-    the commits endpoint. The REST API expresses neither first-parent traversal nor an ordering
-    guarantee, and this history is not linear, so ancestry checks cannot recover it either. Refusing
-    is the honest outcome; every report after the first merges unattended.
+    The collector clones the code repository and asks git, using the same functions the planner uses
+    over the same data, so the two agree by construction rather than by luck. Three earlier versions
+    tried to answer this through the REST API and all three were wrong.
     """
-    reason = refuses(lambda: call(cursor=None), "no reported history yet")
-    assert "human review" in reason
+    assert call(cursor=None, expected_bootstrap=FROM)["area"] == AREA
+    refuses(lambda: call(cursor=None, expected_bootstrap="e" * 40), "expected eeeeeee")
+
+
+def test_a_first_report_is_refused_when_the_start_is_unknown():
+    refuses(lambda: call(cursor=None, expected_bootstrap=None), "could not be determined")
 
 
 def test_refuses_an_invented_roadmap():
@@ -230,7 +235,7 @@ def test_refuses_a_second_report_for_the_same_roadmap_too_soon():
     Every one would pass every other check, and every one would post to Zulip. The cadence is
     therefore enforced here as well as in the planner.
     """
-    refuses(lambda: call(last_report_at="2026-07-30T02:00:00Z"), "reported 10.0h ago")
+    refuses(lambda: call(last_report_at="2026-07-30T09:00:00Z"), "reported 3.0h ago")
 
 
 def test_allows_a_report_once_the_interval_has_passed():
