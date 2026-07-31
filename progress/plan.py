@@ -151,8 +151,13 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     numbers = list(area_prs)
     if not numbers:
         return None
-    earliest = min(numbers)
-    merge = window.find_merge_commit(repo_dir, earliest, ref=ref)
+    # The earliest to MERGE, not the lowest-numbered. Numbers are assigned when a pull request is
+    # opened, and pull requests do not merge in the order they were opened; starting from the lowest
+    # number would put the cursor after any labelled pull request that opened later but merged
+    # sooner, making that work unreportable for good. Two of the fourteen roadmaps had exactly that
+    # shape when this was written.
+    found = window.earliest_merged(repo_dir, numbers, ref=ref)
+    earliest, merge = found if found else (min(numbers), None)
     if merge is None:
         # The PR is labelled but its merge is not on the mainline we can see (a shallow checkout,
         # or a PR merged into another branch). Refuse rather than guess a cursor.

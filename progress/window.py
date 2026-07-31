@@ -134,6 +134,33 @@ def commit_date(repo_dir, sha):
     return git(["log", "-1", "--format=%cI", sha], repo_dir).strip()
 
 
+def earliest_merged(repo_dir, pr_numbers, ref=CODE_REF):
+    """`(pr_number, merge_sha)` for whichever of `pr_numbers` merged EARLIEST, or None.
+
+    Earliest by position on the first-parent chain, which is the only ordering that matters here.
+    Not the lowest number: numbers are assigned when a pull request is *opened*, and pull requests do
+    not merge in the order they were opened. Picking the lowest number and taking the commit before
+    its merge as a roadmap's starting point puts that cursor *after* any labelled pull request that
+    opened later but merged sooner -- and because windows only move forward, that work is then
+    unreportable for good.
+
+    This is not hypothetical. When it was written, two of the fourteen roadmaps had a lowest-numbered
+    pull request that was not their first to merge (RepresentationTheory #1227 vs #1228,
+    OneParameterSemigroups #273 vs #276), so both would have silently dropped real work.
+    """
+    wanted = {int(n) for n in pr_numbers}
+    if not wanted:
+        return None
+    log = git(["log", "--first-parent", "--format=%H %s", ref], repo_dir)
+    found = None
+    for line in log.splitlines():
+        sha, _, subject = line.partition(" ")
+        number = pr_number_of_subject(subject)
+        if number in wanted:
+            found = (number, sha)  # keep overwriting: git emits newest first, so the last is oldest
+    return found
+
+
 def find_merge_commit(repo_dir, pr_number, ref=CODE_REF):
     """The mainline commit that merged `pr_number`, or None.
 

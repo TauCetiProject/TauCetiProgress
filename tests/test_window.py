@@ -233,6 +233,47 @@ def test_already_reported_prs_are_excluded():
     assert fresh == [3], fresh
 
 
+
+def test_earliest_merged_is_by_merge_order_not_by_number():
+    """The bug this exists to prevent, reproduced exactly.
+
+    Numbers are assigned when a pull request is OPENED. If #100 opens first but merges after #101,
+    starting a roadmap from the commit before #100's merge puts the cursor past #101 -- and windows
+    only move forward, so #101 becomes unreportable for good. Two of the fourteen live roadmaps had
+    this shape (RepresentationTheory #1227 vs #1228, OneParameterSemigroups #273 vs #276).
+    """
+    import tempfile, subprocess, os
+    with tempfile.TemporaryDirectory() as d:
+        def run(*args):
+            subprocess.run(args, cwd=d, check=True, capture_output=True)
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=d, check=True, capture_output=True)
+        for subject in ("root", "feat: later-numbered merges first (#101)",
+                        "feat: lower-numbered merges second (#100)"):
+            subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", subject],
+                           cwd=d, check=True, capture_output=True, env=env)
+        got = window.earliest_merged(d, [100, 101], ref="main")
+        assert got is not None and got[0] == 101, got
+        # And the cursor derived from it is the commit BEFORE #101, so #101 is inside the window.
+        cursor = window.first_parent_before(d, got[1])
+        assert 101 in window.window_prs(d, cursor, "main")
+        assert 100 in window.window_prs(d, cursor, "main")
+
+
+def test_earliest_merged_ignores_unlabelled_pull_requests():
+    import tempfile, subprocess, os
+    with tempfile.TemporaryDirectory() as d:
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=d, check=True, capture_output=True)
+        for subject in ("root", "chore: unrelated (#7)", "feat: ours (#9)"):
+            subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", subject],
+                           cwd=d, check=True, capture_output=True, env=env)
+        assert window.earliest_merged(d, [9], ref="main")[0] == 9
+        assert window.earliest_merged(d, [], ref="main") is None
+        assert window.earliest_merged(d, [12345], ref="main") is None
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

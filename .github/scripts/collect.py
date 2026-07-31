@@ -203,16 +203,27 @@ def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
 
     A handful of requests, and only for a first report, so at most once per roadmap ever.
     """
-    query = f'repo:{repo} label:"{ROADMAP_LABEL_PREFIX}{area}" is:pr is:merged'
+    # Ordered by when pull requests MERGED, not by number. Numbers are assigned at open time and
+    # pull requests do not merge in the order they were opened, so the lowest-numbered one may have
+    # merged after another carrying the same label -- which would put this cursor past that one and
+    # make its work unreportable for good. Two of the fourteen roadmaps had exactly that shape when
+    # this was written, so it is a live case and not a theoretical one.
     proc = subprocess.run(
-        ["gh", "api", "-X", "GET", "search/issues", "-f", f"q={query}",
-         "-f", "sort=created", "-f", "order=asc", "-f", "per_page=1",
-         "--jq", ".items[0].number"],
+        ["gh", "pr", "list", "--repo", repo, "--state", "merged",
+         "--label", f"{ROADMAP_LABEL_PREFIX}{area}", "--limit", "100000",
+         "--json", "number,mergedAt"],
         capture_output=True, text=True,
     )
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
-    number = proc.stdout.strip()
+    try:
+        rows = [r for r in json.loads(proc.stdout) if r.get("mergedAt")]
+    except json.JSONDecodeError:
+        return None
+    if not rows:
+        return None
+    # Ties broken by number so the choice is deterministic if two merged in the same second.
+    number = str(min(rows, key=lambda r: (r["mergedAt"], r["number"]))["number"])
     merge = subprocess.run(
         ["gh", "api", f"repos/{repo}/pulls/{number}", "--jq", ".merge_commit_sha"],
         capture_output=True, text=True,
