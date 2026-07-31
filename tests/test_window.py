@@ -274,6 +274,55 @@ def test_earliest_merged_ignores_unlabelled_pull_requests():
         assert window.earliest_merged(d, [], ref="main") is None
         assert window.earliest_merged(d, [12345], ref="main") is None
 
+
+def test_a_labelled_pr_with_no_number_in_its_subject_fails_closed():
+    """The hazard: `earliest_merged` finds pull requests by matching numbers in commit subjects.
+
+    One whose merge subject omits its number is invisible, so the cursor would be computed from a
+    LATER merge and skip it, permanently. Two implementations agreeing does not catch this -- they
+    share the omission, which is how three earlier versions of this check passed review while wrong.
+    """
+    import os, subprocess, tempfile
+    from progress import gh as gh_mod, plan as plan_mod
+    with tempfile.TemporaryDirectory() as d:
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=d, check=True, capture_output=True)
+        for subject in ("root", "feat: no number here at all", "feat: later one (#20)"):
+            subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", subject],
+                           cwd=d, check=True, capture_output=True, env=env)
+        # #10 merged as the numberless commit; resolve it the way the real check does.
+        numberless = subprocess.run(["git", "rev-parse", "HEAD~1"], cwd=d,
+                                    capture_output=True, text=True).stdout.strip()
+        orig = gh_mod.gh
+        gh_mod.gh = lambda args, **kw: numberless + "\n"
+        try:
+            assert plan_mod.unaccounted_prs(d, [10, 20], ref="main") == [10]
+            raises(window.GitError,
+                   lambda: plan_mod.bootstrap_from_sha(d, "PDE", [10, 20], ref="main"),
+                   "no pull request number")
+        finally:
+            gh_mod.gh = orig
+
+
+def test_a_labelled_pr_merged_after_the_tip_is_not_flagged():
+    """Benign: it is not in this history yet, and a later window will cover it."""
+    import os, subprocess, tempfile
+    from progress import gh as gh_mod, plan as plan_mod
+    with tempfile.TemporaryDirectory() as d:
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=d, check=True, capture_output=True)
+        for subject in ("root", "feat: ours (#5)"):
+            subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", subject],
+                           cwd=d, check=True, capture_output=True, env=env)
+        orig = gh_mod.gh
+        gh_mod.gh = lambda args, **kw: "\n"        # no merge commit we can see
+        try:
+            assert plan_mod.unaccounted_prs(d, [5, 99], ref="main") == []
+        finally:
+            gh_mod.gh = orig
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

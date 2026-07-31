@@ -41,7 +41,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from progress import files, gate, window  # noqa: E402
+from progress import files, gate, gh as gh_mod, plan as plan_mod, window  # noqa: E402
 
 # Where the reported window has to live. `to_sha` is checked for reachability from this branch, which
 # tracks the newest TauCeti commit with published documentation.
@@ -229,11 +229,15 @@ def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
         if cloned.returncode != 0:
             return None
         try:
+            # The same refusal the planner makes, from the same helper: a labelled pull request that
+            # is in this history but unrecognised in it would otherwise move the cursor past itself.
+            if plan_mod.unaccounted_prs(clone, labelled, ref=ref):
+                return None
             found = window.earliest_merged(clone, labelled, ref=ref)
             if found is None:
                 return None
             return window.first_parent_before(clone, found[1])
-        except window.GitError:
+        except (window.GitError, gh_mod.GhError):
             return None
 
 

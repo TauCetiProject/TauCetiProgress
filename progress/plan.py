@@ -143,6 +143,35 @@ def area_window(repo_dir, area_prs, from_sha, to_sha):
     return [n for n in numbers if n in wanted]
 
 
+def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
+    """Labelled pull requests that are in `ref`'s history but were not recognised in it.
+
+    `earliest_merged` finds pull requests by matching their number in commit subjects, so one whose
+    merge subject does not carry its number is invisible -- and the starting point would then be
+    computed from a later merge, silently skipping it. Two implementations agreeing does not catch
+    this: they share the omission, which is exactly how three earlier versions of this check passed
+    review while being wrong.
+
+    A missing number is usually benign: the pull request merged after the documented tip, so it is
+    not in this history yet. That is distinguished here by asking GitHub for its merge commit and
+    testing whether that commit is actually in `ref`. Only the unrecognised ones are looked up, and
+    for a bootstrap those are the handful merged since the last documentation build.
+
+    Anything genuinely present but unrecognised is returned, and the caller refuses rather than
+    guessing a cursor.
+    """
+    log = window.git(["log", "--first-parent", "--format=%s", ref], repo_dir)
+    seen = {window.pr_number_of_subject(s) for s in log.splitlines()}
+    seen.discard(None)
+    out = []
+    for number in sorted(set(area_prs) - seen):
+        raw = gh.gh(["api", f"repos/{gh.CODE_REPO}/pulls/{int(number)}", "--jq",
+                     '.merge_commit_sha // ""']).strip()
+        if raw and window.is_ancestor(repo_dir, raw, ref):
+            out.append(number)
+    return out
+
+
 def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     """A `from_sha` for an area that has never been reported, or None if it has no merged PRs.
 
@@ -157,6 +186,15 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     # number would put the cursor after any labelled pull request that opened later but merged
     # sooner, making that work unreportable for good. Two of the fourteen roadmaps had exactly that
     # shape when this was written.
+    # Refuse rather than guess if any labelled pull request is in this history but was not recognised
+    # in it: the cursor would then be computed from a later merge and skip it, permanently.
+    unaccounted = unaccounted_prs(repo_dir, numbers, ref=ref)
+    if unaccounted:
+        raise window.GitError(
+            f"{area} has labelled pull requests in {ref} whose merge commits carry no pull request "
+            f"number ({', '.join(f'#{n}' for n in unaccounted[:5])}); the start of its history "
+            f"cannot be determined from commit subjects"
+        )
     found = window.earliest_merged(repo_dir, numbers, ref=ref)
     earliest, merge = found if found else (min(numbers), None)
     if merge is None:
