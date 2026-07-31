@@ -4,6 +4,7 @@ The git and network paths are exercised by the live verification steps in the pl
 is unit-tested is everything that decides *what* those paths will do.
 """
 
+import json
 import pathlib
 import sys
 
@@ -250,6 +251,8 @@ def test_push_target_falls_back_to_a_fork():
         calls.append(args)
         if args[:2] == ["api", "repos/TauCetiProject/TauCetiRoadmap"]:
             return "false\n"
+        if args[0] == "api" and args[1].startswith("repos/") and "/forks" in args[1]:
+            return "someone/TauCetiRoadmap\n"
         if args[:2] == ["api", "user"]:
             # Exactly what `gh api user --jq .login` prints: a raw, UNQUOTED login. An earlier
             # version parsed this as JSON, which raises -- on the one path that needs it to work.
@@ -266,6 +269,44 @@ def test_push_target_falls_back_to_a_fork():
         apply_mod.gh.gh, apply_mod._run = orig_gh, orig_run
     assert (remote, owner) == ("fork", "someone")
     assert ["repo", "fork", "TauCetiProject/TauCetiRoadmap", "--clone=false", "--remote=false"] in calls
+
+
+# ----- a stranger must not be able to lock a window ---------------------------------------------
+
+
+def _with_pr_rows(rows):
+    orig = apply_mod.gh.gh
+    def fake(args, **kw):
+        if args[:2] == ["api", "user"]:
+            return "kim-em\n"
+        return json.dumps(rows)
+    apply_mod.gh.gh = fake
+    try:
+        return apply_mod.own_closed_pr("progress/a1b2c3d-b9c8d7e/PDE")
+    finally:
+        apply_mod.gh.gh = orig
+
+
+def test_a_strangers_closed_pr_does_not_lock_the_window():
+    """The attack: branch names are a pure function of the window, so anyone can open and instantly
+    close a pull request on that name. Honouring it would stop the window ever being published."""
+    rows = [{"number": 1, "state": "CLOSED", "url": "u", "mergedAt": None,
+             "headRepositoryOwner": {"login": "stranger"}}]
+    assert _with_pr_rows(rows) is None
+
+
+def test_our_own_closed_pr_still_locks_the_window():
+    """A report we filed and someone rejected must not come back by itself every day."""
+    for owner in ("kim-em", "TauCetiProject"):
+        rows = [{"number": 1, "state": "CLOSED", "url": "u", "mergedAt": None,
+                 "headRepositoryOwner": {"login": owner}}]
+        assert _with_pr_rows(rows) is not None, owner
+
+
+def test_a_merged_pr_is_not_treated_as_a_rejection():
+    rows = [{"number": 1, "state": "MERGED", "url": "u", "mergedAt": "2026-07-30T00:00:00Z",
+             "headRepositoryOwner": {"login": "kim-em"}}]
+    assert _with_pr_rows(rows) is None
 
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):

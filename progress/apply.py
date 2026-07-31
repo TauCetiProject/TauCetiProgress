@@ -91,13 +91,55 @@ def _run(args, cwd, check=True):
     return proc
 
 
-def existing_pr(branch, repo=gh.ROADMAP_REPO):
-    """The PR for `branch`, or None. Looks at every state, not just open ones."""
+def _own_login():
+    """The authenticated login, for scoping "did *I* already try this window?" lookups."""
+    return gh.gh(["api", "user", "--jq", ".login"]).strip()
+
+
+def own_closed_pr(branch, repo=gh.ROADMAP_REPO):
+    """A closed-unmerged pull request for `branch` that this operator could have opened, or None.
+
+    "Could have opened" means its head is either in the canonical repository (we pushed there) or in
+    an account we control. Deliberately not "any closed pull request on this branch": see the caller.
+
+    Checked without consulting `push_target`, so that a dry run never has to create a fork just to
+    answer a question about existing pull requests.
+    """
     out = gh.gh([
-        "pr", "list", "--repo", repo, "--head", branch, "--state", "all",
-        "--limit", "5", "--json", "number,state,url,mergedAt",
+        "pr", "list", "--repo", repo, "--head", branch, "--state", "closed",
+        "--limit", "20", "--json", "number,state,url,mergedAt,headRepositoryOwner",
     ])
-    rows = json.loads(out)
+    ours = {repo.split("/")[0], _own_login()}
+    for row in json.loads(out):
+        if row.get("mergedAt"):
+            continue
+        if ((row.get("headRepositoryOwner") or {}).get("login") or "") in ours:
+            return row
+    return None
+
+
+def existing_pr(branch, repo=gh.ROADMAP_REPO, owner=None, states=("open",)):
+    """A pull request for `branch`, or None.
+
+    Anyone may open a pull request on a progress branch, and branch names are a pure function of the
+    window, so `--head <branch>` matches strangers' pull requests as readily as our own. Two of the
+    ways this function is used therefore have to be told whose work to look at:
+
+    * Deciding "has this window already been proposed?" must consider EVERYONE, or two operators
+      duplicate each other. Open ones only.
+    * Deciding "was this window refused, so stop reopening it?" must consider only OUR OWN, or a
+      stranger can open and immediately close a pull request on the deterministic branch name and
+      permanently stop that window from ever being published. Closed-state matching is scoped by
+      `owner` for exactly that reason.
+    """
+    head = f"{owner}:{branch}" if owner else branch
+    rows = []
+    for state in states:
+        out = gh.gh([
+            "pr", "list", "--repo", repo, "--head", head, "--state", state,
+            "--limit", "20", "--json", "number,state,url,mergedAt,headRepositoryOwner",
+        ])
+        rows.extend(json.loads(out))
     return rows[0] if rows else None
 
 
@@ -127,16 +169,26 @@ def push_target(roadmap_dir, repo=gh.ROADMAP_REPO):
     login = gh.gh(["api", "user", "--jq", ".login"]).strip()
     if not login:
         raise RuntimeError("could not determine the authenticated login, so no fork can be used")
-    fork = f"{login}/{repo.split('/')[-1]}"
-    # `--clone=false` is idempotent: it creates the fork if absent and is a no-op if present.
+    # Ask the API what the fork is actually called rather than assuming `<login>/<name>`. A fork may
+    # be renamed, and a guessed path can redirect today and resolve to an unrelated repository later.
+    # `--clone=false` is idempotent: it creates the fork if absent and is a no-op if it exists.
     gh.gh(["repo", "fork", repo, "--clone=false", "--remote=false"])
+    fork = gh.gh(["api", f"repos/{repo}/forks?per_page=100", "--jq",
+                  f'[.[] | select(.owner.login == "{login}")] | .[0].full_name // ""']).strip()
+    if not fork:
+        # A fork the listing does not show (it is paginated and ordered by creation) is still
+        # addressable by the conventional path; verify it exists before trusting it.
+        candidate = f"{login}/{repo.split('/')[-1]}"
+        fork = gh.gh(["api", f"repos/{candidate}", "--jq", ".full_name"]).strip()
+    if not fork or "/" not in fork:
+        raise RuntimeError(f"could not identify {login}'s fork of {repo}")
     url = f"https://github.com/{fork}.git"
     if _run(["git", "remote", "get-url", "fork"], roadmap_dir, check=False).returncode == 0:
         _run(["git", "remote", "set-url", "fork", url], roadmap_dir)
     else:
         _run(["git", "remote", "add", "fork", url], roadmap_dir)
     print(f"no push access to {repo}; publishing from {fork}")
-    return "fork", login
+    return "fork", fork.split("/")[0]
 
 
 def render_update(plan, status_body, section_body, old_status, old_progress):
@@ -168,19 +220,25 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
     branch = branch_name(plan)
 
     # --- reconcile before acting ---------------------------------------------------------------
-    pr = existing_pr(branch)
+    # Anyone's OPEN or MERGED pull request for this window counts: it is already published or in
+    # flight, and a second one would only duplicate it.
+    pr = existing_pr(branch, states=("open", "merged"))
     if pr is not None:
         state = (pr.get("state") or "").upper()
         if state == "MERGED":
             print(f"already merged: {pr['url']}")
             return EX_NOPROGRESS
-        if state == "OPEN":
-            print(f"already open, in flight: {pr['url']}")
-            return EX_NOPROGRESS
-        # CLOSED and not merged: a human or a gate refused this window. Reopening it every day
-        # would be exactly the loop this design is meant to avoid.
+        print(f"already open, in flight: {pr['url']}")
+        return EX_NOPROGRESS
+
+    # A CLOSED pull request means this window was refused, and reopening it every day is the loop
+    # this design avoids -- but only one WE could have opened may say so. Branch names are a pure
+    # function of the window, so anyone can open and instantly close a pull request on that name;
+    # honouring a stranger's would let them stop a window being published, permanently and silently.
+    mine = own_closed_pr(branch)
+    if mine is not None:
         print(
-            f"this window was already proposed and closed unmerged ({pr['url']}); "
+            f"this window was already proposed and closed unmerged ({mine['url']}); "
             f"refusing to reopen it. Land or delete that PR to unblock the area."
         )
         return EX_NOPROGRESS
@@ -229,6 +287,7 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
     # a valid report for exactly this window, and overwriting it could clobber a peer's push moments
     # after it happened. Only push when nothing is there, and create-only so a concurrent push loses
     # rather than being silently overwritten.
+    # Resolved here, after the dry-run return, because it can create a fork as a side effect.
     remote, fork_owner = push_target(roadmap_dir)
     if remote_branch_exists(roadmap_dir, branch, remote):
         print(f"branch {branch} already exists on {remote} (an earlier run was interrupted); "

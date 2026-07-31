@@ -108,7 +108,7 @@ def make_window(**over):
 NOW = "2026-07-30T12:00:00Z"
 
 
-def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=None, window=-1,
+def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FROM, window=-1,
          compare_status="ahead", behind_by=0, old_paths=None, last_report_at=None, now=NOW,
          area_exists=True):
     old_status, new_status, old_progress, new_progress = content or make_content()
@@ -198,6 +198,15 @@ def test_a_fork_that_force_pushes_after_opening_gains_nothing():
     """
     pr = make_pr(head={"ref": BRANCH, "sha": HEAD, "repo": {"full_name": "someone/TauCetiRoadmap"}})
     refuses(lambda: call(pr=pr, checks=[build_run(head_sha="0" * 40)]), "names head")
+
+
+def test_refuses_a_first_report_for_a_roadmap():
+    """A bootstrap chooses where a roadmap's history begins, irreversibly, so a human decides it.
+
+    Every later report is pinned to the cursor already on main. A first one has no cursor to
+    continue from, so whoever files it also decides what earlier history becomes unreportable.
+    """
+    refuses(lambda: call(cursor=None), "no reported history yet")
 
 
 def test_refuses_an_invented_roadmap():
@@ -424,7 +433,7 @@ def test_refuses_invalid_utf8():
             old_status=old_status, new_status_bytes=new_status.encode(),
             old_progress=old_progress, new_progress_bytes=bad,
             check_runs=CHECKS_OK, base_repo=REPO, code_window=make_window(),
-            area_exists=True, now=NOW,
+            area_exists=True, now=NOW, current_main_cursor=FROM,
             compare_status="ahead", behind_by=0, main_sha=MAIN,
         )
     except (Refused, files.FormatError) as exc:

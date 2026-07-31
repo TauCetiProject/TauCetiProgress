@@ -276,12 +276,14 @@ def check_window(code_window, section):
             f"the window checked against history starts at {(code_window.get('from_sha') or '')[:7]}, "
             f"not the section's from_sha ({section['from_sha'][:7]})"
         )
-    if not code_window.get("to_reachable"):
+    if code_window.get("to_reachable") is not True:
         _refuse(
             f"to_sha {section['to_sha'][:7]} is not a commit reachable from TauCeti's "
             f"{code_window.get('ref', 'docgen')} branch, so it names no published history"
         )
-    if code_window.get("advances") is False:
+    # `is not True`, never `is False`: a missing or null field would otherwise pass. The collector
+    # leaves `advances` null when it did not get as far as asking.
+    if code_window.get("advances") is not True:
         _refuse(
             f"to_sha {section['to_sha'][:7]} does not come after from_sha "
             f"{section['from_sha'][:7]}; a window must move forward"
@@ -422,6 +424,19 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     seen, parent = check_files(changed_files, area)
     check_area_exists(area_exists, parent, area)
     check_baseline_paths(old_paths or {}, parent, area)
+    # A roadmap's FIRST report is not auto-mergeable, on purpose.
+    #
+    # Every later report is pinned: its `from_sha` must equal the cursor already on `main`. A first
+    # report has no cursor to continue from, so whoever files it chooses where that roadmap's history
+    # begins -- and everything before the chosen point becomes unreportable for good, since windows
+    # only ever move forward. That is a one-time, irreversible editorial decision, and it is the one
+    # thing here a human should make rather than whoever gets there first. There are fourteen
+    # roadmaps, so this costs fourteen reviews, once.
+    if not current_main_cursor:
+        _refuse(
+            f"{parent}/{area} has no reported history yet, so this report chooses where that "
+            f"roadmap's log begins; a first report is left for human review"
+        )
     check_modes(tree_entries, [f"{parent}/{area}/{name}" for name in ALLOWED_BASENAMES])
     section = check_content(
         area, old_status, new_status_bytes, old_progress, new_progress_bytes,

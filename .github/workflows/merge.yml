@@ -59,11 +59,21 @@ permissions:
   contents: read
   pull-requests: read
 
-# Repository-wide, not per-PR: two progress PRs must never be validated and merged concurrently,
-# because each one's validity depends on where `main` currently is.
-concurrency:
-  group: progress-merge
-  cancel-in-progress: false
+# DELIBERATELY NOT SERIALISED.
+#
+# An earlier version put every call into one repository-wide `progress-merge` concurrency group, so
+# that two reports could never be validated and merged at once, each one's validity depending on
+# where `main` is. That reasoning was right about the hazard and wrong about the remedy. GitHub keeps
+# one running and one pending run per group and discards the older pending one when a newer event
+# arrives, so with anyone able to open and synchronise a `progress/*` pull request, the group becomes
+# a lever: a steady trickle of events evicts the queued legitimate run indefinitely, and nothing
+# reports an error.
+#
+# Concurrent runs are safe without it. The landing step is a compare-and-swap: the commit names the
+# validated `main` SHA as its only parent and the ref update sets `force=false`, so if another report
+# landed in between, this one's update is not a fast-forward and is rejected. The loser fails its
+# swap and the pull request is simply rebuilt on the newer `main` next round -- which is exactly what
+# the serialisation was there to prevent, achieved by the mechanism that was already doing the work.
 
 jobs:
   validate:
@@ -281,4 +291,15 @@ jobs:
           # Best effort from here: neither of these affects correctness.
           gh pr comment "$PR" --repo "$REPO" \
             --body "Landed on \`main\` as $COMMIT by compare-and-swap on the validated tree." || true
-          gh api -X DELETE "repos/$REPO/git/refs/heads/$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq .headRefName)" > /dev/null 2>&1 || true
+          # Delete the source branch ONLY when it is in this repository. Branch names are a pure
+          # function of the window, so a fork's branch has the same name as the canonical one would:
+          # deleting `repos/$REPO/git/refs/heads/<name>` after landing a FORK pull request would
+          # delete an unrelated canonical branch that happens to share the name.
+          head_repo="$(gh pr view "$PR" --repo "$REPO" --json headRepository,headRepositoryOwner \
+                       --jq '(.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")')"
+          head_ref="$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq .headRefName)"
+          if [ "$head_repo" = "$REPO" ] && [ -n "$head_ref" ]; then
+            gh api -X DELETE "repos/$REPO/git/refs/heads/$head_ref" > /dev/null 2>&1 || true
+          else
+            echo "head is in $head_repo, not $REPO; leaving its branch alone"
+          fi

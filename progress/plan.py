@@ -264,7 +264,6 @@ def build_plan(
         except files.FormatError as exc:
             skipped.append(f"{area}: unparseable PROGRESS.md ({exc})")
             continue
-        already = files.reported_prs(progress_text) if progress_text else set()
 
         # One label query per area. See gh.merged_prs_for_area for why attribution is per-area
         # rather than per-PR.
@@ -284,10 +283,17 @@ def build_plan(
             skipped.append(f"{area}: already at {to_sha[:7]}")
             continue
 
-        nums = area_window(code_dir, area_prs, from_sha, to_sha)
-        # A PR already recorded in an earlier section must never be reported twice, even if its
-        # label was changed after that section landed.
-        fresh = [n for n in nums if n not in already]
+        # The SHA window is the authority on what belongs in a report, and deliberately the ONLY
+        # authority. An earlier version also subtracted every PR number any previous section had
+        # claimed, as a guard against a PR being relabelled after it was reported. That made a
+        # section's `prs` list -- attacker-supplied metadata in a file anyone may append to -- able to
+        # suppress real work permanently: a report claiming thousands of numbers would leave every
+        # later window for that roadmap looking empty, with no error anywhere.
+        #
+        # The failure it guarded against is a PR appearing in two reports after someone changed its
+        # label. That is cosmetic. Silently unreportable history is not, so the trade goes the other
+        # way.
+        fresh = area_window(code_dir, area_prs, from_sha, to_sha)
         if not fresh:
             skipped.append(f"{area}: nothing new since {from_sha[:7]}")
             continue

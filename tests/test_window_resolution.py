@@ -34,6 +34,7 @@ def check(name, fn):
 AREA = "PDE"
 FROM = "a" * 40
 TO = "b" * 40
+TIP = "d" * 40  # what `docgen` resolves to; pinned once per run, never re-read
 PROSE = ("Harnack's inequality landed for a nonnegative harmonic function on a planar disc, in both "
          "the two-sided comparison with the centre value and the pairwise form on a closed subdisc "
          "with the sharp constant. The supporting mean-value machinery was extracted along the way.")
@@ -44,25 +45,26 @@ def progress_with(from_sha=FROM, to_sha=TO):
         AREA, from_sha, to_sha, [1, 2, 3], "w", PROSE)
 
 
-def with_statuses(mapping):
-    """Stub `compare_status` from a `{(base, head): status}` map; anything absent is a 404."""
-    orig = collect.compare_status
+def with_statuses(mapping, tip=TIP):
+    """Stub the two network calls from a `{(base, head): status}` map; anything absent is a 404."""
+    orig_cmp, orig_rev = collect.compare_status, collect.rev_parse
     collect.compare_status = lambda repo, base, head: mapping.get((base, head))
+    collect.rev_parse = lambda repo, ref: tip
     try:
         return collect.resolve_window(progress_with())
     finally:
-        collect.compare_status = orig
+        collect.compare_status, collect.rev_parse = orig_cmp, orig_rev
 
 
 def test_a_real_forward_window_resolves():
-    w = with_statuses({(TO, "docgen"): "ahead", (FROM, TO): "ahead"})
+    w = with_statuses({(TO, TIP): "ahead", (FROM, TO): "ahead"})
     assert w["to_reachable"] is True and w["advances"] is True
     assert w["from_sha"] == FROM and w["to_sha"] == TO
 
 
 def test_the_documentation_tip_itself_is_reachable():
     """`identical` means to_sha IS the tip, which is the common case for a fresh report."""
-    w = with_statuses({(TO, "docgen"): "identical", (FROM, TO): "ahead"})
+    w = with_statuses({(TO, TIP): "identical", (FROM, TO): "ahead"})
     assert w["to_reachable"] is True and w["advances"] is True
 
 
@@ -74,33 +76,52 @@ def test_a_fabricated_to_sha_is_not_reachable():
 
 def test_a_to_sha_off_the_documentation_branch_is_not_reachable():
     for status in ("behind", "diverged"):
-        w = with_statuses({(TO, "docgen"): status, (FROM, TO): "ahead"})
+        w = with_statuses({(TO, TIP): status, (FROM, TO): "ahead"})
         assert w["to_reachable"] is False, status
 
 
 def test_a_backwards_window_does_not_advance():
     for status in ("behind", "diverged", "identical"):
-        w = with_statuses({(TO, "docgen"): "ahead", (FROM, TO): status})
+        w = with_statuses({(TO, TIP): "ahead", (FROM, TO): status})
         assert w["advances"] is False, status
 
 
 def test_an_empty_window_does_not_advance():
     """from_sha == to_sha compares as `identical`, and an empty window reports nothing."""
-    w = with_statuses({(TO, "docgen"): "ahead", (FROM, TO): "identical"})
+    w = with_statuses({(TO, TIP): "ahead", (FROM, TO): "identical"})
     assert w["advances"] is False
 
 
 def test_reachability_is_checked_before_advancement():
     """No point asking whether an invented commit moves forward, and it saves a request."""
     seen = []
-    orig = collect.compare_status
+    orig_cmp, orig_rev = collect.compare_status, collect.rev_parse
     collect.compare_status = lambda repo, base, head: seen.append((base, head)) or None
+    collect.rev_parse = lambda repo, ref: TIP
     try:
         w = collect.resolve_window(progress_with())
     finally:
-        collect.compare_status = orig
-    assert seen == [(TO, "docgen")], seen
+        collect.compare_status, collect.rev_parse = orig_cmp, orig_rev
+    assert seen == [(TO, TIP)], seen
     assert w["advances"] is None
+
+
+def test_the_branch_is_pinned_to_one_snapshot():
+    """`docgen` is mutable. Resolving it once and comparing against that SHA closes the gap in which
+    it could move between the question and the answer, and records what was consulted."""
+    w = with_statuses({(TO, TIP): "ahead", (FROM, TO): "ahead"})
+    assert w["ref_sha"] == TIP
+
+
+def test_an_unreadable_branch_refuses_rather_than_passing():
+    orig_cmp, orig_rev = collect.compare_status, collect.rev_parse
+    collect.compare_status = lambda repo, base, head: "ahead"
+    collect.rev_parse = lambda repo, ref: None
+    try:
+        w = collect.resolve_window(progress_with())
+    finally:
+        collect.compare_status, collect.rev_parse = orig_cmp, orig_rev
+    assert w["to_reachable"] is False and w["ref_sha"] is None
 
 
 def test_an_unparseable_log_resolves_to_nothing():
@@ -113,12 +134,13 @@ def test_an_unparseable_log_resolves_to_nothing():
 def test_the_newest_section_is_the_one_checked():
     """A pull request appends one section; an older section's window is already history."""
     text = progress_with() + files.render_section(AREA, TO, "c" * 40, [4], "w", PROSE)
-    orig = collect.compare_status
+    orig_cmp, orig_rev = collect.compare_status, collect.rev_parse
     collect.compare_status = lambda repo, base, head: "ahead"
+    collect.rev_parse = lambda repo, ref: TIP
     try:
         w = collect.resolve_window(text)
     finally:
-        collect.compare_status = orig
+        collect.compare_status, collect.rev_parse = orig_cmp, orig_rev
     assert w["from_sha"] == TO and w["to_sha"] == "c" * 40
 
 

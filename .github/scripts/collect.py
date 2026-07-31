@@ -172,6 +172,15 @@ def last_commit_date(repo, ref, path):
     return out if out and out != "null" else None
 
 
+def rev_parse(repo, ref):
+    """Resolve a ref to an immutable commit SHA, or None if it cannot be read."""
+    proc = subprocess.run(
+        ["gh", "api", f"repos/{repo}/commits/{ref}", "--jq", ".sha"],
+        capture_output=True, text=True,
+    )
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
 def compare_status(repo, base, head):
     """`status` from a two-dot-three comparison, or None when either end is not a commit.
 
@@ -219,7 +228,14 @@ def resolve_window(new_progress, repo=CODE_REPO, ref=CODE_REF):
 
     # `to_sha...ref` is `ahead` when ref has commits to_sha does not, and `identical` when to_sha IS
     # the tip. Both mean to_sha is reachable. `behind` or `diverged` mean it is off the branch.
-    reach = compare_status(repo, to_sha, ref)
+    # Resolve the branch to an immutable SHA first and compare against that. `docgen` is a mutable
+    # ref: comparing against the name leaves a gap in which it could move between the question and
+    # the answer, and records nothing about what was actually consulted.
+    tip = rev_parse(repo, ref)
+    if tip is None:
+        return {"repo": repo, "ref": ref, "ref_sha": None, "from_sha": from_sha, "to_sha": to_sha,
+                "to_reachable": False, "advances": None}
+    reach = compare_status(repo, to_sha, tip)
     to_reachable = reach in ("ahead", "identical")
 
     advances = None
@@ -228,7 +244,7 @@ def resolve_window(new_progress, repo=CODE_REPO, ref=CODE_REF):
         # or sideways.
         advances = compare_status(repo, from_sha, to_sha) == "ahead"
 
-    return {"repo": repo, "ref": ref, "from_sha": from_sha, "to_sha": to_sha,
+    return {"repo": repo, "ref": ref, "ref_sha": tip, "from_sha": from_sha, "to_sha": to_sha,
             "to_reachable": to_reachable, "advances": advances}
 
 

@@ -96,19 +96,27 @@ jobs:
               # access here publishes from their own fork, so excluding them would mean their build
               # completing and this trigger never finding the pull request.
               #
-              # `min` rather than `first` so the choice is deterministic. Several pull requests can
-              # share one head SHA, but sharing a head SHA means sharing a tree: the diff, and so the
-              # gate's verdict, is identical for all of them. The oldest is picked simply so repeated
-              # runs agree with each other.
+              # Every condition the gate itself would refuse on is filtered FIRST, and only then is
+              # one chosen. Sharing a head SHA means sharing a tree, but not a base branch, a draft
+              # flag, or a branch name: an older pull request at the same commit, retargeted or
+              # renamed, would otherwise be selected, refused forever, and the legitimate report
+              # never reconsidered once CI completed.
+              #
+              # `min` among what survives, so repeated runs agree with each other.
               #
               # `--slurp` so the pages arrive as ONE array; the filter then runs over all of them.
               # Without it `--jq` is applied page by page: page one emits an empty line, and a
               # legitimate match on a later page is lost -- the same starvation the 30-item default
               # allowed, just moved. `--slurp` cannot be combined with `--jq`, hence the pipe.
               pr="$(gh api --paginate --slurp "repos/$REPO/commits/$HEAD_SHA/pulls" \
-                    | jq -r '[.[][] | select(.state == "open")
-                                    | select(.head.ref | startswith("progress/"))
-                                    | .number] | min // ""')"
+                    | jq -r --arg repo "$REPO" '
+                         [.[][]
+                          | select(.state == "open")
+                          | select(.draft | not)
+                          | select(.base.ref == "main")
+                          | select(.base.repo.full_name == $repo)
+                          | select(.head.ref | test("^progress/[0-9a-f]{7}-[0-9a-f]{7}/[A-Za-z0-9]+$"))
+                          | .number] | min // ""')"
               echo "pr=$pr" >> "$GITHUB_OUTPUT" ;;
           esac
 
