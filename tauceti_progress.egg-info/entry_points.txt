@@ -1,0 +1,2 @@
+[console_scripts]
+tauceti-progress = progress.cli:main

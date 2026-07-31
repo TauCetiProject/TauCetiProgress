@@ -37,7 +37,6 @@ def refuses(fn, needle=None):
 
 
 REPO = "TauCetiProject/TauCetiRoadmap"
-OK_IDS = [477956]
 FROM = "1f1d752" + "0" * 33
 TO = "3f41440" + "0" * 33
 HEAD = "f" * 40
@@ -98,8 +97,20 @@ CHECKS_OK = [build_run()]
 MAIN = "9a9a9a9" + "0" * 33
 
 
-def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=None, ids=None,
-         compare_status="ahead", behind_by=0, old_paths=None):
+def make_window(**over):
+    """A window that really is a forward stretch of documented TauCeti history."""
+    w = {"repo": "TauCetiProject/TauCeti", "ref": "docgen", "from_sha": FROM, "to_sha": TO,
+         "to_reachable": True, "advances": True}
+    w.update(over)
+    return w
+
+
+NOW = "2026-07-30T12:00:00Z"
+
+
+def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FROM, window=-1,
+         compare_status="ahead", behind_by=0, old_paths=None, last_report_at=None, now=NOW,
+         area_exists=True):
     old_status, new_status, old_progress, new_progress = content or make_content()
     return gate.decide(
         pr=pr or make_pr(),
@@ -110,8 +121,11 @@ def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=Non
         old_progress=old_progress,
         new_progress_bytes=new_progress.encode(),
         check_runs=checks if checks is not None else CHECKS_OK,
-        allowed_user_ids=ids if ids is not None else OK_IDS,
         base_repo=REPO,
+        code_window=make_window() if window == -1 else window,
+        last_report_at=last_report_at,
+        now=now,
+        area_exists=area_exists,
         current_main_cursor=cursor,
         compare_status=compare_status,
         behind_by=behind_by,
@@ -136,16 +150,99 @@ def test_allows_a_well_formed_update():
 # ----- provenance ------------------------------------------------------------------------------
 
 
-def test_refuses_a_fork():
-    pr = make_pr(head={"ref": BRANCH, "sha": HEAD, "repo": {"full_name": "attacker/TauCetiRoadmap"}})
-    refuses(lambda: call(pr=pr), "forks are never auto-merged")
+def test_allows_a_fork():
+    """Anyone may publish, which in practice means from a fork: no PR content is ever checked out."""
+    pr = make_pr(head={"ref": BRANCH, "sha": HEAD, "repo": {"full_name": "someone/TauCetiRoadmap"}})
+    assert call(pr=pr)["area"] == AREA
 
 
-def test_refuses_an_unlisted_author():
-    pr = make_pr(user={"id": 999999, "login": "kim-em"})
-    # Note the login still says kim-em: identity is the numeric id precisely so that a renamed or
-    # impersonated login cannot pass.
-    refuses(lambda: call(pr=pr), "not in the allowlist")
+def test_the_author_is_irrelevant():
+    """Identity is deliberately not a criterion. The shape of the diff is what makes this safe."""
+    for user in ({"id": 999999, "login": "stranger"}, {"id": 1, "login": "kim-em"}, {}):
+        assert call(pr=make_pr(user=user))["area"] == AREA
+
+
+def test_refuses_a_fabricated_to_sha():
+    """The attack the window check exists to stop.
+
+    Cursor continuity pins `from_sha`, but `to_sha` was otherwise free. A report naming an invented
+    commit would land and leave the cursor at that value, and the next one could start from there:
+    an unbounded walk, each step burning a window that could never afterwards be reported and each
+    step posting to Zulip. A fabricated sha is not reachable from the documentation branch.
+    """
+    refuses(lambda: call(window=make_window(to_reachable=False, advances=None)),
+            "names no published history")
+
+
+def test_refuses_a_window_that_does_not_move_forward():
+    refuses(lambda: call(window=make_window(advances=False)), "must move forward")
+
+
+def test_refuses_when_the_window_could_not_be_checked():
+    """A bundle from an older collector must not silently skip the check."""
+    refuses(lambda: call(window=None), "could not be checked")
+    refuses(lambda: call(window={}), "could not be checked")
+
+
+def test_refuses_when_the_checked_window_is_not_the_reported_one():
+    """The window is resolved from the same pinned blob the section is parsed from; they must agree."""
+    refuses(lambda: call(window=make_window(to_sha="b" * 40)), "is not the section's to_sha")
+
+
+def test_a_fork_that_force_pushes_after_opening_gains_nothing():
+    """Now that fork heads are accepted, the head branch is under someone else's control.
+
+    That is fine, because every check reads one pinned SHA. Replacing the branch produces a different
+    head, and evidence gathered for the old one no longer applies: here the build success names a
+    commit that is not the pinned head, which is exactly what a force-push leaves behind.
+    """
+    pr = make_pr(head={"ref": BRANCH, "sha": HEAD, "repo": {"full_name": "someone/TauCetiRoadmap"}})
+    refuses(lambda: call(pr=pr, checks=[build_run(head_sha="0" * 40)]), "names head")
+
+
+def test_a_first_report_is_never_auto_merged():
+    """Where a roadmap's log begins cannot be verified mechanically, so a human decides it once.
+
+    Three implementations tried: by lowest pull request number, by merge timestamp, and by walking
+    the commits endpoint. The REST API expresses neither first-parent traversal nor an ordering
+    guarantee, and this history is not linear, so ancestry checks cannot recover it either. Refusing
+    is the honest outcome; every report after the first merges unattended.
+    """
+    reason = refuses(lambda: call(cursor=None), "no reported history yet")
+    assert "human review" in reason
+
+
+def test_refuses_an_invented_roadmap():
+    """Otherwise the cadence limit is trivially escaped.
+
+    It is keyed on the area, and an area with no previous report is always allowed, so inventing area
+    names would give unlimited exempt "first reports" -- Bogus1, Bogus2 -- each creating a directory
+    and each announcing itself.
+    """
+    refuses(lambda: call(area_exists=False), "is not a roadmap on the base branch")
+
+
+def test_refuses_a_second_report_for_the_same_roadmap_too_soon():
+    """Bounding WHERE a report may point does not bound HOW MANY may be sent.
+
+    An area whose cursor is far behind the documentation branch has over a thousand commits of room
+    in front of it, and that room can be cut into as many single-commit windows as there are commits.
+    Every one would pass every other check, and every one would post to Zulip. The cadence is
+    therefore enforced here as well as in the planner.
+    """
+    refuses(lambda: call(last_report_at="2026-07-30T02:00:00Z"), "reported 10.0h ago")
+
+
+def test_allows_a_report_once_the_interval_has_passed():
+    assert call(last_report_at="2026-07-29T00:00:00Z")["area"] == AREA
+
+
+def test_a_first_report_for_an_area_has_no_predecessor():
+    assert call(last_report_at=None)["area"] == AREA
+
+
+def test_an_unreadable_last_report_time_does_not_disable_the_limit():
+    refuses(lambda: call(last_report_at="whenever"), "could not read when")
 
 
 def test_refuses_a_draft():
@@ -338,7 +435,8 @@ def test_refuses_invalid_utf8():
             pr=make_pr(), changed_files=make_files(), tree_entries=make_tree(),
             old_status=old_status, new_status_bytes=new_status.encode(),
             old_progress=old_progress, new_progress_bytes=bad,
-            check_runs=CHECKS_OK, allowed_user_ids=OK_IDS, base_repo=REPO,
+            check_runs=CHECKS_OK, base_repo=REPO, code_window=make_window(),
+            area_exists=True, now=NOW, current_main_cursor=FROM,
             compare_status="ahead", behind_by=0, main_sha=MAIN,
         )
     except (Refused, files.FormatError) as exc:

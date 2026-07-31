@@ -26,11 +26,12 @@ them explicitly:
 * The previous contents of the two files are read at `main_sha`, not from a working checkout that
   could have drifted.
 
-Run as: collect.py --repo O/R --pr N --allowed-user-ids 1,2 --out bundle.json
+Run as: collect.py --repo O/R --pr N --out bundle.json
 """
 
 import argparse
 import base64
+import datetime
 import json
 import pathlib
 import re
@@ -40,6 +41,12 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from progress import files, gate  # noqa: E402
+
+# Where the reported window has to live. `to_sha` is checked for reachability from this branch, which
+# tracks the newest TauCeti commit with published documentation.
+CODE_REPO = "TauCetiProject/TauCeti"
+CODE_REF = "docgen"
+ROADMAP_LABEL_PREFIX = "roadmap/"
 
 # `compare` returns at most 300 files. More than that cannot be a progress report, and a truncated
 # list could HIDE a path from the gate, so anything approaching the limit is refused outright rather
@@ -150,11 +157,103 @@ def file_at(repo, ref, path):
     return content
 
 
+def last_commit_date(repo, ref, path):
+    """When `path` was last changed on `ref`, or None if never.
+
+    Used to enforce the per-roadmap reporting cadence on the server. Read from the base branch, so it
+    reflects reports that actually landed rather than anything the pull request claims.
+    """
+    proc = subprocess.run(
+        ["gh", "api", f"repos/{repo}/commits?sha={ref}&path={path}&per_page=1",
+         "--jq", ".[0].commit.committer.date"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise CollectError(f"reading the history of {path} failed: {proc.stderr.strip()}")
+    out = proc.stdout.strip()
+    return out if out and out != "null" else None
+
+
+def rev_parse(repo, ref):
+    """Resolve a ref to an immutable commit SHA, or None if it cannot be read."""
+    proc = subprocess.run(
+        ["gh", "api", f"repos/{repo}/commits/{ref}", "--jq", ".sha"],
+        capture_output=True, text=True,
+    )
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+def compare_status(repo, base, head):
+    """`status` from a two-dot-three comparison, or None when either end is not a commit.
+
+    A 404 here is a *finding*, not an error: it is exactly what a fabricated `to_sha` looks like, and
+    the caller turns it into a refusal.
+    """
+    proc = subprocess.run(
+        ["gh", "api", f"repos/{repo}/compare/{base}...{head}", "--jq", ".status"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr or ""
+        if "Not Found" in err or "404" in err:
+            return None
+        raise CollectError(f"comparing {base[:7]}...{head[:7]} in {repo} failed: {err.strip()}")
+    return proc.stdout.strip() or None
+
+
+def resolve_window(new_progress, repo=CODE_REPO, ref=CODE_REF):
+    """Check the newly-appended section's window against real TauCeti history.
+
+    Without this, `to_sha` is unconstrained. Cursor continuity pins `from_sha` to the area's current
+    cursor, but nothing stopped a report naming an arbitrary 40-hex `to_sha`, landing, and leaving the
+    cursor there -- then repeating from that value indefinitely, walking the cursor past windows that
+    could never afterwards be reported and announcing every step to Zulip.
+
+    Two questions, both answered against `ref`:
+
+    * is `to_sha` a commit reachable from the documentation branch?
+    * does it come strictly after `from_sha`?
+
+    Reachability rather than equality with the tip, because the tip advances whenever documentation is
+    published and equality would refuse a report that was correct when its round began.
+
+    Returns None when the section cannot be parsed; the content checks report that failure properly.
+    """
+    try:
+        sections = files.parse_sections(new_progress or "")
+    except files.FormatError:
+        return None
+    if not sections:
+        return None
+    section = sections[-1]
+    from_sha, to_sha = section["from_sha"], section["to_sha"]
+
+    # `to_sha...ref` is `ahead` when ref has commits to_sha does not, and `identical` when to_sha IS
+    # the tip. Both mean to_sha is reachable. `behind` or `diverged` mean it is off the branch.
+    # Resolve the branch to an immutable SHA first and compare against that. `docgen` is a mutable
+    # ref: comparing against the name leaves a gap in which it could move between the question and
+    # the answer, and records nothing about what was actually consulted.
+    tip = rev_parse(repo, ref)
+    if tip is None:
+        return {"repo": repo, "ref": ref, "ref_sha": None, "from_sha": from_sha, "to_sha": to_sha,
+                "to_reachable": False, "advances": None}
+    reach = compare_status(repo, to_sha, tip)
+    to_reachable = reach in ("ahead", "identical")
+
+    advances = None
+    if to_reachable:
+        # Only `ahead` advances: `identical` is an empty window, and `behind`/`diverged` go backwards
+        # or sideways.
+        advances = compare_status(repo, from_sha, to_sha) == "ahead"
+
+    return {"repo": repo, "ref": ref, "ref_sha": tip, "from_sha": from_sha, "to_sha": to_sha,
+            "to_reachable": to_reachable, "advances": advances}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
     ap.add_argument("--pr", required=True, type=int)
-    ap.add_argument("--allowed-user-ids", required=True)
     ap.add_argument("--base-branch", default="main")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
@@ -167,6 +266,7 @@ def main(argv=None):
     main_sha = gh_api(f"repos/{args.repo}/commits/{args.base_branch}").get("sha") or ""
     if not main_sha:
         raise CollectError(f"could not resolve {args.base_branch}")
+
 
     # The area comes from the branch and is validated by the gate's own pattern. Reading it here with
     # the gate's regex keeps the two from disagreeing.
@@ -216,7 +316,8 @@ def main(argv=None):
     # `TauCetiRoadmap/` first was a real hole: an area can exist under both parents, so a pull request
     # changing `Completed/<area>/` would be handed the ACTIVE log as its append-only baseline, and a
     # wholesale replacement of the archived log then looked like a valid append.
-    old_status = old_progress = None
+    old_status = old_progress = last_report_at = None
+    area_exists = False
     old_paths = {}
     current_cursor = None
     parents = {gate.PATH_RE.match(p).group(1) for p in by_path}
@@ -231,6 +332,12 @@ def main(argv=None):
         }
         old_status = file_at(args.repo, main_sha, old_paths["STATUS.md"])
         old_progress = file_at(args.repo, main_sha, old_paths["PROGRESS.md"])
+        # When this roadmap was last reported, for the server-side cadence limit.
+        last_report_at = last_commit_date(args.repo, main_sha, old_paths["PROGRESS.md"])
+        # A roadmap is a directory with a README.md, the same rule the planner uses. Reports may only
+        # be added to one that already exists, or invented area names would give unlimited
+        # "first reports", each exempt from the cadence limit.
+        area_exists = file_at(args.repo, main_sha, f"{parent}/{area}/README.md") is not None
         if old_progress:
             try:
                 current_cursor = files.cursor(old_progress)
@@ -256,7 +363,11 @@ def main(argv=None):
 
     bundle = {
         "base_repo": args.repo,
-        "allowed_user_ids": [int(x) for x in re.split(r"[,\s]+", args.allowed_user_ids) if x],
+        "code_window": resolve_window(new_progress),
+        "area_exists": area_exists,
+        "last_report_at": last_report_at,
+        # The collector's own clock, never anything from the pull request.
+        "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "pr": pr,
         "area": area,
         "head_sha": head_sha,

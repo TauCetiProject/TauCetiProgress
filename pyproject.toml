@@ -20,4 +20,7 @@ build-backend = "setuptools.build_meta"
 packages = ["progress"]
 
 [tool.setuptools.package-data]
-progress = ["../prompts/*.md"]
+# Inside the package, not `../prompts`: setuptools does not reliably ship files from outside the
+# package directory, and the worker fetches these prompts from an installed build rather than from a
+# checkout, so a prompt that does not install is a prompt that does not exist.
+progress = ["prompts/*.md"]

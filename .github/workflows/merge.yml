@@ -37,10 +37,6 @@ on:
         description: The TauCetiProgress ref to validate with (must equal the `uses:` SHA).
         required: true
         type: string
-      allowed_user_ids:
-        description: Comma-separated numeric GitHub user ids permitted to author these PRs.
-        required: true
-        type: string
       app_id:
         description: >
           Numeric id of the App whose token performs the merge. It MUST be an App that the target
@@ -59,19 +55,39 @@ on:
       APP_PRIVATE_KEY:
         required: true
 
+# The floor for both jobs. `validate` raises its own to write, for one comment; `merge` does not
+# need it at all, because everything it writes uses the App token rather than this one.
 permissions:
   contents: read
   pull-requests: read
 
-# Repository-wide, not per-PR: two progress PRs must never be validated and merged concurrently,
-# because each one's validity depends on where `main` currently is.
-concurrency:
-  group: progress-merge
-  cancel-in-progress: false
+# DELIBERATELY NOT SERIALISED.
+#
+# An earlier version put every call into one repository-wide `progress-merge` concurrency group, so
+# that two reports could never be validated and merged at once, each one's validity depending on
+# where `main` is. That reasoning was right about the hazard and wrong about the remedy. GitHub keeps
+# one running and one pending run per group and discards the older pending one when a newer event
+# arrives, so with anyone able to open and synchronise a `progress/*` pull request, the group becomes
+# a lever: a steady trickle of events evicts the queued legitimate run indefinitely, and nothing
+# reports an error.
+#
+# Concurrent runs are safe without it. The landing step is a compare-and-swap: the commit names the
+# validated `main` SHA as its only parent and the ref update sets `force=false`, so if another report
+# landed in between, this one's update is not a fast-forward and is rejected. The loser fails its
+# swap and the pull request is simply rebuilt on the newer `main` next round -- which is exactly what
+# the serialisation was there to prevent, achieved by the mechanism that was already doing the work.
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    # `write` ONLY here, and only so a refusal can be explained on the pull request itself. Anyone
+    # may publish a report now, so a contributor whose report is refused would otherwise get no
+    # feedback at all: the reason would sit in the Actions log of a workflow in a repository they may
+    # not be able to read. This job never checks out or executes pull-request content, and the
+    # comment body is written to a file rather than interpolated into a shell.
+    permissions:
+      contents: read
+      pull-requests: write
     outputs:
       verdict: ${{ steps.gate.outputs.verdict }}
       head_sha: ${{ steps.gate.outputs.head_sha }}
@@ -97,11 +113,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ inputs.pr }}
           REPO: ${{ github.repository }}
-          ALLOWED: ${{ inputs.allowed_user_ids }}
         run: |
           set -euo pipefail
           python3 validator/.github/scripts/collect.py \
-            --repo "$REPO" --pr "$PR" --allowed-user-ids "$ALLOWED" --out bundle.json
+            --repo "$REPO" --pr "$PR" --out bundle.json
 
       # The gate. Exit 0 allows, exit 3 is a considered refusal, anything else is a crash. A crash
       # must NOT read as a refusal: the two are different, and conflating them turns an unexpected
@@ -154,6 +169,10 @@ jobs:
           } > refusal.md
           printf 'gate refused:\n'
           cat refusal.md
+          # Best effort. A refusal is a normal outcome, so failing to describe it must not turn the
+          # run red -- the verdict is already recorded in the job output either way.
+          gh pr comment "$PR" --repo "$REPO" --body-file refusal.md \
+            || echo "::warning title=refusal not posted::could not comment on #$PR" 
 
   merge:
     needs: validate
@@ -286,4 +305,15 @@ jobs:
           # Best effort from here: neither of these affects correctness.
           gh pr comment "$PR" --repo "$REPO" \
             --body "Landed on \`main\` as $COMMIT by compare-and-swap on the validated tree." || true
-          gh api -X DELETE "repos/$REPO/git/refs/heads/$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq .headRefName)" > /dev/null 2>&1 || true
+          # Delete the source branch ONLY when it is in this repository. Branch names are a pure
+          # function of the window, so a fork's branch has the same name as the canonical one would:
+          # deleting `repos/$REPO/git/refs/heads/<name>` after landing a FORK pull request would
+          # delete an unrelated canonical branch that happens to share the name.
+          head_repo="$(gh pr view "$PR" --repo "$REPO" --json headRepository,headRepositoryOwner \
+                       --jq '(.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")')"
+          head_ref="$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq .headRefName)"
+          if [ "$head_repo" = "$REPO" ] && [ -n "$head_ref" ]; then
+            gh api -X DELETE "repos/$REPO/git/refs/heads/$head_ref" > /dev/null 2>&1 || true
+          else
+            echo "head is in $head_repo, not $REPO; leaving its branch alone"
+          fi
