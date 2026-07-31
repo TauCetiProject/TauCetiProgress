@@ -55,12 +55,11 @@ on:
       APP_PRIVATE_KEY:
         required: true
 
+# The floor for both jobs. `validate` raises its own to write, for one comment; `merge` does not
+# need it at all, because everything it writes uses the App token rather than this one.
 permissions:
   contents: read
-  # `write` so a refusal can be explained ON the pull request. Anyone may publish a report now, and a
-  # contributor whose report is refused would otherwise get no feedback at all: the reason would sit
-  # in the Actions log of a workflow in a repository they may not even be able to read.
-  pull-requests: write
+  pull-requests: read
 
 # DELIBERATELY NOT SERIALISED.
 #
@@ -81,6 +80,14 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    # `write` ONLY here, and only so a refusal can be explained on the pull request itself. Anyone
+    # may publish a report now, so a contributor whose report is refused would otherwise get no
+    # feedback at all: the reason would sit in the Actions log of a workflow in a repository they may
+    # not be able to read. This job never checks out or executes pull-request content, and the
+    # comment body is written to a file rather than interpolated into a shell.
+    permissions:
+      contents: read
+      pull-requests: write
     outputs:
       verdict: ${{ steps.gate.outputs.verdict }}
       head_sha: ${{ steps.gate.outputs.head_sha }}

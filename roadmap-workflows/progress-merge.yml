@@ -35,9 +35,12 @@ on:
         required: true
         type: number
 
+# A called workflow can never exceed what the caller grants, so `pull-requests: write` has to be
+# here as well as in the called workflow -- which narrows it again to the single job that explains a
+# refusal on the pull request. Nothing here checks out or executes pull-request content.
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 
 jobs:
