@@ -289,6 +289,24 @@ def check_window(code_window, section):
     return True
 
 
+def check_area_exists(area_exists, parent, area):
+    """The report must be for a roadmap that already exists.
+
+    Without this the rate limit below is trivially escaped. It is keyed on the area, and a report for
+    an area with no predecessor is always allowed, so an actor who can invent area names can invent
+    unlimited first reports: `TauCetiRoadmap/Bogus1/`, `Bogus2/`, and so on, each creating a new
+    directory of two files and each announcing itself. Requiring the directory to already hold a
+    `README.md` on the base branch pins reports to roadmaps humans actually created -- the same rule
+    that defines an area everywhere else in this tool.
+    """
+    if not area_exists:
+        _refuse(
+            f"{parent}/{area} is not a roadmap on the base branch (no README.md there); reports may "
+            f"only be added to roadmaps that already exist"
+        )
+    return True
+
+
 def check_rate(last_report_at, now, area, min_hours=MIN_REPORT_INTERVAL_HOURS):
     """An area may not be reported again until `min_hours` after its last report landed.
 
@@ -387,7 +405,8 @@ def check_baseline_paths(old_paths, parent, area):
 def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_progress,
            new_progress_bytes, check_runs, base_repo,
            current_main_cursor=None, compare_status=None, behind_by=None, main_sha="",
-           old_paths=None, code_window=None, last_report_at=None, now=None):
+           old_paths=None, code_window=None, last_report_at=None, now=None,
+           area_exists=None):
     """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
@@ -401,6 +420,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
 
     check_up_to_date(compare_status, behind_by, head_sha, main_sha)
     seen, parent = check_files(changed_files, area)
+    check_area_exists(area_exists, parent, area)
     check_baseline_paths(old_paths or {}, parent, area)
     check_modes(tree_entries, [f"{parent}/{area}/{name}" for name in ALLOWED_BASENAMES])
     section = check_content(
@@ -469,6 +489,7 @@ def main(argv=None):
             # `.get`, but the gate refuses when it is absent: a bundle from an older collector must
             # not silently skip the window check.
             code_window=data.get("code_window"),
+            area_exists=data.get("area_exists"),
             last_report_at=data.get("last_report_at"),
             now=data.get("collected_at"),
             current_main_cursor=data.get("current_main_cursor"),

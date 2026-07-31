@@ -299,6 +299,7 @@ def main(argv=None):
     # changing `Completed/<area>/` would be handed the ACTIVE log as its append-only baseline, and a
     # wholesale replacement of the archived log then looked like a valid append.
     old_status = old_progress = last_report_at = None
+    area_exists = False
     old_paths = {}
     current_cursor = None
     parents = {gate.PATH_RE.match(p).group(1) for p in by_path}
@@ -315,6 +316,10 @@ def main(argv=None):
         old_progress = file_at(args.repo, main_sha, old_paths["PROGRESS.md"])
         # When this roadmap was last reported, for the server-side cadence limit.
         last_report_at = last_commit_date(args.repo, main_sha, old_paths["PROGRESS.md"])
+        # A roadmap is a directory with a README.md, the same rule the planner uses. Reports may only
+        # be added to one that already exists, or invented area names would give unlimited
+        # "first reports", each exempt from the cadence limit.
+        area_exists = file_at(args.repo, main_sha, f"{parent}/{area}/README.md") is not None
         if old_progress:
             try:
                 current_cursor = files.cursor(old_progress)
@@ -341,6 +346,7 @@ def main(argv=None):
     bundle = {
         "base_repo": args.repo,
         "code_window": resolve_window(new_progress),
+        "area_exists": area_exists,
         "last_report_at": last_report_at,
         # The collector's own clock, never anything from the pull request.
         "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),

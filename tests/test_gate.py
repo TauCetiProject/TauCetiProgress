@@ -109,7 +109,8 @@ NOW = "2026-07-30T12:00:00Z"
 
 
 def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=None, window=-1,
-         compare_status="ahead", behind_by=0, old_paths=None, last_report_at=None, now=NOW):
+         compare_status="ahead", behind_by=0, old_paths=None, last_report_at=None, now=NOW,
+         area_exists=True):
     old_status, new_status, old_progress, new_progress = content or make_content()
     return gate.decide(
         pr=pr or make_pr(),
@@ -124,6 +125,7 @@ def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=Non
         code_window=make_window() if window == -1 else window,
         last_report_at=last_report_at,
         now=now,
+        area_exists=area_exists,
         current_main_cursor=cursor,
         compare_status=compare_status,
         behind_by=behind_by,
@@ -196,6 +198,16 @@ def test_a_fork_that_force_pushes_after_opening_gains_nothing():
     """
     pr = make_pr(head={"ref": BRANCH, "sha": HEAD, "repo": {"full_name": "someone/TauCetiRoadmap"}})
     refuses(lambda: call(pr=pr, checks=[build_run(head_sha="0" * 40)]), "names head")
+
+
+def test_refuses_an_invented_roadmap():
+    """Otherwise the cadence limit is trivially escaped.
+
+    It is keyed on the area, and an area with no previous report is always allowed, so inventing area
+    names would give unlimited exempt "first reports" -- Bogus1, Bogus2 -- each creating a directory
+    and each announcing itself.
+    """
+    refuses(lambda: call(area_exists=False), "is not a roadmap on the base branch")
 
 
 def test_refuses_a_second_report_for_the_same_roadmap_too_soon():
@@ -412,6 +424,7 @@ def test_refuses_invalid_utf8():
             old_status=old_status, new_status_bytes=new_status.encode(),
             old_progress=old_progress, new_progress_bytes=bad,
             check_runs=CHECKS_OK, base_repo=REPO, code_window=make_window(),
+            area_exists=True, now=NOW,
             compare_status="ahead", behind_by=0, main_sha=MAIN,
         )
     except (Refused, files.FormatError) as exc:
