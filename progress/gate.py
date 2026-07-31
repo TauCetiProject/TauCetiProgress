@@ -15,10 +15,15 @@ pull-request content, and the caller must not mint a write token until `decide` 
 allow. The checks run cheapest-and-most-decisive first, so a hostile pull request is rejected on
 provenance long before any content is parsed.
 
-What this gate proves is *shape*: which paths changed, that the cursor continues, that the append is
-byte-exact, and that the bytes validated are the bytes that will land (the head is pinned, and it
-already contains current `main`). What it cannot prove is that the prose is true. That limit is
-accepted deliberately and documented in README.md.
+What this gate proves is *shape*: which paths changed, that the cursor continues, that the window
+advances along real published history, that the append is byte-exact, and that the bytes validated are
+the bytes that will land (the head is pinned, and it already contains current `main`). What it cannot
+prove is that the prose is true. That limit is accepted deliberately and documented in README.md.
+
+It proves nothing at all about *who* opened the pull request, and that is the design. Identity was
+never what made this safe; the shape checks are. Anyone may publish a report, from a fork or
+otherwise. The window check is what keeps that bounded rather than merely revertible: without it,
+`to_sha` is free, and a chain of reports could walk the cursor anywhere while announcing each step.
 
 The path restriction bounds the damage to two markdown files in one directory -- and to one Zulip
 message, since every merged section is announced automatically. That second sink is part of the blast
@@ -68,12 +73,22 @@ def _refuse(reason):
     raise Refused(reason)
 
 
-def check_provenance(pr, allowed_user_ids, base_repo, base_branch="main"):
+def check_provenance(pr, base_repo, base_branch="main"):
     """Provenance first: is this pull request even a candidate?
 
-    `pr` is the GitHub pull-request object. `allowed_user_ids` is a set of **numeric** user ids.
-    Logins are renameable and a renamed login could be re-registered by someone else, so identity is
-    always the immutable id.
+    Deliberately says nothing about *who* opened it, and accepts fork heads.
+
+    Anyone may publish a progress report. What makes that safe is the shape of the diff, not the
+    identity behind it: the checks below and in `check_files`/`check_content` permit exactly one
+    roadmap's `STATUS.md` and `PROGRESS.md`, with the log append-only and the window advancing along
+    real project history. Nothing else can be reached, no code is ever executed, and the worst
+    outcome is prose someone has to revert. An author allowlist bought none of that and only excluded
+    contributors.
+
+    Accepting fork heads is safe for the same reason plus one more: no pull request content is ever
+    checked out. Everything is read through the API at two immutable SHAs, and a fork's head commit
+    and tree are replicated into the base repository, so the merge builds from exactly the bytes that
+    were validated.
     """
     if pr.get("state") != "open":
         _refuse(f"pull request is {pr.get('state')}, not open")
@@ -86,23 +101,6 @@ def check_provenance(pr, allowed_user_ids, base_repo, base_branch="main"):
         _refuse(f"base repository is {(base.get('repo') or {}).get('full_name')!r}")
 
     head = pr.get("head") or {}
-    head_repo = (head.get("repo") or {}).get("full_name") or ""
-    if head_repo != base_repo:
-        # A fork PR can carry any content and any author; those go to human review like every other
-        # roadmap contribution.
-        _refuse(f"head repository is {head_repo!r}, not {base_repo!r} (forks are never auto-merged)")
-
-    author_id = ((pr.get("user") or {}).get("id"))
-    if author_id not in set(allowed_user_ids):
-        # Name the file: this refusal is posted as a comment, and an operator whose round produced a
-        # report they are not permitted to land needs to know where the list is, not just that they
-        # failed. `tauceti-progress due` checks the same list before a round starts, so reaching this
-        # point at all means the two disagree, usually a stale local checkout.
-        _refuse(
-            f"author id {author_id} is not listed in .github/progress-publishers.txt on the base "
-            f"branch, so this report cannot merge unattended"
-        )
-
     branch = head.get("ref") or ""
     m = BRANCH_RE.match(branch)
     if not m:
@@ -235,6 +233,47 @@ def check_up_to_date(compare_status, behind_by, head_sha, main_sha):
     return True
 
 
+def check_window(code_window, section):
+    """The reported window must be a real stretch of TauCeti history that moves forward.
+
+    This is the check that makes "anyone may publish" bounded rather than merely revertible, and it
+    replaces the anti-abuse role an author allowlist was quietly playing.
+
+    Cursor continuity alone is not enough. `from_sha` must equal the area's current cursor, but
+    `to_sha` was otherwise free, so a report could name any 40-hex string, land, and leave the cursor
+    at that value -- then do it again from there, indefinitely. Each link would advance the cursor
+    past windows that could no longer be reported, and each would post to Zulip. Requiring `to_sha`
+    to be a commit reachable from the documentation branch, strictly ahead of `from_sha`, bounds the
+    whole thing to the project's own history: a bogus report costs exactly what a real one costs, and
+    is revertible in the same way.
+
+    Reachability is checked against `docgen` rather than equality with its tip on purpose. The tip
+    moves whenever documentation is published, and demanding equality would refuse reports that were
+    correct when the round started, throwing away the model's work over a race.
+    """
+    if not code_window:
+        _refuse("the reported window could not be checked against TauCeti history")
+    checked = code_window.get("to_sha") or ""
+    if checked != section["to_sha"]:
+        # The window was resolved from the same pinned blob the section was parsed from, so this can
+        # only mean the two disagree about which bytes are under test.
+        _refuse(
+            f"the window checked against history ({checked[:7]}) is not the section's to_sha "
+            f"({section['to_sha'][:7]})"
+        )
+    if not code_window.get("to_reachable"):
+        _refuse(
+            f"to_sha {section['to_sha'][:7]} is not a commit reachable from TauCeti's "
+            f"{code_window.get('ref', 'docgen')} branch, so it names no published history"
+        )
+    if code_window.get("advances") is False:
+        _refuse(
+            f"to_sha {section['to_sha'][:7]} does not come after from_sha "
+            f"{section['from_sha'][:7]}; a window must move forward"
+        )
+    return True
+
+
 def check_build(check_runs, head_sha, required="build", app_id=GITHUB_ACTIONS_APP_ID):
     """The `build` check must be a completed success, from the expected App, on the exact head.
 
@@ -298,16 +337,16 @@ def check_baseline_paths(old_paths, parent, area):
 
 
 def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_progress,
-           new_progress_bytes, check_runs, allowed_user_ids, base_repo,
+           new_progress_bytes, check_runs, base_repo,
            current_main_cursor=None, compare_status=None, behind_by=None, main_sha="",
-           old_paths=None):
+           old_paths=None, code_window=None):
     """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
     pull request's stale base. Passing it closes the window where `main` moved on (another report
     merged) after this pull request was opened.
     """
-    prov = check_provenance(pr, allowed_user_ids, base_repo)
+    prov = check_provenance(pr, base_repo)
     area, head_sha = prov["area"], prov["head_sha"]
     if not head_sha:
         _refuse("pull request has no head sha")
@@ -321,13 +360,16 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
         expect_from_sha=current_main_cursor,
     )
     check_build(check_runs, head_sha)
+    check_window(code_window, section)
 
     # The branch name encodes the window it reports, and `apply` derives it from the same plan that
     # produced the header. Requiring them to agree binds the branch to its content, so a branch
-    # cannot be reused to carry a different window's update. It does not authenticate WHO produced
-    # the head -- any repository writer can push to an open branch, and `pr.user.id` still names the
-    # opener -- so restricting who may push `progress/*` remains a repository-level control; see
-    # roadmap-workflows/README.md.
+    # cannot be reused to carry a different window's update.
+    #
+    # This is emphatically not an identity check. Anyone may open the pull request, from a fork or
+    # otherwise, and whoever owns the head branch may replace it at any time. That is fine: the head
+    # is pinned to one immutable SHA and every check below reads that SHA, so a replaced head is a
+    # different head and gets validated on its own terms or not at all.
     if not section["from_sha"].startswith(prov["from_prefix"]):
         _refuse(
             f"branch says the window starts at {prov['from_prefix']} but the section says "
@@ -374,8 +416,10 @@ def main(argv=None):
             old_progress=data.get("old_progress"),
             new_progress_bytes=data["new_progress"].encode("utf-8", "surrogateescape"),
             check_runs=data.get("check_runs") or [],
-            allowed_user_ids=data["allowed_user_ids"],
             base_repo=data["base_repo"],
+            # `.get`, but the gate refuses when it is absent: a bundle from an older collector must
+            # not silently skip the window check.
+            code_window=data.get("code_window"),
             current_main_cursor=data.get("current_main_cursor"),
             compare_status=data.get("compare_status"),
             behind_by=data.get("behind_by"),

@@ -101,10 +101,38 @@ def existing_pr(branch, repo=gh.ROADMAP_REPO):
     return rows[0] if rows else None
 
 
-def remote_branch_exists(roadmap_dir, branch):
-    proc = _run(["git", "ls-remote", "--exit-code", "--heads", "origin", branch],
+def remote_branch_exists(roadmap_dir, branch, remote="origin"):
+    proc = _run(["git", "ls-remote", "--exit-code", "--heads", remote, branch],
                roadmap_dir, check=False)
     return proc.returncode == 0
+
+
+def push_target(roadmap_dir, repo=gh.ROADMAP_REPO):
+    """Where to push the report branch: `(remote_name, head_ref_for_pr)`.
+
+    Publishing is open to anyone, so most operators will not have push access to the roadmap
+    repository. They publish the ordinary way an outside contributor does, from a fork, and the merge
+    check accepts fork heads: it never checks out pull-request content, and a fork's head commit and
+    tree are replicated into the base repository, so the merge still builds from the validated bytes.
+
+    Push access is checked rather than assumed because pushing to the canonical repository is
+    preferable when it is available -- no fork to keep alive, and the branch is deleted after the
+    merge -- and because discovering the answer by failing the push would waste the whole round.
+    """
+    if gh.gh(["api", f"repos/{repo}", "--jq", ".permissions.push"]).strip() == "true":
+        return "origin", None
+
+    login = json.loads(gh.gh(["api", "user", "--jq", ".login"]).strip())
+    fork = f"{login}/{repo.split('/')[-1]}"
+    # `--clone=false` is idempotent: it creates the fork if absent and is a no-op if present.
+    gh.gh(["repo", "fork", repo, "--clone=false", "--remote=false"])
+    url = f"https://github.com/{fork}.git"
+    if _run(["git", "remote", "get-url", "fork"], roadmap_dir, check=False).returncode == 0:
+        _run(["git", "remote", "set-url", "fork", url], roadmap_dir)
+    else:
+        _run(["git", "remote", "add", "fork", url], roadmap_dir)
+    print(f"no push access to {repo}; publishing from {fork}")
+    return "fork", login
 
 
 def render_update(plan, status_body, section_body, old_status, old_progress):
@@ -197,11 +225,12 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
     # a valid report for exactly this window, and overwriting it could clobber a peer's push moments
     # after it happened. Only push when nothing is there, and create-only so a concurrent push loses
     # rather than being silently overwritten.
-    if remote_branch_exists(roadmap_dir, branch):
-        print(f"branch {branch} already exists remotely (an earlier run was interrupted); "
+    remote, fork_owner = push_target(roadmap_dir)
+    if remote_branch_exists(roadmap_dir, branch, remote):
+        print(f"branch {branch} already exists on {remote} (an earlier run was interrupted); "
               f"opening the pull request for it rather than rewriting it")
     else:
-        proc = _run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], roadmap_dir, check=False)
+        proc = _run(["git", "push", remote, f"HEAD:refs/heads/{branch}"], roadmap_dir, check=False)
         if proc.returncode != 0:
             # Most likely a peer created the same branch between the check and the push. That is fine:
             # fall through and let the pull-request step reconcile.
@@ -209,13 +238,19 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
 
     # Re-check between push and create: another worker may have opened the PR for this exact window
     # in the meantime, and the branch name is deterministic so it would be the same branch.
+    # Deliberately the bare branch name, not `owner:branch`: the question is whether ANYONE has
+    # already opened a pull request for this window, and the branch name is a pure function of the
+    # window, so a peer publishing from their own fork must count.
     pr = existing_pr(branch)
+    # `--head owner:branch` for creation, though, so `gh` looks for the branch on the fork rather
+    # than on the canonical repository, where it does not exist.
+    head = f"{fork_owner}:{branch}" if fork_owner else branch
     if pr is not None and (pr.get("state") or "").upper() == "OPEN":
         print(f"another worker opened it first: {pr['url']}")
         return EX_NOPROGRESS
 
     out = gh.gh([
-        "pr", "create", "--repo", gh.ROADMAP_REPO, "--base", "main", "--head", branch,
+        "pr", "create", "--repo", gh.ROADMAP_REPO, "--base", "main", "--head", head,
         "--title", title, "--body", body,
     ])
     print(out.strip())

@@ -38,7 +38,12 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from progress import files, gate, publisher  # noqa: E402
+from progress import files, gate  # noqa: E402
+
+# Where the reported window has to live. `to_sha` is checked for reachability from this branch, which
+# tracks the newest TauCeti commit with published documentation.
+CODE_REPO = "TauCetiProject/TauCeti"
+CODE_REF = "docgen"
 
 # `compare` returns at most 300 files. More than that cannot be a progress report, and a truncated
 # list could HIDE a path from the gate, so anything approaching the limit is refused outright rather
@@ -149,6 +154,66 @@ def file_at(repo, ref, path):
     return content
 
 
+def compare_status(repo, base, head):
+    """`status` from a two-dot-three comparison, or None when either end is not a commit.
+
+    A 404 here is a *finding*, not an error: it is exactly what a fabricated `to_sha` looks like, and
+    the caller turns it into a refusal.
+    """
+    proc = subprocess.run(
+        ["gh", "api", f"repos/{repo}/compare/{base}...{head}", "--jq", ".status"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr or ""
+        if "Not Found" in err or "404" in err:
+            return None
+        raise CollectError(f"comparing {base[:7]}...{head[:7]} in {repo} failed: {err.strip()}")
+    return proc.stdout.strip() or None
+
+
+def resolve_window(new_progress, repo=CODE_REPO, ref=CODE_REF):
+    """Check the newly-appended section's window against real TauCeti history.
+
+    Without this, `to_sha` is unconstrained. Cursor continuity pins `from_sha` to the area's current
+    cursor, but nothing stopped a report naming an arbitrary 40-hex `to_sha`, landing, and leaving the
+    cursor there -- then repeating from that value indefinitely, walking the cursor past windows that
+    could never afterwards be reported and announcing every step to Zulip.
+
+    Two questions, both answered against `ref`:
+
+    * is `to_sha` a commit reachable from the documentation branch?
+    * does it come strictly after `from_sha`?
+
+    Reachability rather than equality with the tip, because the tip advances whenever documentation is
+    published and equality would refuse a report that was correct when its round began.
+
+    Returns None when the section cannot be parsed; the content checks report that failure properly.
+    """
+    try:
+        sections = files.parse_sections(new_progress or "")
+    except files.FormatError:
+        return None
+    if not sections:
+        return None
+    section = sections[-1]
+    from_sha, to_sha = section["from_sha"], section["to_sha"]
+
+    # `to_sha...ref` is `ahead` when ref has commits to_sha does not, and `identical` when to_sha IS
+    # the tip. Both mean to_sha is reachable. `behind` or `diverged` mean it is off the branch.
+    reach = compare_status(repo, to_sha, ref)
+    to_reachable = reach in ("ahead", "identical")
+
+    advances = None
+    if to_reachable:
+        # Only `ahead` advances: `identical` is an empty window, and `behind`/`diverged` go backwards
+        # or sideways.
+        advances = compare_status(repo, from_sha, to_sha) == "ahead"
+
+    return {"repo": repo, "ref": ref, "from_sha": from_sha, "to_sha": to_sha,
+            "to_reachable": to_reachable, "advances": advances}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
@@ -166,23 +231,6 @@ def main(argv=None):
     if not main_sha:
         raise CollectError(f"could not resolve {args.base_branch}")
 
-    # The allowlist, read from the base commit rather than the head. Reading it at the head would let
-    # a pull request add its own author and merge itself; reading it here means changing it is an
-    # ordinary roadmap pull request against a path CODEOWNERS assigns to the core team.
-    #
-    # Both failures below are fatal rather than a refusal. A missing or malformed allowlist is a
-    # misconfiguration of the repository, and the run going red is the signal; refusing quietly would
-    # look exactly like "no reports were due", which is the failure mode hardest to notice.
-    publishers_text = file_at(args.repo, main_sha, publisher.PUBLISHERS_PATH)
-    if publishers_text is None:
-        raise CollectError(
-            f"{publisher.PUBLISHERS_PATH} does not exist at {main_sha[:7]}; without it no author can "
-            f"be authorised and every report would be refused"
-        )
-    try:
-        allowed_user_ids = sorted(publisher.parse_publishers(publishers_text))
-    except ValueError as exc:
-        raise CollectError(str(exc))
 
     # The area comes from the branch and is validated by the gate's own pattern. Reading it here with
     # the gate's regex keeps the two from disagreeing.
@@ -272,7 +320,7 @@ def main(argv=None):
 
     bundle = {
         "base_repo": args.repo,
-        "allowed_user_ids": allowed_user_ids,
+        "code_window": resolve_window(new_progress),
         "pr": pr,
         "area": area,
         "head_sha": head_sha,

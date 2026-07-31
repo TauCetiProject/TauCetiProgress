@@ -222,6 +222,45 @@ def test_sanitize_leaves_headings_and_plain_hashes_alone():
     assert zulip.sanitize("C# is not relevant here") == "C# is not relevant here"
 
 
+
+# ----- publishing without push access ----------------------------------------------------------
+
+
+def test_push_target_prefers_the_canonical_repo():
+    """No fork to keep alive, and the branch is deleted after the merge."""
+    orig = apply_mod.gh.gh
+    apply_mod.gh.gh = lambda args, **kw: "true\n"
+    try:
+        remote, owner = apply_mod.push_target("/nonexistent")
+    finally:
+        apply_mod.gh.gh = orig
+    assert (remote, owner) == ("origin", None)
+
+
+def test_push_target_falls_back_to_a_fork():
+    """Publishing is open to anyone, so most operators will not have push access."""
+    calls = []
+    orig_gh, orig_run = apply_mod.gh.gh, apply_mod._run
+
+    def fake_gh(args, **kw):
+        calls.append(args)
+        if args[:2] == ["api", "repos/TauCetiProject/TauCetiRoadmap"]:
+            return "false\n"
+        if args[:2] == ["api", "user"]:
+            return '"someone"\n'
+        return ""
+
+    class P:
+        returncode = 1
+    apply_mod.gh.gh = fake_gh
+    apply_mod._run = lambda *a, **kw: P()
+    try:
+        remote, owner = apply_mod.push_target("/nonexistent")
+    finally:
+        apply_mod.gh.gh, apply_mod._run = orig_gh, orig_run
+    assert (remote, owner) == ("fork", "someone")
+    assert ["repo", "fork", "TauCetiProject/TauCetiRoadmap", "--clone=false", "--remote=false"] in calls
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

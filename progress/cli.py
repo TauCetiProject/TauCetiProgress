@@ -27,17 +27,7 @@ def _load_plan(path):
 
 
 def cmd_due(args):
-    from . import gh, plan, publisher
-
-    # Before anything else: can this identity actually land a report? An operator who cannot is not
-    # "not due yet", they are permanently unable, and every round they spend on this kind is wasted
-    # -- or worse, leaves a refused pull request that blocks its area for everyone. A GitHub failure
-    # here reads as "cannot decide right now", the same as every other read in this tool.
-    try:
-        print(publisher.check_can_publish())
-    except (publisher.NotAPublisher, gh.GhError, ValueError) as exc:
-        print(f"not due: {exc}")
-        return EX_NOPROGRESS
+    from . import gh, plan
 
     commits = gh.recent_roadmap_commits(limit=args.limit)
     try:

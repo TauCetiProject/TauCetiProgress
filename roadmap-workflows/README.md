@@ -9,8 +9,7 @@ deliberate human act.
 
 ## Installing
 
-1. Commit the two workflow files into `TauCetiRoadmap/.github/workflows/`, and
-   `progress-publishers.txt` into `TauCetiRoadmap/.github/`.
+1. Commit the two workflow files into `TauCetiRoadmap/.github/workflows/`.
 2. Replace every `REPLACE_WITH_FULL_SHA` with the full 40-character SHA of the TauCetiProgress commit
    you are pinning. Each file uses it **twice** — once in `uses:` and once in `progress_ref:` — and
    both must be that same SHA. `uses:` selects the workflow definition; `progress_ref` selects the
@@ -23,25 +22,28 @@ deliberate human act.
 
 ## Who may publish
 
-`.github/progress-publishers.txt` in TauCetiRoadmap lists the numeric user ids whose progress pull
-requests may merge unattended. It is a file rather than a workflow input for two reasons: adding a
-publisher is then an ordinary reviewed pull request instead of an edit to a workflow, and an
-operator's own tooling can read the same list to decide, before spending anything, whether a round
-could ever land.
+Anyone. There is no author allowlist, and pull requests opened from forks are accepted.
 
-The merge check reads it at the pull request's **base** commit, never its head, so a pull request
-cannot list its own author. `/.github/` belongs to `@TauCetiProject/humans` in CODEOWNERS, so an
-addition takes a core-team review.
+What makes that safe is the shape of the diff rather than the identity behind it. A report may touch
+exactly one roadmap's `STATUS.md` and `PROGRESS.md` and nothing else; the log must grow only at its
+end, byte for byte; the window must continue from the area's current cursor and end at a commit
+actually reachable from TauCeti's `docgen` branch; and the `build` check must have succeeded on the
+exact head being merged. No pull-request content is ever checked out or executed, and no write token
+exists until every check has passed.
 
-A listed account also needs push access to TauCetiRoadmap, because the report branch is pushed to
-this repository directly and the merge check refuses fork heads. The two conditions are independent,
-and `tauceti-progress due` checks both.
+That last condition on the window is what keeps an open door bounded rather than merely revertible.
+Cursor continuity pins where a report starts, but its end was otherwise free, so a chain of reports
+could have walked the cursor to arbitrary values, burning windows that could never afterwards be
+reported and announcing each step to Zulip. Tying the end to published history means a bogus report
+costs exactly what a real one costs, and is reverted the same way.
 
-Listing someone does grant privilege they would not otherwise have: everyone except an organization
-admin currently needs a second reviewer to land anything here, and a publisher can land two
-machine-owned markdown files alone. The blast radius is bounded by the merge check to exactly those
-files, in one roadmap directory, with the log append-only, but the prose itself is not validated.
-Treat a listing as the same order of trust as roadmap review.
+The residual risk is accepted and stated plainly: someone may land prose that is wrong, or replace a
+`STATUS.md` with junk. `STATUS.md` is a snapshot the next run rewrites wholesale, and `PROGRESS.md`
+only ever grows, so nothing is destroyed and `git revert` undoes it. These files are declared
+machine-owned and their prose is not security-validated; see the repository README.
+
+Operators without push access to TauCetiRoadmap publish from a fork, which `apply` sets up
+automatically. Nothing has to be configured for a new contributor to start producing reports.
 
 ## Keeping versions in step
 
@@ -75,9 +77,11 @@ repository rather than something the workflow can enforce.
 
 It proves the *shape* of an update: which paths changed, that both generated files are present, that
 the window continues the log with no gap, that `PROGRESS.md` grew only at the end, that no file is a
-symlink, that the author is an allowlisted numeric user id pushing a `progress/*` branch in this
-repository, that `build` is green on that exact commit, and that the merge is bound to the head that
-was validated.
+symlink, that the head is a `progress/*` branch whose name matches the window it carries, that the
+window ends at a commit reachable from TauCeti's documentation branch, that `build` is green on that
+exact commit, and that the merge is bound to the head that was validated.
+
+It says nothing about *who* opened the pull request, on purpose.
 
 It does **not** prove the prose is true. That limit is accepted deliberately; see the trust-boundary
 section of the TauCetiProgress README.
