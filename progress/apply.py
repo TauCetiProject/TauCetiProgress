@@ -122,7 +122,11 @@ def push_target(roadmap_dir, repo=gh.ROADMAP_REPO):
     if gh.gh(["api", f"repos/{repo}", "--jq", ".permissions.push"]).strip() == "true":
         return "origin", None
 
-    login = json.loads(gh.gh(["api", "user", "--jq", ".login"]).strip())
+    # `--jq` emits raw values, not JSON: a login comes back as `kim-em`, unquoted. Do not `json.loads`
+    # it -- that raises, and this is precisely the path an operator without push access takes.
+    login = gh.gh(["api", "user", "--jq", ".login"]).strip()
+    if not login:
+        raise RuntimeError("could not determine the authenticated login, so no fork can be used")
     fork = f"{login}/{repo.split('/')[-1]}"
     # `--clone=false` is idempotent: it creates the fork if absent and is a no-op if present.
     gh.gh(["repo", "fork", repo, "--clone=false", "--remote=false"])

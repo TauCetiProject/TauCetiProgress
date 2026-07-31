@@ -238,7 +238,11 @@ def test_push_target_prefers_the_canonical_repo():
 
 
 def test_push_target_falls_back_to_a_fork():
-    """Publishing is open to anyone, so most operators will not have push access."""
+    """Publishing is open to anyone, so most operators will not have push access.
+
+    The stubs below return exactly what `gh` prints, raw and unquoted, because that detail is the
+    whole reliability of this path.
+    """
     calls = []
     orig_gh, orig_run = apply_mod.gh.gh, apply_mod._run
 
@@ -247,7 +251,9 @@ def test_push_target_falls_back_to_a_fork():
         if args[:2] == ["api", "repos/TauCetiProject/TauCetiRoadmap"]:
             return "false\n"
         if args[:2] == ["api", "user"]:
-            return '"someone"\n'
+            # Exactly what `gh api user --jq .login` prints: a raw, UNQUOTED login. An earlier
+            # version parsed this as JSON, which raises -- on the one path that needs it to work.
+            return "someone\n"
         return ""
 
     class P:
