@@ -110,7 +110,7 @@ NOW = "2026-07-30T12:00:00Z"
 
 def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FROM, window=-1,
          compare_status="ahead", behind_by=0, old_paths=None, last_report_at=None, now=NOW,
-         area_exists=True, bootstrap_ok=None, bootstrap_missing=None):
+         area_exists=True):
     old_status, new_status, old_progress, new_progress = content or make_content()
     return gate.decide(
         pr=pr or make_pr(),
@@ -126,8 +126,6 @@ def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FRO
         last_report_at=last_report_at,
         now=now,
         area_exists=area_exists,
-        bootstrap_ok=bootstrap_ok,
-        bootstrap_missing_prs=bootstrap_missing,
         current_main_cursor=cursor,
         compare_status=compare_status,
         behind_by=behind_by,
@@ -202,21 +200,16 @@ def test_a_fork_that_force_pushes_after_opening_gains_nothing():
     refuses(lambda: call(pr=pr, checks=[build_run(head_sha="0" * 40)]), "names head")
 
 
-def test_a_first_report_must_not_strand_labelled_work():
-    """A bootstrap has no cursor to continue from, so it would otherwise pick its own start, and
-    windows only move forward -- anything before the chosen point is unreportable for good."""
-    assert call(cursor=None, bootstrap_ok=True)["area"] == AREA
-    refuses(lambda: call(cursor=None, bootstrap_ok=False, bootstrap_missing=[7, 9]),
-            "leaves labelled work behind it")
+def test_a_first_report_is_never_auto_merged():
+    """Where a roadmap's log begins cannot be verified mechanically, so a human decides it once.
 
-
-def test_the_stranded_pull_requests_are_named():
-    reason = refuses(lambda: call(cursor=None, bootstrap_ok=False, bootstrap_missing=[7, 9]))
-    assert "#7" in reason and "#9" in reason
-
-
-def test_a_first_report_is_refused_when_it_cannot_be_confirmed():
-    refuses(lambda: call(cursor=None, bootstrap_ok=None), "could not be confirmed")
+    Three implementations tried: by lowest pull request number, by merge timestamp, and by walking
+    the commits endpoint. The REST API expresses neither first-parent traversal nor an ordering
+    guarantee, and this history is not linear, so ancestry checks cannot recover it either. Refusing
+    is the honest outcome; every report after the first merges unattended.
+    """
+    reason = refuses(lambda: call(cursor=None), "no reported history yet")
+    assert "human review" in reason
 
 
 def test_refuses_an_invented_roadmap():

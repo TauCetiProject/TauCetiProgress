@@ -183,81 +183,6 @@ def rev_parse(repo, ref):
     return proc.stdout.strip() or None if proc.returncode == 0 else None
 
 
-def walk_pr_numbers(from_sha, repo=CODE_REPO, ref=CODE_REF, max_pages=60):
-    """`(after, everywhere)` pull-request numbers on `ref`, or None if the walk could not finish.
-
-    `everywhere` is every pull request whose merge appears anywhere in `ref`'s history; `after` is the
-    subset merged more recently than `from_sha`. Both come from one newest-first walk.
-
-    Not the compare endpoint: it returns at most 250 commits however it is paginated, and a roadmap's
-    first window is its whole history -- over a thousand commits here -- so compare would silently
-    answer about a prefix of it.
-    """
-    after, everywhere, passed, page = set(), set(), False, 1
-    while page <= max_pages:
-        proc = subprocess.run(
-            ["gh", "api", f"repos/{repo}/commits?sha={ref}&per_page=100&page={page}",
-             "--jq", '.[] | [.sha, (.commit.message | split("\n")[0])] | @tsv'],
-            capture_output=True, text=True,
-        )
-        if proc.returncode != 0:
-            return None
-        lines = proc.stdout.splitlines()
-        if not lines:
-            return after, everywhere
-        for line in lines:
-            sha, _, subject = line.partition("\t")
-            if sha == from_sha:
-                passed = True
-            m = re.search(r"\(#(\d+)\)\s*$", subject) or re.match(r"Merge pull request #(\d+)", subject)
-            if m:
-                number = int(m.group(1))
-                everywhere.add(number)
-                if not passed:
-                    after.add(number)
-        page += 1
-    return None                      # too much history to confirm; the gate refuses rather than guess
-
-
-def bootstrap_missing(area, from_sha, repo=CODE_REPO, ref=CODE_REF):
-    """Labelled pull requests this proposed starting point would strand, or None if unknown.
-
-    A first report has no cursor on `main` to continue from, so its `from_sha` has to be justified
-    some other way. Two earlier attempts tried to RECOMPUTE the planner's answer here -- first by
-    lowest pull-request number, then by merge time -- and both were wrong, because what the planner
-    takes is a position on `ref`'s first-parent chain and the API cannot express first-parent
-    membership at all. This history is not linear (fourteen merge commits when this was written), so
-    a commit can be reachable through a second parent without lying on that chain.
-
-    So stop reproducing, and check the property that was wanted all along: a starting point is
-    acceptable exactly when nothing labelled for this roadmap merged at or before it. That is
-    indifferent to merge method and topology, and cannot be fooled by a second-parent path.
-
-    Only pull requests already IN `ref` count. A labelled pull request merged after the documented
-    tip is not stranded -- it is simply not documented yet, and a later window will cover it -- and an
-    earlier version of this check wrongly counted those, which would have refused every bootstrap
-    whenever documentation lagged (four such on RepresentationTheory at the time of writing).
-    """
-    walked = walk_pr_numbers(from_sha, repo=repo, ref=ref)
-    if walked is None:
-        return None
-    after, everywhere = walked
-    proc = subprocess.run(
-        ["gh", "pr", "list", "--repo", repo, "--state", "merged",
-         "--label", f"{ROADMAP_LABEL_PREFIX}{area}", "--limit", "100000", "--json", "number"],
-        capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        return None
-    try:
-        labelled = {int(r["number"]) for r in json.loads(proc.stdout)}
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return None
-    if not labelled:
-        return None
-    return (labelled & everywhere) - after
-
-
 def compare_status(repo, base, head):
     """`status` from a two-dot-three comparison, or None when either end is not a commit.
 
@@ -393,8 +318,6 @@ def main(argv=None):
     # wholesale replacement of the archived log then looked like a valid append.
     old_status = old_progress = last_report_at = None
     area_exists = False
-    bootstrap_ok = None
-    bootstrap_missing_prs = []
     old_paths = {}
     current_cursor = None
     parents = {gate.PATH_RE.match(p).group(1) for p in by_path}
@@ -421,19 +344,6 @@ def main(argv=None):
             except files.FormatError:
                 # An unparseable log on main is a real problem, but saying so is the gate's job.
                 current_cursor = None
-        if current_cursor is None and area_exists:
-            # Only for a first report, and therefore at most once per roadmap ever: does the starting
-            # point it proposes strand any labelled work behind it?
-            proposed = None
-            try:
-                sections = files.parse_sections(new_progress or "")
-                proposed = sections[-1]["from_sha"] if sections else None
-            except files.FormatError:
-                proposed = None
-            if proposed:
-                missing = bootstrap_missing(area, proposed)
-                bootstrap_ok = missing == set()
-                bootstrap_missing_prs = sorted(missing)[:20] if missing else []
 
     # Only check-runs, and only from the head we pinned. Commit statuses are deliberately NOT
     # collected: any repository writer can POST one under any context, so they are not evidence, and
@@ -455,8 +365,6 @@ def main(argv=None):
         "base_repo": args.repo,
         "code_window": resolve_window(new_progress),
         "area_exists": area_exists,
-        "bootstrap_ok": bootstrap_ok,
-        "bootstrap_missing_prs": bootstrap_missing_prs,
         "last_report_at": last_report_at,
         # The collector's own clock, never anything from the pull request.
         "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),

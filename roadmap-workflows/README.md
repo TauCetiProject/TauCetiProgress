@@ -42,6 +42,19 @@ The residual risk is accepted and stated plainly: someone may land prose that is
 only ever grows, so nothing is destroyed and `git revert` undoes it. These files are declared
 machine-owned and their prose is not security-validated; see the repository README.
 
+A roadmap's **first** report is the one exception: it is never auto-merged. Every later report is
+pinned to the cursor already on `main`, but a first report has none, so whoever files it decides
+where that roadmap's history begins — and windows only move forward, so anything before that point
+becomes unreportable. Checking that choice means asking whether any labelled pull request merged
+before it, which is a question about the first-parent chain that the REST API cannot answer: it
+offers neither first-parent traversal nor an ordering guarantee, and this history is not linear, so
+ancestry checks cannot recover it. Rather than pretend to check it, a human bootstraps each roadmap
+once. The generator still writes that first report; only merging it needs a person, and everything
+after is unattended.
+
+Ask for one with `--area <Roadmap>`. Automatic selection skips roadmaps that have never been
+reported, so an unbootstrapped one does not generate a report every day only to have it refused.
+
 Operators without push access to TauCetiRoadmap publish from a fork, which `apply` sets up
 automatically. Nothing has to be configured for a new contributor to start producing reports.
 

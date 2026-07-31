@@ -408,7 +408,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
            new_progress_bytes, check_runs, base_repo,
            current_main_cursor=None, compare_status=None, behind_by=None, main_sha="",
            old_paths=None, code_window=None, last_report_at=None, now=None,
-           area_exists=None, bootstrap_ok=None, bootstrap_missing_prs=None):
+           area_exists=None):
     """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
@@ -432,17 +432,30 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     # area's earliest labelled pull request) and it is required exactly. Refusing first reports
     # outright would have been safe and useless: thirteen of the fourteen roadmaps have never been
     # reported, so almost nothing would be left for automation to do.
+    # A roadmap's FIRST report is not auto-merged, and this is a considered retreat rather than an
+    # oversight.
+    #
+    # Every later report is pinned: `from_sha` must equal the cursor already on `main`. A first report
+    # has no cursor to continue from, so whoever files it also decides where that roadmap's history
+    # begins, and because windows only move forward, everything before that point is unreportable for
+    # good. Checking that choice means asking whether any labelled pull request merged before it --
+    # an ancestry question about the first-parent chain.
+    #
+    # Three implementations tried to answer it here and all three were wrong: by lowest pull request
+    # number (numbers are assigned at open time, not merge time), by merge timestamp (no relation to
+    # position), and by walking the commits endpoint (which offers neither first-parent traversal nor
+    # any ordering guarantee). The REST API cannot express first-parent membership, and this history
+    # is not linear, so it cannot be recovered by ancestry checks either.
+    #
+    # An uncheckable property should not be pretended to be checked. A human bootstraps each roadmap
+    # once -- fourteen reviews, ever -- and every report after that is unattended. The generator still
+    # writes the first report; only merging it needs a person.
     if not current_main_cursor:
-        if bootstrap_ok is not True:
-            missing = ", ".join(f"#{n}" for n in (bootstrap_missing_prs or [])[:10])
-            _refuse(
-                f"{parent}/{area} has no reported history yet, and the window this report starts "
-                f"from leaves labelled work behind it"
-                + (f" ({missing}{', ...' if len(bootstrap_missing_prs or []) > 10 else ''})"
-                   if missing else
-                   " (or that could not be confirmed)")
-                + "; a first report must start before every pull request labelled for the roadmap"
-            )
+        _refuse(
+            f"{parent}/{area} has no reported history yet. A first report decides where that "
+            f"roadmap's log begins, which cannot be verified mechanically, so it is left for human "
+            f"review; every later report for it merges unattended"
+        )
     check_modes(tree_entries, [f"{parent}/{area}/{name}" for name in ALLOWED_BASENAMES])
     section = check_content(
         area, old_status, new_status_bytes, old_progress, new_progress_bytes,
@@ -511,8 +524,6 @@ def main(argv=None):
             # not silently skip the window check.
             code_window=data.get("code_window"),
             area_exists=data.get("area_exists"),
-            bootstrap_ok=data.get("bootstrap_ok"),
-            bootstrap_missing_prs=data.get("bootstrap_missing_prs"),
             last_report_at=data.get("last_report_at"),
             now=data.get("collected_at"),
             current_main_cursor=data.get("current_main_cursor"),

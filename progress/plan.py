@@ -310,6 +310,16 @@ def build_plan(
             continue
 
         bootstrapped = False
+        if from_sha is None and not only_area:
+            # A roadmap with no log yet needs a FIRST report, and the gate does not auto-merge those:
+            # where a roadmap's history begins cannot be verified mechanically, so a human decides it
+            # once. Selecting such an area automatically would generate a report every day, have it
+            # refused every day, and burn a writing round each time.
+            #
+            # Naming the area explicitly is how a person asks for that first report. After it lands,
+            # the area has a cursor and is picked up automatically like any other.
+            skipped.append(f"{area}: never reported; run with --area {area} to bootstrap it")
+            continue
         if from_sha is None:
             from_sha = bootstrap_from_sha(code_dir, area, area_prs, ref=ref)
             bootstrapped = True
