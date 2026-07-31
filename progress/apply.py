@@ -14,11 +14,14 @@ Two reasons this is code rather than something the writing agent does:
 
       no branch, no PR      -> commit, push, create
       branch, no PR         -> reuse the branch (update if the content differs), create
-      open PR               -> in flight; do nothing
-      merged PR             -> already done; do nothing
-      closed, unmerged PR   -> someone rejected this window; do NOT reopen, report loudly
+      our open PR           -> in flight; do nothing
+      merged PR (anyone's)  -> already done; do nothing
+      our closed, unmerged  -> someone rejected this window; do NOT reopen, report loudly
 
-The last case matters: a rejected report must not come back by itself every day.
+The last case matters: a rejected report must not come back by itself every day. So does the word
+"our": anyone may open a pull request on a `progress/*` branch, and branch names are a pure function
+of the window, so honouring a stranger's would let them decide what this operator is allowed to
+publish -- permanently, by opening and closing one pull request.
 """
 
 import json
@@ -96,41 +99,38 @@ def _own_login():
     return gh.gh(["api", "user", "--jq", ".login"]).strip()
 
 
-def own_closed_pr(branch, repo=gh.ROADMAP_REPO):
-    """A closed-unmerged pull request for `branch` that this operator could have opened, or None.
+def own_pr(branch, repo=gh.ROADMAP_REPO, states=("open",)):
+    """A pull request for `branch` that this operator could have opened, or None.
 
-    "Could have opened" means its head is either in the canonical repository (we pushed there) or in
-    an account we control. Deliberately not "any closed pull request on this branch": see the caller.
+    "Could have opened" means its head is either in the canonical repository (we push there when we
+    can) or in an account we control. Deliberately not "any pull request on this branch": branch
+    names are a pure function of the window, so anyone can create one, and treating a stranger's as
+    ours lets them decide what we may publish. See the callers for what each case would cost.
 
-    Checked without consulting `push_target`, so that a dry run never has to create a fork just to
-    answer a question about existing pull requests.
+    Resolved without consulting `push_target`, so a dry run never creates a fork just to answer a
+    question about existing pull requests.
     """
-    out = gh.gh([
-        "pr", "list", "--repo", repo, "--head", branch, "--state", "closed",
-        "--limit", "20", "--json", "number,state,url,mergedAt,headRepositoryOwner",
-    ])
     ours = {repo.split("/")[0], _own_login()}
-    for row in json.loads(out):
-        if row.get("mergedAt"):
-            continue
-        if ((row.get("headRepositoryOwner") or {}).get("login") or "") in ours:
-            return row
+    for state in states:
+        out = gh.gh([
+            "pr", "list", "--repo", repo, "--head", branch, "--state", state,
+            "--limit", "20", "--json", "number,state,url,mergedAt,headRepositoryOwner",
+        ])
+        for row in json.loads(out):
+            if state == "closed" and row.get("mergedAt"):
+                continue
+            if ((row.get("headRepositoryOwner") or {}).get("login") or "") in ours:
+                return row
     return None
 
 
-def existing_pr(branch, repo=gh.ROADMAP_REPO, owner=None, states=("open",)):
-    """A pull request for `branch`, or None.
+def existing_pr(branch, repo=gh.ROADMAP_REPO, owner=None, states=("merged",)):
+    """A pull request for `branch` from ANYONE, or None.
 
-    Anyone may open a pull request on a progress branch, and branch names are a pure function of the
-    window, so `--head <branch>` matches strangers' pull requests as readily as our own. Two of the
-    ways this function is used therefore have to be told whose work to look at:
-
-    * Deciding "has this window already been proposed?" must consider EVERYONE, or two operators
-      duplicate each other. Open ones only.
-    * Deciding "was this window refused, so stop reopening it?" must consider only OUR OWN, or a
-      stranger can open and immediately close a pull request on the deterministic branch name and
-      permanently stop that window from ever being published. Closed-state matching is scoped by
-      `owner` for exactly that reason.
+    Used only for the merged case, where authorship genuinely does not matter: if a report for this
+    window has landed, the window is published no matter who published it. Every other question --
+    is one in flight, was one refused -- must be scoped to our own, or a stranger could decide what
+    we may publish. Use `own_pr` for those.
     """
     head = f"{owner}:{branch}" if owner else branch
     rows = []
@@ -169,19 +169,32 @@ def push_target(roadmap_dir, repo=gh.ROADMAP_REPO):
     login = gh.gh(["api", "user", "--jq", ".login"]).strip()
     if not login:
         raise RuntimeError("could not determine the authenticated login, so no fork can be used")
-    # Ask the API what the fork is actually called rather than assuming `<login>/<name>`. A fork may
-    # be renamed, and a guessed path can redirect today and resolve to an unrelated repository later.
     # `--clone=false` is idempotent: it creates the fork if absent and is a no-op if it exists.
     gh.gh(["repo", "fork", repo, "--clone=false", "--remote=false"])
-    fork = gh.gh(["api", f"repos/{repo}/forks?per_page=100", "--jq",
-                  f'[.[] | select(.owner.login == "{login}")] | .[0].full_name // ""']).strip()
+
+    # Identify the fork by ANCESTRY, never by name. Two guesses would both be wrong: a fork can be
+    # renamed, so `<login>/<name>` may not exist; and `<login>/<name>` may exist while being an
+    # unrelated repository that merely shares the name, in which case a report would be pushed
+    # somewhere it does not belong. `.parent.full_name` is the only field that actually answers
+    # "is this a fork of the repository I mean?", so it is required in both branches below.
+    #
+    # `--paginate`, because the fork listing is ordered by creation and a popular repository's
+    # first page says nothing about whether this account appears later.
+    fork = gh.gh([
+        "api", "--paginate", f"repos/{repo}/forks?per_page=100", "--jq",
+        f'.[] | select(.owner.login == "{login}") | select(.parent.full_name == "{repo}") '
+        f'| .full_name',
+    ]).strip().splitlines()
+    fork = fork[0].strip() if fork else ""
     if not fork:
-        # A fork the listing does not show (it is paginated and ordered by creation) is still
-        # addressable by the conventional path; verify it exists before trusting it.
         candidate = f"{login}/{repo.split('/')[-1]}"
-        fork = gh.gh(["api", f"repos/{candidate}", "--jq", ".full_name"]).strip()
+        parent = gh.gh(["api", f"repos/{candidate}", "--jq", '.parent.full_name // ""']).strip()
+        fork = candidate if parent == repo else ""
     if not fork or "/" not in fork:
-        raise RuntimeError(f"could not identify {login}'s fork of {repo}")
+        raise RuntimeError(
+            f"could not identify a fork of {repo} owned by {login}; publishing needs either push "
+            f"access to {repo} or a fork of it"
+        )
     url = f"https://github.com/{fork}.git"
     if _run(["git", "remote", "get-url", "fork"], roadmap_dir, check=False).returncode == 0:
         _run(["git", "remote", "set-url", "fork", url], roadmap_dir)
@@ -220,22 +233,28 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
     branch = branch_name(plan)
 
     # --- reconcile before acting ---------------------------------------------------------------
-    # Anyone's OPEN or MERGED pull request for this window counts: it is already published or in
-    # flight, and a second one would only duplicate it.
-    pr = existing_pr(branch, states=("open", "merged"))
-    if pr is not None:
-        state = (pr.get("state") or "").upper()
-        if state == "MERGED":
-            print(f"already merged: {pr['url']}")
-            return EX_NOPROGRESS
-        print(f"already open, in flight: {pr['url']}")
+    # A MERGED pull request from anyone is authoritative: the window is published, full stop.
+    merged = existing_pr(branch, states=("merged",))
+    if merged is not None:
+        print(f"already merged: {merged['url']}")
+        return EX_NOPROGRESS
+
+    # An OPEN one only counts when we could have opened it. Branch names are a pure function of the
+    # window, so honouring a stranger's would let anyone freeze a roadmap by opening one pull request
+    # a day -- the staleness expiry in the planner bounds a single one, not a stream. A stranger's
+    # report still merges on its own merits; it just does not stop us writing one. The cost is that
+    # two operators publishing from their own forks may duplicate a window and waste a round, which
+    # is much cheaper than being unable to report at all.
+    open_pr = own_pr(branch, states=("open",))
+    if open_pr is not None:
+        print(f"already open, in flight: {open_pr['url']}")
         return EX_NOPROGRESS
 
     # A CLOSED pull request means this window was refused, and reopening it every day is the loop
     # this design avoids -- but only one WE could have opened may say so. Branch names are a pure
     # function of the window, so anyone can open and instantly close a pull request on that name;
     # honouring a stranger's would let them stop a window being published, permanently and silently.
-    mine = own_closed_pr(branch)
+    mine = own_pr(branch, states=("closed",))
     if mine is not None:
         print(
             f"this window was already proposed and closed unmerged ({mine['url']}); "
@@ -301,14 +320,15 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
 
     # Re-check between push and create: another worker may have opened the PR for this exact window
     # in the meantime, and the branch name is deterministic so it would be the same branch.
-    # Deliberately the bare branch name, not `owner:branch`: the question is whether ANYONE has
-    # already opened a pull request for this window, and the branch name is a pure function of the
-    # window, so a peer publishing from their own fork must count.
-    pr = existing_pr(branch)
-    # `--head owner:branch` for creation, though, so `gh` looks for the branch on the fork rather
-    # than on the canonical repository, where it does not exist.
+    # Scoped to pull requests we could have opened, for the same reason as the reconcile above: a
+    # stranger must not be able to stop us opening ours. Two operators on separate forks may
+    # therefore both open one, which wastes a round; only one can land, and the other is refused
+    # once the cursor moves.
+    pr = own_pr(branch, states=("open",))
+    # `--head owner:branch` for creation, so `gh` looks for the branch on the fork rather than on
+    # the canonical repository, where it does not exist.
     head = f"{fork_owner}:{branch}" if fork_owner else branch
-    if pr is not None and (pr.get("state") or "").upper() == "OPEN":
+    if pr is not None:
         print(f"another worker opened it first: {pr['url']}")
         return EX_NOPROGRESS
 

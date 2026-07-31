@@ -39,12 +39,6 @@ permissions:
   contents: read
   pull-requests: read
 
-# No concurrency group HERE. GitHub keeps one running and one pending run per group and discards the
-# pending one when a newer event arrives, so a repository-wide group on the caller lets any pull
-# request activity evict a queued progress run. The merge itself still has to be serialised — the
-# compare-and-swap depends on `main` not moving underneath it — and the called workflow declares that
-# group itself, so serialisation happens where it is needed without letting unrelated events crowd
-# the queue.
 
 jobs:
   resolve:

@@ -128,13 +128,19 @@ def open_progress_prs(repo=ROADMAP_REPO, branch_prefix="progress/"):
     in `main` still points at the old window, so recomputing would produce the same window again;
     treating the PR as in-flight is what stops a duplicate being opened every day.
 
+    `headRepositoryOwner` comes back so callers can tell whose work a pull request is. Anyone may
+    open one on a `progress/*` branch, and branch names are a pure function of the window, so
+    treating every one of them as an in-flight marker would let a stranger freeze a roadmap by
+    opening one pull request a day.
+
     `createdAt` comes back too, because "in flight" has to expire. A pull request the merge check
     refuses permanently never merges and never closes itself, and without an age it would mark its
     area in flight forever, silently stopping that roadmap's reporting for every operator.
     """
     out = gh([
         "pr", "list", "--repo", repo, "--state", "open",
-        "--limit", "200", "--json", "number,headRefName,title,url,createdAt",
+        "--limit", "200", "--json",
+        "number,headRefName,title,url,createdAt,headRepositoryOwner",
     ])
     rows = json.loads(out)
     return [r for r in rows if (r.get("headRefName") or "").startswith(branch_prefix)]

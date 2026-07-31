@@ -163,7 +163,20 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     return window.first_parent_before(repo_dir, merge)
 
 
-def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS):
+def _own_login():
+    """The login this operator is authenticated as. Empty if it cannot be read: then only the
+    organisation's own pull requests mark an area in flight, which errs toward doing work."""
+    try:
+        return gh.gh(["api", "user", "--jq", ".login"]).strip()
+    except gh.GhError:
+        return ""
+
+
+def _pr_owner(pr):
+    return ((pr.get("headRepositoryOwner") or {}).get("login") or "")
+
+
+def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None):
     """`({area: pr}, [stale_note])` from the open progress pull requests.
 
     The branch is `progress/<from7>-<to7>/<Area>`, so the area is the last segment.
@@ -178,14 +191,27 @@ def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS):
     A pull request with no or unreadable `createdAt` keeps blocking. Age is the only evidence that it
     is stuck, and without it the safe assumption is that it is still in flight: opening a duplicate is
     worse than waiting.
+
+    `owners` restricts whose pull requests may mark an area in flight, and defaults to the roadmap
+    organisation plus this operator. Anyone may open a pull request on a `progress/*` branch, so
+    without this a stranger could freeze a roadmap indefinitely by opening one a day -- staleness
+    expiry bounds a single one to a day, but not a stream of them. A stranger's report still merges
+    on its own merits; it simply does not stop anyone else from writing one. The cost is that two
+    operators publishing from their own forks may duplicate a window, which wastes a round; being
+    unable to report at all is the worse failure.
     """
     now = now or _utcnow()
+    owners = {gh.ROADMAP_REPO.split("/")[0], _own_login()} if owners is None else set(owners)
     blocked, stale = {}, []
     for pr in open_prs:
         parts = (pr.get("headRefName") or "").split("/")
         if len(parts) < 3:
             continue
         area_name = parts[-1]
+        if _pr_owner(pr) not in owners:
+            # Not ours and not the organisation's: it may well be a genuine report from another
+            # contributor, and it can merge, but it does not get to stop us writing one.
+            continue
         age_hours = None
         created = pr.get("createdAt")
         if created:

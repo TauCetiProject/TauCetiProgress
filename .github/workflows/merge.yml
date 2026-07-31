@@ -57,7 +57,10 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  # `write` so a refusal can be explained ON the pull request. Anyone may publish a report now, and a
+  # contributor whose report is refused would otherwise get no feedback at all: the reason would sit
+  # in the Actions log of a workflow in a repository they may not even be able to read.
+  pull-requests: write
 
 # DELIBERATELY NOT SERIALISED.
 #
@@ -159,6 +162,10 @@ jobs:
           } > refusal.md
           printf 'gate refused:\n'
           cat refusal.md
+          # Best effort. A refusal is a normal outcome, so failing to describe it must not turn the
+          # run red -- the verdict is already recorded in the job output either way.
+          gh pr comment "$PR" --repo "$REPO" --body-file refusal.md \
+            || echo "::warning title=refusal not posted::could not comment on #$PR" 
 
   merge:
     needs: validate

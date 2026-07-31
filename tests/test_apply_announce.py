@@ -251,8 +251,9 @@ def test_push_target_falls_back_to_a_fork():
         calls.append(args)
         if args[:2] == ["api", "repos/TauCetiProject/TauCetiRoadmap"]:
             return "false\n"
-        if args[0] == "api" and args[1].startswith("repos/") and "/forks" in args[1]:
-            return "someone/TauCetiRoadmap\n"
+        if args[0] == "api" and any("/forks" in a for a in args):
+            # The jq already filtered on `.parent.full_name`, so a hit means a genuine fork.
+            return "someone/roadmap-fork\n"
         if args[:2] == ["api", "user"]:
             # Exactly what `gh api user --jq .login` prints: a raw, UNQUOTED login. An earlier
             # version parsed this as JSON, which raises -- on the one path that needs it to work.
@@ -282,7 +283,7 @@ def _with_pr_rows(rows):
         return json.dumps(rows)
     apply_mod.gh.gh = fake
     try:
-        return apply_mod.own_closed_pr("progress/a1b2c3d-b9c8d7e/PDE")
+        return apply_mod.own_pr("progress/a1b2c3d-b9c8d7e/PDE", states=("closed",))
     finally:
         apply_mod.gh.gh = orig
 
@@ -307,6 +308,50 @@ def test_a_merged_pr_is_not_treated_as_a_rejection():
     rows = [{"number": 1, "state": "MERGED", "url": "u", "mergedAt": "2026-07-30T00:00:00Z",
              "headRepositoryOwner": {"login": "kim-em"}}]
     assert _with_pr_rows(rows) is None
+
+
+def test_a_strangers_open_pr_does_not_block_us():
+    """Otherwise anyone could freeze a roadmap by opening one pull request a day."""
+    rows = [{"number": 1, "state": "OPEN", "url": "u", "mergedAt": None,
+             "headRepositoryOwner": {"login": "stranger"}}]
+    orig = apply_mod.gh.gh
+    def fake(args, **kw):
+        if args[:2] == ["api", "user"]:
+            return "kim-em\n"
+        return json.dumps(rows)
+    apply_mod.gh.gh = fake
+    try:
+        assert apply_mod.own_pr("progress/a1b2c3d-b9c8d7e/PDE", states=("open",)) is None
+    finally:
+        apply_mod.gh.gh = orig
+
+
+def test_push_target_requires_the_fork_to_be_a_fork_of_this_repo():
+    """A repository that merely shares the name is not a fork; pushing a report there is wrong."""
+    orig_gh, orig_run = apply_mod.gh.gh, apply_mod._run
+
+    def fake_gh(args, **kw):
+        if args[:2] == ["api", "repos/TauCetiProject/TauCetiRoadmap"]:
+            return "false\n"
+        if args[:2] == ["api", "user"]:
+            return "someone\n"
+        if args[0] == "api" and any("/forks" in a for a in args):
+            return ""            # not in the fork listing
+        if args[0] == "api":
+            return "\n"          # `.parent.full_name` empty: an unrelated same-named repo
+        return ""
+
+    class P:
+        returncode = 1
+    apply_mod.gh.gh, apply_mod._run = fake_gh, lambda *a, **kw: P()
+    try:
+        apply_mod.push_target("/nonexistent")
+    except RuntimeError as exc:
+        assert "could not identify a fork" in str(exc)
+    else:
+        raise AssertionError("an unrelated same-named repository must not be used")
+    finally:
+        apply_mod.gh.gh, apply_mod._run = orig_gh, orig_run
 
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
