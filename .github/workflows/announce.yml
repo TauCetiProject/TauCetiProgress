@@ -41,8 +41,13 @@ on:
 permissions:
   contents: read
 
+# Keyed by the commit being announced, NOT a single global group. GitHub keeps one running and one
+# pending run per group and discards the pending one when a newer event arrives, so a global group
+# would silently drop the middle announcement of three quick merges -- and each of those is a
+# different section that nothing else will ever post. Posting is idempotent on a stable per-window
+# id, so concurrent runs are safe.
 concurrency:
-  group: progress-announce
+  group: progress-announce-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
