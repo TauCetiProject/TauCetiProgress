@@ -73,12 +73,20 @@ def test_the_prompt_asks_for_no_more_than_the_checked_limit():
 
 
 def test_the_status_prompt_is_voyager_shaped_and_bounded():
-    text = (cli.PROMPT_DIR / "progress.md").read_text()
+    text = " ".join((cli.PROMPT_DIR / "progress.md").read_text().split())
     assert "At most 750 words" in text
     assert "### Named results" in text
     assert "### Notable definitions and infrastructure" in text
     assert "plain language first, references last" in text
     assert files.MAX_STATUS_WORDS >= 750
+
+
+def test_both_status_prompts_prefer_readable_names_and_documentation():
+    for name in ("progress.md", "status.md"):
+        text = " ".join((cli.PROMPT_DIR / name).read_text().split())
+        assert "De Finetti-Ryll-Nardzewski equivalence" in text, name
+        assert "at most two in the whole snapshot" in text, name
+        assert "documentation" in text, name
 
 
 for _name, _fn in sorted(globals().items()):

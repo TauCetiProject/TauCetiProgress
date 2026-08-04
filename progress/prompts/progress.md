@@ -66,9 +66,9 @@ reader should get to the end.
 
 ### `__STATUS_OUT__` — the status snapshot
 
-**At most 750 words. Aim for the selective, theorem-first register of Voyager's “what's new in Tau
-Ceti” posts, not an inventory of declarations.** The current state of the whole roadmap, not just
-this window. This file is rewritten from scratch each time.
+**At most 750 words. Write a selective, theorem-first account, not an inventory of declarations.**
+Describe the current state of the whole roadmap, not just this window. This file is rewritten from
+scratch each time.
 
 Use exactly two `##` sections, with these headings and this shape:
 
@@ -77,11 +77,13 @@ Use exactly two `##` sections, with these headings and this shape:
     what is genuinely partial, and what has not begun.
   - `### Named results` when there are headline theorems. Select at most five. Give each a bold,
     human-readable mathematical name followed by an em dash and a one-sentence statement or
-    significance; put documentation and `TauCeti#1234` references at the end. The mathematics comes
-    before its Lean identifier.
+    significance. Write the name as you would say it aloud: “the De Finetti-Ryll-Nardzewski
+    equivalence”, not `deFinetti_RyllNardzewski_equivalence`. Link the Lean identifier to the exact
+    documentation URL supplied in `__FACTS_FILE__` or the previous `STATUS.md`; if neither supplies
+    a URL, leave it unlinked.
   - `### Notable definitions and infrastructure` when definitions are themselves important or make
-    the next theorem possible. Select at most three; describe what they enable rather than listing
-    their API.
+    the next theorem possible. Select at most three, link each one whose URL appears in the supplied
+    material, and describe what it enables rather than listing its API.
   - `### Roadmap coverage` in one compact paragraph or a short list. Account for the roadmap's own
     layers or lanes, but group those in the same state instead of giving every layer a mini-essay.
     State done, partial, or untouched precisely. “L3 is done except for the non-compact case” is
@@ -92,9 +94,11 @@ Use exactly two `##` sections, with these headings and this shape:
   - If a target looks unreachable as stated, or obsolete because the supplied material says Mathlib
     now provides it, say so.
 
-Voyager's messages are pleasant because they select and explain: one mathematical idea per entry,
-plain language first, references last, and no process narrative. Apply that here. Do not catalogue
-every declaration, repeat the README's exposition, or turn every roadmap layer into a heading.
+Put one mathematical idea in each entry: plain language first, references last. Copy documentation
+URLs exactly; never build one. Cite pull requests sparingly as `TauCeti#1234`, never as links: use at
+most two in the whole snapshot, and only when the history adds something the documentation link does
+not. Do not catalogue every declaration, repeat the README's exposition, turn every roadmap layer
+into a heading, or narrate the development process.
 
 Do not write a top-level `#` heading in either file; the scripts add the headings and the machine
 headers.
