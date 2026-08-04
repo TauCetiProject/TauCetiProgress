@@ -23,6 +23,7 @@ from . import files, zulip
 ID_PREFIX = "progress-log-id:"
 
 MAX_MESSAGE_CHARS = 8000
+ROADMAP_PARENTS = ("TauCetiRoadmap", "Completed")
 
 
 def section_id(header):
@@ -50,7 +51,14 @@ def split_section(text):
     return headers[0], body
 
 
-def render_message(header, prose, roadmap_url=None):
+def roadmap_file_url(area, filename, parent="TauCetiRoadmap"):
+    """Canonical main-branch URL for a generated roadmap file."""
+    if parent not in ROADMAP_PARENTS:
+        raise ValueError(f"unexpected roadmap parent: {parent}")
+    return f"https://github.com/TauCetiProject/TauCetiRoadmap/blob/main/{parent}/{area}/{filename}"
+
+
+def render_message(header, prose, roadmap_url=None, status_url=None, roadmap_parent="TauCetiRoadmap"):
     """The Zulip message for one section.
 
     Shape follows the review Kim gave Chris's bot: `TauCeti#NNN` linkifiers rather than markdown
@@ -62,15 +70,13 @@ def render_message(header, prose, roadmap_url=None):
     body = zulip.sanitize(prose)
     if len(body) > MAX_MESSAGE_CHARS:
         body = body[:MAX_MESSAGE_CHARS].rsplit("\n", 1)[0] + "\n\n(truncated; the full section is in `PROGRESS.md`)"
-    link = roadmap_url or (
-        f"https://github.com/TauCetiProject/TauCetiRoadmap/blob/main/"
-        f"TauCetiRoadmap/{area}/PROGRESS.md"
-    )
+    progress_link = roadmap_url or roadmap_file_url(area, "PROGRESS.md", roadmap_parent)
+    status_link = status_url or roadmap_file_url(area, "STATUS.md", roadmap_parent)
     return (
         f"**{area}** — progress on {len(prs)} merged pull requests "
         f"(`{header['from_sha'][:7]}` to `{header['to_sha'][:7]}`)\n\n"
         f"{body}\n\n"
-        f"Full log: {link}\n"
+        f"[Full progress log]({progress_link}) · [Current roadmap status]({status_link})\n"
         f"{ID_PREFIX}{section_id(header)}"
     )
 
@@ -88,7 +94,7 @@ def already_posted(client, channel, topic, sid):
     return None
 
 
-def run(section_file, channel=None, topic=None, dry_run=False):
+def run(section_file, channel=None, topic=None, roadmap_parent="TauCetiRoadmap", dry_run=False):
     """Post the section in `section_file`. Returns a process exit code.
 
     Raises on a transient failure rather than swallowing it, so the workflow run goes red and a
@@ -100,7 +106,7 @@ def run(section_file, channel=None, topic=None, dry_run=False):
     text = pathlib.Path(section_file).read_text(encoding="utf-8")
     header, prose = split_section(text)
     sid = section_id(header)
-    message = render_message(header, prose)
+    message = render_message(header, prose, roadmap_parent=roadmap_parent)
 
     if dry_run:
         print(f"[dry-run] would post to {channel} > {topic} as {sid}:\n\n{message}")

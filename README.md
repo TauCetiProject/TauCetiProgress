@@ -87,8 +87,8 @@ defused. Read these two files as a machine's summary, not as reviewed roadmap co
 **The blast radius is two markdown files AND a Zulip message.** Every merged section is posted to
 **Tau Ceti > Progress logs** automatically, so accepted prose reaches an audience outside the
 repository. The post is treated as data -- mentions and bare `#123` linkifiers are defused, the
-message is size-capped, and it is idempotent on a stable per-window id -- but it is a second sink and
-the threat model has to say so.
+message is size-capped, it links both the appended log and the current roadmap status, and it is
+idempotent on a stable per-window id -- but it is a second sink and the threat model has to say so.
 
 ## Licence
 
