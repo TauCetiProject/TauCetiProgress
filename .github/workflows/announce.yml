@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the announcer
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TauCetiProject/TauCetiProgress
           ref: ${{ inputs.progress_ref }}
@@ -65,7 +65,7 @@ jobs:
       # Two commits of history are enough: the section to announce is exactly what this push added
       # to a PROGRESS.md file.
       - name: Check out the roadmap at this commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
           path: roadmap
