@@ -3,6 +3,7 @@
 import io
 import contextlib
 import pathlib
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -54,6 +55,18 @@ def test_prompts_live_inside_the_package():
     assert cli.PROMPT_DIR == pathlib.Path(cli.__file__).resolve().parent / "prompts"
     assert (cli.PROMPT_DIR / "progress.md").is_file()
     assert not (ROOT / "prompts").exists(), "the old top-level copy must be gone, not duplicated"
+
+
+def test_generated_package_artifacts_are_not_tracked():
+    """A tracked ``build/lib`` can silently override newer source when setuptools builds a wheel."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "build", "tauceti_progress.egg-info"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert not tracked.strip(), tracked
 
 
 def test_the_worker_placeholders_are_all_present():
