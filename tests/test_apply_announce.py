@@ -173,7 +173,17 @@ def test_message_contains_the_id_and_a_link():
     msg = announce.render_message(header, prose)
     assert f"{announce.ID_PREFIX}PDE-{A[:7]}-{B[:7]}" in msg
     assert "PROGRESS.md" in msg
+    assert "STATUS.md" in msg
+    assert "[Current roadmap status](" in msg
     assert "2 merged pull requests" in msg
+
+
+def test_message_links_completed_roadmaps_under_completed():
+    header, prose = announce.split_section(make_section())
+    msg = announce.render_message(header, prose, roadmap_parent="Completed")
+    assert "/Completed/PDE/PROGRESS.md" in msg
+    assert "/Completed/PDE/STATUS.md" in msg
+    assert "/TauCetiRoadmap/PDE/" not in msg
 
 
 def test_message_is_capped():

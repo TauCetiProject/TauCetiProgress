@@ -264,6 +264,17 @@ def test_the_word_cap_leaves_headroom_over_the_target():
     """The prompt asks for about 300; the cap is a backstop, not the target."""
     assert files.MAX_SECTION_WORDS > 300
 
+
+def test_an_inventory_length_status_is_refused_by_the_full_gate():
+    status, log, new_log = good_update()
+    status = files.render_status("PDE", B, "t", "word " * (files.MAX_STATUS_WORDS + 1))
+    raises(lambda: files.validate_update("PDE", None, status, log, new_log), "STATUS.md is")
+
+
+def test_the_status_cap_leaves_headroom_over_the_prompt_target():
+    assert files.check_word_count("STATUS.md", "word " * 750, files.MAX_STATUS_WORDS) == 750
+    assert files.MAX_STATUS_WORDS > 750
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

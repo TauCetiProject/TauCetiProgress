@@ -72,6 +72,15 @@ def test_the_prompt_asks_for_no_more_than_the_checked_limit():
     assert files.MAX_SECTION_WORDS >= 300
 
 
+def test_the_status_prompt_is_voyager_shaped_and_bounded():
+    text = (cli.PROMPT_DIR / "progress.md").read_text()
+    assert "At most 750 words" in text
+    assert "### Named results" in text
+    assert "### Notable definitions and infrastructure" in text
+    assert "plain language first, references last" in text
+    assert files.MAX_STATUS_WORDS >= 750
+
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

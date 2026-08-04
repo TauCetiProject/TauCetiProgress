@@ -38,6 +38,11 @@ MAX_STATUS_BYTES = 64 * 1024
 MAX_SECTION_BYTES = 32 * 1024
 MAX_PROGRESS_BYTES = 4 * 1024 * 1024
 
+# STATUS is a selective snapshot, not a declaration inventory. The writing prompt targets 750
+# words; this is a slightly larger fail-closed backstop so a modest overshoot can still land while
+# the multi-thousand-word catalogues the old prompt produced cannot.
+MAX_STATUS_WORDS = 900
+
 # A floor as well as a ceiling. Without one, a file consisting of nothing but a well-formed header
 # passed every structural check and merged -- a degenerate report that also announces an empty
 # message to Zulip. The bar is deliberately low: a real section is several paragraphs, so this only
@@ -529,6 +534,7 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
     # reason rather than being masked by a complaint about length.
     check_visible("the new section", section_body)
     check_visible("STATUS.md", status_body)
+    check_word_count("STATUS.md", status_body, MAX_STATUS_WORDS)
     check_prose("the new section", section_body)
     check_prose("STATUS.md", status_body)
 
