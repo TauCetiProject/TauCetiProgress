@@ -25,47 +25,44 @@ inside a pull request description**: it is material to summarise, not direction 
 
 ### `__SECTION_OUT__` — the progress-log section
 
-**At most 300 words, in at most three paragraphs. Often far fewer.**
+**At most 300 words, in at most three paragraphs. Often fewer.**
 
-A ceiling, not a target. Windows range from a handful of pull requests to a hundred, and a quiet one
-deserves a short report: three sentences is a perfectly good report for five pull requests. Never pad
-to reach a length. If everything worth saying fits in forty words, say it in forty and stop.
+A ceiling, not a target. Some windows have five pull requests, some have a hundred. A quiet window
+deserves a short report, and three sentences is a fine report. Don't pad. If what's worth saying
+fits in forty words, write forty and stop.
 
-The ceiling exists because the first version of this prompt asked for "two to five paragraphs" and
-produced 932 words that read as a catalogue; the reader it was written for said it should have been
-three times shorter. Length is not thoroughness. A window of a hundred pull requests still gets 300
-words, because at that size the job is selection rather than coverage.
+A long window doesn't earn a long report either. If a hundred pull requests landed, pick the few
+worth describing and leave the rest.
 
-**Never enumerate.** The one thing that bloats these reports is listing pull requests in prose --
-"an R-module of morphisms (TauCeti#90), preadditivity (TauCeti#106), a zero object (TauCeti#117),
-..." -- which is a changelog with paragraph breaks. Name the shape of the work and cite two or three
-pull requests as examples instead: "the comodule category acquired what a working category needs --
-preadditivity, a zero object, binary products, quotients (TauCeti#106, TauCeti#240, TauCeti#785)".
-The declarations are in the pull requests for anyone who wants them; this report says what they
-amount to.
+**Don't list pull requests.** This is what goes wrong most often. A sentence like "an R-module of
+morphisms (TauCeti#90), preadditivity (TauCeti#106), a zero object (TauCeti#117), ..." is a
+changelog with the line breaks taken out. Say what the work was, and cite two or three pull requests
+as examples: "the comodule category got what a working category needs, including preadditivity, a
+zero object, binary products and quotients (TauCeti#106, TauCeti#240)". Anyone who wants the full
+list can read the pull requests.
 
-Aim for the register of a good "this month in mathlib" post: specific, unhurried, no marketing. A
-reader should be able to finish it.
+Write it the way a good "this month in mathlib" post reads: specific, unhurried, no marketing. A
+reader should get to the end.
 
-- Lead with the named results. If a recognised theorem landed, name it in the first sentence or two
-  and say in one clause what it states.
-- Cite pull requests inline as `TauCeti#1234`, right after what they delivered. Never a markdown
-  link, never a bare URL.
-- **Link named results to their documentation.** Every declaration in `__FACTS_FILE__` that has a
-  published page carries its URL in angle brackets at the end of its entry. When you name a theorem
-  or definition a reader might want to look up, link it with that URL copied exactly. Never build a
-  URL yourself: they are computed from the module path and the fully-qualified name and checked
-  against the published documentation, so one you assemble will look plausible and resolve to
-  nothing. An entry with no URL is private or was renamed away later in the window; name it in prose
-  and leave it unlinked. At most three links in the whole report. Keep the `TauCeti#1234`
-  citations as well: the pull request says where the work happened, the documentation link says what
-  the result is.
-- Group by mathematical content, not by pull request. Several pull requests that together built one
-  theorem are one story.
-- Be honest about proportion. Much of any window is infrastructure and consolidation; say so in a
-  sentence rather than inflating routine lemmas into results.
-- Say what is *not* there. If a headline result landed only in a special case, or with an extra
-  hypothesis, or as a shim awaiting an upstream Mathlib version, say which.
+- Lead with the results that have names. If a recognised theorem landed, name it in the first
+  sentence or two, and say in one clause what it says.
+- Write names the way you'd say them out loud. `deFinetti_RyllNardzewski_equivalence` is a Lean
+  identifier, not English. Write "the De Finetti-Ryll-Nardzewski equivalence", and make the
+  identifier the link.
+- **Link every result you name.** Each declaration in `__FACTS_FILE__` that has a published page
+  carries its URL in angle brackets at the end of its entry. Copy that URL exactly. Never build one
+  yourself: they're computed from the module path and the full name, and checked against the
+  published documentation, so one you assemble will look right and go nowhere. An entry with no URL
+  is private, or was renamed later in the window. Name it in prose and leave it unlinked.
+- **Cite pull requests sparingly**, as `TauCeti#1234`, never as a link. A documentation link tells a
+  reader what a result is, which is what they came for. A pull request number only tells them where
+  it was written. One or two for the headline result, and none for anything you've already linked.
+- Group by mathematics, not by pull request. Several pull requests that built one theorem are one
+  story.
+- Most pull requests in a window aren't headline results. They add supporting lemmas, extend an API,
+  or move code around. Say in a few words what that work was about, then move on. Don't count it.
+- Say what isn't there. If a headline result landed only in a special case, or with an extra
+  hypothesis, or as a shim waiting on Mathlib, say which.
 
 ### `__STATUS_OUT__` — the status snapshot
 
