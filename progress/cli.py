@@ -123,6 +123,7 @@ def cmd_announce(args):
         section_file=args.section,
         topic=args.topic,
         channel=args.channel,
+        roadmap_parent=args.roadmap_parent,
         dry_run=args.dry_run,
     )
 
@@ -176,6 +177,12 @@ def build_parser():
     n.add_argument("--section", required=True, help="file holding the rendered section")
     n.add_argument("--channel", default=None)
     n.add_argument("--topic", default=None)
+    n.add_argument(
+        "--roadmap-parent",
+        choices=("TauCetiRoadmap", "Completed"),
+        default="TauCetiRoadmap",
+        help="parent directory containing the roadmap in TauCetiRoadmap",
+    )
     n.add_argument("--dry-run", action="store_true")
     n.set_defaults(fn=cmd_announce)
     return ap

@@ -90,15 +90,18 @@ jobs:
             # way (rather than parsing diff hunks) matches the append-only guarantee the merge gate
             # enforced: the new file is the old file plus a suffix.
             git show "HEAD^:$path" > /tmp/old.md 2>/dev/null || : > /tmp/old.md
-            python3 - "$path" "$i" <<'PY'
+            parent="${path%%/*}"
+            python3 - "$path" "$i" "$parent" <<'PY'
           import pathlib, sys
-          path, idx = sys.argv[1], sys.argv[2]
+          path, idx, parent = sys.argv[1:4]
           old = pathlib.Path("/tmp/old.md").read_text(encoding="utf-8")
           new = pathlib.Path(path).read_text(encoding="utf-8")
           if not new.startswith(old):
               raise SystemExit(f"{path} is not an append; refusing to announce")
           added = new[len(old):]
-          pathlib.Path(f"../sections/{idx}.md").write_text(added, encoding="utf-8")
+          out = pathlib.Path("../sections") / parent / f"{idx}.md"
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text(added, encoding="utf-8")
           print(f"extracted {len(added)} bytes from {path}")
           PY
             i=$((i+1))
@@ -115,7 +118,8 @@ jobs:
           TOPIC: ${{ inputs.topic }}
         run: |
           set -euo pipefail
-          for f in sections/*.md; do
+          while IFS= read -r -d '' f; do
+            parent=$(basename "$(dirname "$f")")
             python3 -c 'import sys; sys.path.insert(0, "announcer"); from progress.cli import main; sys.exit(main())' \
-              announce --section "$f" --channel "$CHANNEL" --topic "$TOPIC"
-          done
+              announce --section "$f" --roadmap-parent "$parent" --channel "$CHANNEL" --topic "$TOPIC"
+          done < <(find sections -type f -name '*.md' -print0)

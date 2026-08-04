@@ -11,7 +11,8 @@ Each roadmap directory may carry two files that are **written by machine, not by
   the TauCeti commit it describes. It is updated asynchronously from the work it reports, so it is
   never authoritative about the current tip.
 - `PROGRESS.md` — an append-only log, one section per window of merged pull requests. New sections are
-  announced in the **Tau Ceti > Progress logs** Zulip topic.
+  announced in the **Tau Ceti > Progress logs** Zulip topic with links to both the full log and the
+  current `STATUS.md` snapshot.
 
 Both are produced by [TauCetiProgress](https://github.com/TauCetiProject/TauCetiProgress) and merge
 without human review, under a gate that checks their structure. **Their prose is not

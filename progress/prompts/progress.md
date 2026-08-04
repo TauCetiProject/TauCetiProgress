@@ -66,17 +66,35 @@ reader should get to the end.
 
 ### `__STATUS_OUT__` — the status snapshot
 
-The current state of the whole roadmap, not just this window. This file is rewritten from scratch
-each time, so write a description of where things stand now. Use exactly two `##` sections:
+**At most 750 words. Aim for the selective, theorem-first register of Voyager's “what's new in Tau
+Ceti” posts, not an inventory of declarations.** The current state of the whole roadmap, not just
+this window. This file is rewritten from scratch each time.
 
-- `## Where this roadmap stands` — walk the roadmap's own structure, using its own names for its
-  layers or lanes, and for each say plainly whether it is done, partly done, or untouched, naming the
-  declarations that realise it, linked to their documentation where the facts file gives a URL. Be
-  concrete about partial completion: "Layer 3 is done except for the non-compact case" is useful,
-  "Layer 3 is progressing well" is not.
-- `## The frontier` — the nearest unfinished targets, and anything blocked and on what. A contributor
-  reads this to find work, so name specific targets. If a target looks unreachable as stated, or
-  already obsolete because Mathlib now provides it, say so.
+Use exactly two `##` sections, with these headings and this shape:
+
+- `## Where this roadmap stands`
+  - Open with `**At a glance.**` and one or two sentences saying what summit or major layer is done,
+    what is genuinely partial, and what has not begun.
+  - `### Named results` when there are headline theorems. Select at most five. Give each a bold,
+    human-readable mathematical name followed by an em dash and a one-sentence statement or
+    significance; put documentation and `TauCeti#1234` references at the end. The mathematics comes
+    before its Lean identifier.
+  - `### Notable definitions and infrastructure` when definitions are themselves important or make
+    the next theorem possible. Select at most three; describe what they enable rather than listing
+    their API.
+  - `### Roadmap coverage` in one compact paragraph or a short list. Account for the roadmap's own
+    layers or lanes, but group those in the same state instead of giving every layer a mini-essay.
+    State done, partial, or untouched precisely. “L3 is done except for the non-compact case” is
+    useful; “L3 is progressing well” is not.
+- `## The frontier`
+  - At most five bullets, nearest and most useful first. Each starts with a bold target name, says
+    exactly what remains, and names a real prerequisite or blocker only when there is one.
+  - If a target looks unreachable as stated, or obsolete because the supplied material says Mathlib
+    now provides it, say so.
+
+Voyager's messages are pleasant because they select and explain: one mathematical idea per entry,
+plain language first, references last, and no process narrative. Apply that here. Do not catalogue
+every declaration, repeat the README's exposition, or turn every roadmap layer into a heading.
 
 Do not write a top-level `#` heading in either file; the scripts add the headings and the machine
 headers.
