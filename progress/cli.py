@@ -135,7 +135,7 @@ def build_parser():
 
     d = sub.add_parser("due", help="is an update due? (one API call, no clone)")
     d.add_argument("--idle-hours", type=float, default=None,
-                   help="hours of quiet required (default 24)")
+                   help="hours of quiet required (default 8)")
     d.add_argument("--limit", type=int, default=30,
                    help="how many roadmap commits to inspect (default 30)")
     d.set_defaults(fn=cmd_due)
