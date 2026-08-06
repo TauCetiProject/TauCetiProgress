@@ -279,7 +279,8 @@ def test_push_target_falls_back_to_a_fork():
     finally:
         apply_mod.gh.gh, apply_mod._run = orig_gh, orig_run
     assert (remote, owner) == ("fork", "someone")
-    assert ["repo", "fork", "TauCetiProject/TauCetiRoadmap", "--clone=false", "--remote=false"] in calls
+    fork_calls = [args for args in calls if args[:2] == ["repo", "fork"]]
+    assert fork_calls == [["repo", "fork", "TauCetiProject/TauCetiRoadmap", "--clone=false"]]
 
 
 # ----- a stranger must not be able to lock a window ---------------------------------------------
