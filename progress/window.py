@@ -97,6 +97,20 @@ def is_ancestor(repo_dir, maybe_ancestor, descendant):
     raise GitError(f"git merge-base failed: {proc.stderr.strip() or proc.returncode}")
 
 
+def has_commit(repo_dir, sha):
+    """Is `sha` an object this checkout actually holds?
+
+    Asked before any ancestry question about a SHA that came from GitHub rather than from git, because
+    `merge-base` does not answer "no" for a commit it has never heard of -- it fails, and a failure
+    here aborts a whole plan. A pull request that merged after the last fetch is exactly that case,
+    and it is ordinary rather than exceptional.
+    """
+    return subprocess.run(
+        ["git", "-C", str(repo_dir), "cat-file", "-e", f"{sha}^{{commit}}"],
+        capture_output=True,
+    ).returncode == 0
+
+
 def window_prs(repo_dir, from_sha, to_sha):
     """PR numbers merged in `(from_sha, to_sha]`, newest first.
 
