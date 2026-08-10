@@ -305,6 +305,29 @@ def test_a_labelled_pr_with_no_number_in_its_subject_fails_closed():
             gh_mod.gh = orig
 
 
+def test_a_merge_commit_this_checkout_never_fetched_is_not_fatal():
+    """Hit for real while verifying this change: a pull request merged between the checkout's last
+    fetch and the plan. `merge-base` FAILS on a commit it has never seen rather than answering "no",
+    and that failure aborted the whole plan — every area — over one freshly merged pull request."""
+    import os, subprocess, tempfile
+    from progress import gh as gh_mod, plan as plan_mod
+    with tempfile.TemporaryDirectory() as d:
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=d, check=True, capture_output=True)
+        for subject in ("root", "feat: ours (#5)"):
+            subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", subject],
+                           cwd=d, check=True, capture_output=True, env=env)
+        assert not window.has_commit(d, "0" * 40)
+        assert window.has_commit(d, window.head_sha(d, ref="main"))
+        orig = gh_mod.gh
+        gh_mod.gh = lambda args, **kw: "0" * 40 + "\n"  # GitHub names a commit we have not fetched
+        try:
+            assert plan_mod.unaccounted_prs(d, [5, 99], ref="main") == []
+        finally:
+            gh_mod.gh = orig
+
+
 def test_a_labelled_pr_merged_after_the_tip_is_not_flagged():
     """Benign: it is not in this history yet, and a later window will cover it."""
     import os, subprocess, tempfile
@@ -367,6 +390,29 @@ def test_an_area_newer_than_the_documented_build_is_skipped_not_fatal():
         assert got["roadmap"] == "Old", got["roadmap"]
         assert got["prs"] == [2, 1], got["prs"]
         assert any("New" in s and "not published yet" in s for s in got["skipped"]), got["skipped"]
+
+
+def test_docs_catching_up_reports_the_waiting_area_with_no_history_stranded():
+    """The skip must defer an area, not drop it. Once the documentation reaches the commit, the same
+    area reports, and its FIRST pull request is inside that first window."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "old: a (#1)", "old: b (#2)", "later", "new: c (#3)"])
+        make_roadmap(roadmap, {"Old": None, "New": None})
+        got = plan_against(code, roadmap, shas[4], {"Old": [1, 2], "New": [3]}, only_area="New")
+        assert got["roadmap"] == "New", got["roadmap"]
+        assert got["prs"] == [3], got["prs"]
+
+
+def test_a_recorded_cursor_ahead_of_the_docs_says_so_plainly():
+    """A cursor written by an earlier report, now ahead of the published build: the documentation
+    rolled back. Skipping is right — a backwards window would be nonsense — but a reader must not be
+    told this is the ordinary "not published yet" case."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)", "c (#3)"])
+        make_roadmap(roadmap, {"Old": files.new_progress_file("Old") + files.render_section(
+            "Old", shas[0], shas[3], [1, 2, 3], "2026-01-01", "prose " * 60)})
+        raises(plan.NotDue, lambda: plan_against(code, roadmap, shas[1], {"Old": [1, 2, 3]}),
+               "went backwards")
 
 
 def test_a_cursor_in_no_history_at_all_is_still_refused():

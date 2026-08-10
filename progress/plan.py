@@ -167,7 +167,11 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
     for number in sorted(set(area_prs) - seen):
         raw = gh.gh(["api", f"repos/{gh.CODE_REPO}/pulls/{int(number)}", "--jq",
                      '.merge_commit_sha // ""']).strip()
-        if raw and window.is_ancestor(repo_dir, raw, ref):
+        # `has_commit` first: a pull request that merged since the last fetch has a merge commit this
+        # checkout has never seen, and asking `merge-base` about it fails rather than answering "no" --
+        # which aborted the entire plan, for every area, over one freshly merged pull request. Absent
+        # from the checkout means absent from this history, which is the benign case documented above.
+        if raw and window.has_commit(repo_dir, raw) and window.is_ancestor(repo_dir, raw, ref):
             out.append(number)
     return out
 
@@ -372,10 +376,21 @@ def build_plan(
         if not window.is_ancestor(code_dir, from_sha, to_sha) and window.is_ancestor(
             code_dir, from_sha, tip
         ):
-            skipped.append(
-                f"{area}: its cursor {from_sha[:7]} is newer than the documented build "
-                f"{to_sha[:7]}; the window is not published yet"
-            )
+            # Say WHICH of the two this is. A bootstrapped cursor ahead of the build is ordinary and
+            # resolves itself on the next deploy. A RECORDED one ahead of it means the documentation
+            # went backwards -- a rollback, or a cursor that should never have been written -- and the
+            # two want different reactions from a reader, so they must not share a sentence.
+            if bootstrapped:
+                skipped.append(
+                    f"{area}: its first pull request merged after the documented build "
+                    f"{to_sha[:7]}; the window is not published yet"
+                )
+            else:
+                skipped.append(
+                    f"{area}: its recorded cursor {from_sha[:7]} is AHEAD of the documented build "
+                    f"{to_sha[:7]} — the documentation went backwards, or that cursor is wrong; "
+                    f"waiting rather than reporting a backwards window"
+                )
             continue
 
         # The SHA window is the authority on what belongs in a report, and deliberately the ONLY
