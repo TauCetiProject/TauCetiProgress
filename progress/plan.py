@@ -359,6 +359,25 @@ def build_plan(
             skipped.append(f"{area}: already at {to_sha[:7]}")
             continue
 
+        # An area bootstrapped from a pull request that merged after the documented build has a
+        # cursor ahead of `to_sha`. Nothing is wrong: its window simply has not been published yet,
+        # and a later run closes it once the documentation catches up. Skipping it here rather than
+        # letting `window_prs` refuse is the difference between one area waiting a day and EVERY
+        # area waiting indefinitely -- the exception aborts the whole plan, so a single new roadmap
+        # used to stop all reporting for the fleet until someone read the traceback.
+        #
+        # The refusal itself stays: a cursor that is in neither the documented history nor `ref`'s
+        # is the rewritten-branch case, and that must still be loud, so it falls through to
+        # `area_window` and raises exactly as before.
+        if not window.is_ancestor(code_dir, from_sha, to_sha) and window.is_ancestor(
+            code_dir, from_sha, tip
+        ):
+            skipped.append(
+                f"{area}: its cursor {from_sha[:7]} is newer than the documented build "
+                f"{to_sha[:7]}; the window is not published yet"
+            )
+            continue
+
         # The SHA window is the authority on what belongs in a report, and deliberately the ONLY
         # authority. An earlier version also subtracted every PR number any previous section had
         # claimed, as a guard against a PR being relabelled after it was reported. That made a

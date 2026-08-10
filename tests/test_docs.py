@@ -8,6 +8,7 @@ silently extracting nothing would mean reports that quietly stop naming results.
 import json
 import pathlib
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -28,14 +29,21 @@ def check(name, fn):
         print(f"ok   {name}")
 
 
-def make(pages, cache=None):
-    """A Docs whose transport serves canned responses and never touches the network."""
+def make(pages, cache=None, ttl=None, fetched=None):
+    """A Docs whose transport serves canned responses and never touches the network.
+
+    `fetched` collects the site-relative paths that actually reached the transport, so a test can
+    assert a cache hit or miss rather than inferring one from the content.
+    """
     def opener(url):
         rel = url.split("/docs/", 1)[1]
+        if fetched is not None:
+            fetched.append(rel)
         if rel not in pages:
             raise DocsError(f"no such page: {rel}")
         return pages[rel]
-    return Docs(base="https://example.test/docs", cache_dir=cache or "/nonexistent", opener=opener)
+    return Docs(base="https://example.test/docs", cache_dir=cache or "/nonexistent",
+                opener=opener, ttl=ttl)
 
 
 PAGE = (FIXTURES / "module-page.html").read_text(encoding="utf-8")
@@ -98,6 +106,45 @@ def test_markup_that_stops_matching_is_visible():
     d = make({"p.html": '<div class="decl" id="A.b"><span class="decl_kind">theorem</span></div>'})
     got = d.declarations("p.html")
     assert got["A.b"]["start"] is None and got["A.b"]["commit"] is None, got
+
+
+# ----- the disk cache expires ------------------------------------------------------------------
+
+
+def test_a_fresh_cache_entry_is_reused():
+    with tempfile.TemporaryDirectory() as tmp:
+        fetched = []
+        make({"p.html": "one"}, cache=tmp, fetched=fetched)._get("p.html")
+        make({"p.html": "two"}, cache=tmp, fetched=fetched)._get("p.html")
+        # Second reader is a different process's worth of state; it must not refetch.
+        assert fetched == ["p.html"], fetched
+
+
+def test_an_expired_cache_entry_is_refetched_and_replaced():
+    """The outage this prevents: an index cached days earlier pinned `source_commit()` to a build
+    that had long since been superseded, and every window `plan` could close ended there."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fetched = []
+        first = make({"p.html": "one"}, cache=tmp, ttl=0, fetched=fetched)
+        assert first._get("p.html") == "one"
+        second = make({"p.html": "two"}, cache=tmp, ttl=0, fetched=fetched)
+        assert second._get("p.html") == "two", "a stale entry must not be served"
+        assert fetched == ["p.html", "p.html"], fetched
+        # The refetch replaced the stale bytes rather than accumulating beside them.
+        assert (pathlib.Path(tmp) / "p.html").read_text(encoding="utf-8") == "two"
+
+
+def test_one_run_stays_on_one_build_however_short_the_ttl():
+    """Within a run the in-process memo is the authority, so an expiry landing mid-run cannot mix
+    two builds into a single report."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pages = {"p.html": "one"}
+        fetched = []
+        d = make(pages, cache=tmp, ttl=0, fetched=fetched)
+        assert d._get("p.html") == "one"
+        pages["p.html"] = "two"
+        assert d._get("p.html") == "one", "a run must not change build under itself"
+        assert fetched == ["p.html"], fetched
 
 
 for _name, _fn in sorted(globals().items()):

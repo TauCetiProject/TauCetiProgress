@@ -29,11 +29,27 @@ import json
 import os
 import pathlib
 import re
+import time
 import urllib.error
 import urllib.request
 
 DOCS_BASE = "https://taucetiproject.github.io/TauCeti/docs"
 INDEX_PATH = "declarations/declaration-data.bmp"
+
+# How long a cached page may be reused across runs.
+#
+# The site is static within one build but the builds keep coming, so a cache with no expiry pins
+# every later run to whichever build it first saw. That is not hypothetical: a worker's
+# `/tmp/tauceti-docs-cache` held an index from five days earlier, `source_commit()` therefore
+# returned a five-day-old commit, and every window `plan` could close ended there. An area whose
+# first pull request merged after that commit then had a cursor outside the documented history, and
+# the whole plan aborted -- so no progress report was written at all until someone deleted the
+# directory by hand.
+#
+# An hour is far shorter than the deploy cadence and far longer than a single run, so the cache
+# still does its actual job (one bootstrap reads hundreds of module pages) while never outliving
+# the build it describes by more than a deploy or two.
+DOCS_CACHE_TTL = int(os.environ.get("TAUCETI_DOCS_TTL", "3600"))
 
 # `<div class="decl" id="Full.Name">` opens a declaration; the `gh_link` inside it names the commit,
 # file and lines. Both are doc-gen4's own markup, so this is reading a published format rather than
@@ -52,11 +68,12 @@ class DocsError(RuntimeError):
 class Docs:
     """A cached reader for one published documentation site."""
 
-    def __init__(self, base=DOCS_BASE, cache_dir=None, opener=None):
+    def __init__(self, base=DOCS_BASE, cache_dir=None, opener=None, ttl=None):
         self.base = base.rstrip("/")
         self.cache_dir = pathlib.Path(
             cache_dir or os.environ.get("TAUCETI_DOCS_CACHE") or "/tmp/tauceti-docs-cache"
         )
+        self.ttl = DOCS_CACHE_TTL if ttl is None else ttl
         self._opener = opener or self._fetch
         self._index = None
         self._pages = {}
@@ -71,16 +88,25 @@ class Docs:
         except urllib.error.URLError as exc:
             raise DocsError(f"fetching {url} failed: {exc}") from exc
 
+    def _fresh(self, path):
+        """Is a cached file young enough to reuse? A missing or unreadable one never is."""
+        try:
+            return (time.time() - path.stat().st_mtime) < self.ttl
+        except OSError:
+            return False
+
     def _get(self, rel):
         """Fetch `rel` relative to the docs root, memoised in process and on disk.
 
-        The published site is static, so caching is safe within a run; the cache is keyed by URL and
-        is purely an optimisation for the bootstrap case, which reads many module pages.
+        The published site is static *for one build*, so the in-process memo makes a run
+        self-consistent; the disk cache is keyed by URL and is an optimisation for the bootstrap
+        case, which reads many module pages. It expires after `ttl` because the site itself does
+        not stand still -- see DOCS_CACHE_TTL for the outage that taught us.
         """
         if rel in self._pages:
             return self._pages[rel]
         path = self.cache_dir / rel.replace("/", "__")
-        if path.is_file():
+        if path.is_file() and self._fresh(path):
             text = path.read_text(encoding="utf-8")
         else:
             text = self._opener(f"{self.base}/{rel}")

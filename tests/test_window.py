@@ -323,6 +323,75 @@ def test_a_labelled_pr_merged_after_the_tip_is_not_flagged():
         finally:
             gh_mod.gh = orig
 
+
+# ----- an area ahead of the published documentation --------------------------------------------
+
+
+def make_roadmap(root, areas):
+    """A roadmap checkout: `{area: progress_text_or_None}` under `TauCetiRoadmap/`."""
+    for area, progress_text in areas.items():
+        d = pathlib.Path(root) / "TauCetiRoadmap" / area
+        d.mkdir(parents=True)
+        (d / "README.md").write_text(f"# {area}\n", encoding="utf-8")
+        if progress_text is not None:
+            (d / "PROGRESS.md").write_text(progress_text, encoding="utf-8")
+
+
+def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, **kw):
+    """`build_plan` with the network stubbed: a fixed documented build and fixed area labels."""
+    from progress import gh as gh_mod, plan as plan_mod
+    orig_docs, orig_labels = plan_mod.docs_source_commit, gh_mod.merged_prs_for_area
+    plan_mod.docs_source_commit = lambda: docs_sha
+    gh_mod.merged_prs_for_area = lambda area, **_: list(area_prs.get(area, []))
+    try:
+        return plan_mod.build_plan(
+            roadmap_dir, code_dir,
+            commits=[{"commit": {"committedDate": "2026-01-01T00:00:00Z"},
+                      "messageHeadline": "progress: X (2026-01-01)"}],
+            open_prs=[], ref="main", min_prs=1, **kw)
+    finally:
+        plan_mod.docs_source_commit, gh_mod.merged_prs_for_area = orig_docs, orig_labels
+
+
+def test_an_area_newer_than_the_documented_build_is_skipped_not_fatal():
+    """The outage this prevents: a roadmap whose first pull request merged after the last
+    documentation deploy bootstraps to a cursor ahead of `to_sha`. `window_prs` refuses on that,
+    and the exception aborted the WHOLE plan -- so one new roadmap stopped every area's reporting
+    until a human read the traceback. The new area waits; the others must still be reportable."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "old: a (#1)", "old: b (#2)", "later", "new: c (#3)"])
+        make_roadmap(roadmap, {"Old": None, "New": None})
+        # The documentation was built at shas[2]. New bootstraps to the parent of #3's merge,
+        # shas[3], which is newer than that -- exactly the shape a roadmap added this week has.
+        got = plan_against(code, roadmap, shas[2], {"Old": [1, 2], "New": [3]})
+        assert got["roadmap"] == "Old", got["roadmap"]
+        assert got["prs"] == [2, 1], got["prs"]
+        assert any("New" in s and "not published yet" in s for s in got["skipped"]), got["skipped"]
+
+
+def test_a_cursor_in_no_history_at_all_is_still_refused():
+    """The skip is narrow on purpose. A cursor that is in neither the documented history nor the
+    branch is the rewritten-branch case, and staying loud there is the whole point of the check."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)"])
+        # A commit off the mainline: reachable as an object, on no branch. That is what a cursor
+        # written before a rewrite looks like, and it is an ancestor of nothing we report from.
+        subprocess.run(["git", "-C", code, "checkout", "-q", "--detach", shas[0]],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", code, "commit", "-q", "--allow-empty", "-m", "rewritten (#9)"],
+                       check=True, capture_output=True,
+                       env={**os.environ, "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@e",
+                            "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@e"})
+        orphan = window.git(["rev-parse", "HEAD"], code).strip()
+        subprocess.run(["git", "-C", code, "checkout", "-q", "main"], check=True, capture_output=True)
+        # The cursor is the newest section's `to_sha`, and this one names history we cannot reach.
+        make_roadmap(roadmap, {"Old": files.new_progress_file("Old") + files.render_section(
+            "Old", shas[0], orphan, [1], "2026-01-01", "prose " * 60)})
+        raises(window.GitError,
+               lambda: plan_against(code, roadmap, shas[2], {"Old": [1, 2]}),
+               "not an ancestor")
+
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)
