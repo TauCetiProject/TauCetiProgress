@@ -193,6 +193,31 @@ def test_message_is_capped():
     assert "truncated" in msg
 
 
+def test_message_unwraps_prose_around_documentation_links():
+    header, _ = announce.split_section(make_section())
+    link = "[each other's centralizers](https://example.org/GeneralLinear.html#TauCeti.centralizer)"
+    prose = f"The two images are\n{link},\nso the actions commute\n(TauCeti#5980)."
+    msg = announce.render_message(header, prose)
+    assert f"The two images are {link}, so the actions commute (TauCeti#5980)." in msg
+    assert "\n" + link not in msg
+
+
+def test_unwrap_prose_preserves_paragraphs_and_inline_markup():
+    prose = "First `inline code`\n  and **bold**.\n \t\nSecond [result](https://example.org/#result)\nlanded."
+    expected = "First `inline code` and **bold**.\n\nSecond [result](https://example.org/#result) landed."
+    assert announce.unwrap_prose(prose) == expected
+    assert announce.unwrap_prose(expected) == expected
+    assert announce.unwrap_prose("") == ""
+
+
+def test_unwrapped_message_still_defuses_mentions_and_keeps_footer_separate():
+    header, _ = announce.split_section(make_section())
+    msg = announce.render_message(header, "See\n@all and #1234.\n\nNext paragraph.")
+    assert "See @" + zulip.ZWSP + "all and #" + zulip.ZWSP + "1234." in msg
+    assert "\n\nNext paragraph.\n\n[Full progress log]" in msg
+    assert "\n" + announce.ID_PREFIX + announce.section_id(header) in msg
+
+
 def test_already_posted_requires_an_exact_id_match():
     """Zulip search is word-based, so a near match must not count as already-announced."""
     sid = "PDE-aaaaaaa-bbbbbbb"
