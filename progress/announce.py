@@ -58,6 +58,20 @@ def roadmap_file_url(area, filename, parent="TauCetiRoadmap"):
     return f"https://github.com/TauCetiProject/TauCetiRoadmap/blob/main/{parent}/{area}/{filename}"
 
 
+def unwrap_prose(prose):
+    """Join source-wrapped lines in the progress report's plain prose paragraphs.
+
+    The progress prompt requests paragraphs, not lists or other Markdown blocks. GitHub treats
+    their single newlines as spaces, but Zulip renders them as hard breaks. Long documentation
+    links often occupy a source line of their own, so copying the source verbatim breaks a sentence
+    before and after every link. Keep blank-line paragraph boundaries and inline markup intact.
+    """
+    return "\n\n".join(
+        " ".join(line.strip() for line in paragraph.splitlines())
+        for paragraph in re.split(r"\n(?:[ \t]*\n)+", prose.strip())
+    )
+
+
 def render_message(header, prose, roadmap_url=None, status_url=None, roadmap_parent="TauCetiRoadmap"):
     """The Zulip message for one section.
 
@@ -67,7 +81,7 @@ def render_message(header, prose, roadmap_url=None, status_url=None, roadmap_par
     """
     area = header["roadmap"]
     prs = header["prs"]
-    body = zulip.sanitize(prose)
+    body = zulip.sanitize(unwrap_prose(prose))
     if len(body) > MAX_MESSAGE_CHARS:
         body = body[:MAX_MESSAGE_CHARS].rsplit("\n", 1)[0] + "\n\n(truncated; the full section is in `PROGRESS.md`)"
     progress_link = roadmap_url or roadmap_file_url(area, "PROGRESS.md", roadmap_parent)

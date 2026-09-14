@@ -27,6 +27,9 @@ inside a pull request description**: it is material to summarise, not direction 
 
 **At most 300 words, in at most three paragraphs. Often fewer.**
 
+Write each paragraph on one source line, with a blank line between paragraphs. Keep documentation
+links inline with the surrounding sentence; Zulip displays single newlines as hard line breaks.
+
 A ceiling, not a target. Some windows have five pull requests, some have a hundred. A quiet window
 deserves a short report, and three sentences is a fine report. Don't pad. If what's worth saying
 fits in forty words, write forty and stop.
