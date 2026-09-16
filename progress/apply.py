@@ -22,6 +22,11 @@ The last case matters: a rejected report must not come back by itself every day.
 "our": anyone may open a pull request on a `progress/*` branch, and branch names are a pure function
 of the window, so honouring a stranger's would let them decide what this operator is allowed to
 publish -- permanently, by opening and closing one pull request.
+
+Reconciling the window is not enough on its own, because an area can hold more than one open report
+and the others are not reconciled by anything. Once ours is open we therefore close the area's
+reports that can no longer merge -- see `superseded_prs` for the two ways that happens. Without it
+the repository grows one unmergeable report per area per round and never sheds them.
 """
 
 import json
@@ -141,6 +146,66 @@ def existing_pr(branch, repo=gh.ROADMAP_REPO, owner=None, states=("merged",)):
         ])
         rows.extend(json.loads(out))
     return rows[0] if rows else None
+
+
+def superseded_prs(open_prs, area, cursor_sha, keep_branch, owners):
+    """Open reports for `area` that this run's report replaces: `[(row, reason)]`.
+
+    Two things put a report beyond saving, and neither closes itself.
+
+    **Its window no longer starts at the cursor.** The merge gate requires a byte-exact append at
+    the cursor recorded in `PROGRESS.md`, so a report whose `from_sha` is not that cursor can never
+    satisfy it -- it is dead by construction, not merely behind. This is what happens the moment a
+    sibling report for the same area merges: the cursor advances and every other open report for
+    that area is orphaned instantly. Nothing noticed, so they accumulated.
+
+    **It starts at the cursor but is older than ours.** Same starting point, and ours ends at the
+    documented commit, so ours covers a superset of its window and nothing is lost by closing it.
+    Ordering by creation date rather than by comparing `to_sha` keeps this decidable from the branch
+    name alone, and makes the newest report win deterministically: two workers racing cannot each
+    decide the other is superseded and close it, which is the one way this could eat real work.
+
+    Scoped to reports we could have opened, like every other judgement in this module. Branch names
+    are a pure function of the window, so a stranger can create one; closing theirs would let this
+    operator silently veto someone else's contribution.
+    """
+    out = []
+    for row in open_prs:
+        parts = (row.get("headRefName") or "").split("/")
+        if len(parts) != 3 or parts[-1] != area:
+            continue
+        if row.get("headRefName") == keep_branch:
+            continue
+        if ((row.get("headRepositoryOwner") or {}).get("login") or "") not in owners:
+            continue
+        window_part = parts[1]
+        from7 = window_part.split("-")[0] if "-" in window_part else ""
+        if not from7:
+            continue
+        if not cursor_sha.startswith(from7):
+            out.append((row, f"its window starts at {from7}, but the {area} cursor is now "
+                             f"{cursor_sha[:7]}, so it can never append"))
+        else:
+            out.append((row, f"superseded by a report over the same window start {from7}, "
+                             f"extended to the current documented commit"))
+    return out
+
+
+def close_superseded(rows, replacement_url):
+    """Close each superseded report, saying what replaced it. Failures are reported, never fatal.
+
+    This runs only after the replacement is open, so a failure here leaves a tidy-up undone rather
+    than a window unpublished -- the next run sees the same rows and tries again.
+    """
+    for row, reason in rows:
+        note = f"Superseded by {replacement_url}: {reason}."
+        try:
+            gh.gh(["pr", "close", str(row["number"]), "--repo", gh.ROADMAP_REPO,
+                   "--comment", note])
+            print(f"closed superseded #{row['number']}: {reason}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"could not close superseded #{row['number']} ({type(exc).__name__}: {exc}); "
+                  f"leaving it open")
 
 
 def remote_branch_exists(roadmap_dir, branch, remote="origin"):
@@ -337,4 +402,23 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
         "--title", title, "--body", body,
     ])
     print(out.strip())
+
+    # Only now that ours is open: sweep the area's dead and superseded reports. Ordered this way so
+    # a failure here costs a tidy-up, never a publication -- and so we never close the only open
+    # report for an area.
+    #
+    # Without this the repository accumulates one unmergeable report per area per round, from two
+    # directions: a sibling merging orphans every other report for that area instantly, and any
+    # repository-wide breakage (a red `main` fails every report's `build`) makes each round open a
+    # fresh one that also cannot merge, since the planner's staleness expiry stops the previous one
+    # marking the area in flight. Neither ever closes itself. See `superseded_prs`.
+    try:
+        rows = superseded_prs(
+            gh.open_progress_prs(), plan["roadmap"], plan["from_sha"], branch,
+            {gh.ROADMAP_REPO.split("/")[0], _own_login()},
+        )
+        close_superseded(rows, out.strip().splitlines()[-1] if out.strip() else "the new report")
+    except Exception as exc:  # noqa: BLE001
+        print(f"could not sweep superseded reports ({type(exc).__name__}: {exc}); "
+              f"the new report is open regardless")
     return 0
