@@ -148,37 +148,70 @@ def existing_pr(branch, repo=gh.ROADMAP_REPO, owner=None, states=("merged",)):
     return rows[0] if rows else None
 
 
-def superseded_prs(open_prs, area, cursor_sha, keep_branch, owners, our_number=None):
+def report_meta(body):
+    """The `tauceti-progress-pr:v1` metadata a report carries in its body, or None.
+
+    `pr_body` writes `from_sha`, `to_sha` and the window's PR numbers there, so a sibling states its
+    own window exactly rather than in the seven-character abbreviations of a branch name. That is
+    what makes a containment test possible without a TauCeti clone.
+
+    The body is mutable and anyone may edit it, so nothing here is trusted for a decision that could
+    destroy work: the caller only ever uses it to prove that a report covers LESS than ours, and a
+    forged wider claim merely spares a report from being closed.
+    """
+    marker = BODY_MARKER.split("{}")[0]
+    for line in (body or "").splitlines():
+        line = line.strip()
+        if not line.startswith(marker):
+            continue
+        blob = line[len(marker):]
+        blob = blob[:blob.rfind("-->")] if "-->" in blob else blob
+        try:
+            meta = json.loads(blob)
+        except json.JSONDecodeError:
+            return None
+        return meta if isinstance(meta, dict) else None
+    return None
+
+
+def superseded_prs(open_prs, area, live_cursor, plan_cursor, keep_branch, owners, our_prs=None):
     """Open reports for `area` that this run's report replaces: `[(row, reason)]`.
 
-    Two things put a report beyond saving, and neither closes itself.
+    **Nothing is swept unless we are the live report.** `live_cursor` is read from the roadmap
+    repository now; `plan_cursor` is where the cursor was when this run planned. If they differ, a
+    sibling landed in between and it is OUR report that is dead, not anyone else's. Sweeping then
+    inverts the rule below and closes the one report that can still merge, so the answer is to sweep
+    nothing and let the next round reconcile.
 
-    **Its window no longer starts at the cursor.** The merge gate requires a byte-exact append at
-    the cursor recorded in `PROGRESS.md`, so a report whose `from_sha` is not that cursor can never
-    satisfy it -- it is dead by construction, not merely behind. This is what happens the moment a
-    sibling report for the same area merges: the cursor advances and every other open report for
-    that area is orphaned instantly. Nothing noticed, so they accumulated. Being dead is a property
-    of the report alone, so this case needs no comparison with ours and applies whatever `our_number`
-    is.
+    Given that, two things put a report beyond saving, and neither closes itself.
 
-    **It starts at the cursor but is older than ours.** Same starting point, and ours ends at the
-    documented commit, so ours covers a superset of its window and nothing is lost by closing it.
+    **Its window no longer starts at the cursor.** The merge gate requires a byte-exact append at the
+    cursor recorded in `PROGRESS.md`, so a report whose `from_sha` is not that cursor can never
+    satisfy it -- dead by construction, not merely behind. This is what happens the moment a sibling
+    for the same area merges: the cursor advances and every other open report is orphaned instantly.
+    Nothing noticed, so they accumulated.
 
-    "Older" is decided by PULL REQUEST NUMBER, which GitHub allocates monotonically per repository.
-    A timestamp would not do: two workers can stamp the same second, and a clock that runs backwards
-    would invert the order. The number gives a total order with no clock in it, so the higher-numbered
-    report always wins and two workers racing can never each conclude the other is superseded and
-    close it -- which is the one way this could eat real work. A sibling numbered above ours therefore
-    supersedes US, and is left alone for its own sweep to reconcile.
+    **It starts at the cursor and we cover everything it covers.** Proved, not inferred: same
+    `from_sha`, and its window's PR numbers are a proper subset of ours. Creation order will not do
+    this job. A worker that planned early and stalled creates a NARROW report late, so "newest wins"
+    would close a wider report and lose coverage that had already been written; and neither a
+    timestamp nor a pull request number says anything about which window contains which. Containment
+    is antisymmetric, so two workers racing cannot each conclude the other is dominated, and the
+    stalled-worker case resolves correctly whichever of them opens first.
 
-    Without a readable `our_number` no same-cursor report is closed at all. Closing one then would be
-    asserting an order we cannot establish, and the cost of being wrong (discarding a live report) is
-    far worse than the cost of leaving a duplicate for the next round.
+    A sibling whose window is incomparable to ours is left alone. So is every report, if `our_prs` is
+    unknown: closing then would assert a containment we have not established, and a duplicate left
+    for the next round is far cheaper than a report discarded.
 
     Scoped to reports we could have opened, like every other judgement in this module. Branch names
     are a pure function of the window, so a stranger can create one; closing theirs would let this
-    operator silently veto someone else's contribution.
+    operator silently veto someone else's contribution. The cost is real and worth naming: reports
+    published from another operator's fork are never swept, so this does not by itself eliminate a
+    multi-operator pile-up.
     """
+    if not live_cursor or not plan_cursor or live_cursor != plan_cursor:
+        return []
+    ours = set(our_prs) if our_prs is not None else None
     out = []
     for row in open_prs:
         parts = (row.get("headRefName") or "").split("/")
@@ -188,55 +221,67 @@ def superseded_prs(open_prs, area, cursor_sha, keep_branch, owners, our_number=N
             continue
         if ((row.get("headRepositoryOwner") or {}).get("login") or "") not in owners:
             continue
-        window_part = parts[1]
-        from7 = window_part.split("-")[0] if "-" in window_part else ""
+        from7 = parts[1].split("-")[0] if "-" in parts[1] else ""
         if not from7:
             continue
-        if not cursor_sha.startswith(from7):
+        if not live_cursor.startswith(from7):
             out.append((row, f"its window starts at {from7}, but the {area} cursor is now "
-                             f"{cursor_sha[:7]}, so it can never append"))
+                             f"{live_cursor[:7]}, so it can never append"))
             continue
-        if our_number is None:
+        if ours is None:
+            continue
+        meta = report_meta(row.get("body"))
+        if not meta or meta.get("from_sha") != live_cursor:
             continue
         try:
-            number = int(row.get("number"))
+            theirs = {int(n) for n in (meta.get("prs") or [])}
         except (TypeError, ValueError):
             continue
-        if number < int(our_number):
-            out.append((row, f"superseded by #{our_number}, which starts at the same cursor "
-                             f"{from7} and runs to the current documented commit"))
+        if theirs < ours:
+            out.append((row, f"its window covers {len(theirs)} of the {len(ours)} pull requests "
+                             f"this one reports, from the same cursor {from7}"))
     return out
 
 
-def pr_number_from_url(text):
-    """The pull request number in `gh pr create`'s output, or None if it cannot be read.
-
-    `gh` prints the URL of the pull request it made, so the trailing path segment is the number.
-    Returning None rather than guessing matters: the caller treats an unknown number as "cannot
-    establish an order" and closes nothing on that basis.
-    """
-    for line in reversed((text or "").strip().splitlines()):
-        tail = line.strip().rstrip("/").rsplit("/", 1)[-1]
-        if tail.isdigit():
-            return int(tail)
-    return None
-
-
 def close_superseded(rows, replacement_url):
-    """Close each superseded report, saying what replaced it. Failures are reported, never fatal.
+    """Close each superseded report, saying what replaced it. Returns the number that failed.
 
-    This runs only after the replacement is open, so a failure here leaves a tidy-up undone rather
-    than a window unpublished -- the next run sees the same rows and tries again.
+    A failure here is never fatal -- this only runs once the replacement is open, so the window is
+    published either way -- but it is returned rather than swallowed, because the caller has to keep
+    retrying. `sweep` is what makes that retry actually happen.
     """
+    failed = 0
     for row, reason in rows:
         note = f"Superseded by {replacement_url}: {reason}."
         try:
             gh.gh(["pr", "close", str(row["number"]), "--repo", gh.ROADMAP_REPO,
                    "--comment", note])
             print(f"closed superseded #{row['number']}: {reason}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"could not close superseded #{row['number']} ({type(exc).__name__}: {exc}); "
-                  f"leaving it open")
+        except gh.GhError as exc:
+            failed += 1
+            print(f"could not close superseded #{row['number']} ({exc}); leaving it open")
+    return failed
+
+
+def sweep(plan, keep_branch, replacement_url):
+    """Close the area's stranded reports. Safe to call whenever our report is open.
+
+    Idempotent and deliberately reachable from BOTH paths in `run` -- the one that has just opened
+    the report and the one that finds it already open. That is not tidiness: a sweep that only ran
+    on the create path would never be retried at all, because the next run for the same window stops
+    at the in-flight check long before reaching it. A cleanup outage would then leave the pile-up
+    forever while every run reported success.
+
+    Only `gh` failures are caught. A parsing or programming error here is a bug and must surface.
+    """
+    live = files.cursor(gh.file_on_default_branch(plan["progress_path"]) or "") or ""
+    rows = superseded_prs(
+        gh.open_progress_prs(), plan["roadmap"], live, plan["from_sha"], keep_branch,
+        {gh.ROADMAP_REPO.split("/")[0], _own_login()}, our_prs=plan.get("prs"),
+    )
+    if not rows:
+        return 0
+    return close_superseded(rows, replacement_url)
 
 
 def remote_branch_exists(roadmap_dir, branch, remote="origin"):
@@ -344,6 +389,12 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
     open_pr = own_pr(branch, states=("open",))
     if open_pr is not None:
         print(f"already open, in flight: {open_pr['url']}")
+        # Sweep here too. This is the path every run after the first takes, so it is the only one
+        # that can retry a sweep an earlier run failed or never reached.
+        try:
+            sweep(plan, branch, open_pr.get("url") or "the open report")
+        except gh.GhError as exc:
+            print(f"could not sweep superseded reports ({exc}); the report is open regardless")
         return EX_NOPROGRESS
 
     # A CLOSED pull request means this window was refused, and reopening it every day is the loop
@@ -444,13 +495,7 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
     # fresh one that also cannot merge, since the planner's staleness expiry stops the previous one
     # marking the area in flight. Neither ever closes itself. See `superseded_prs`.
     try:
-        rows = superseded_prs(
-            gh.open_progress_prs(), plan["roadmap"], plan["from_sha"], branch,
-            {gh.ROADMAP_REPO.split("/")[0], _own_login()},
-            our_number=pr_number_from_url(out),
-        )
-        close_superseded(rows, out.strip().splitlines()[-1] if out.strip() else "the new report")
-    except Exception as exc:  # noqa: BLE001
-        print(f"could not sweep superseded reports ({type(exc).__name__}: {exc}); "
-              f"the new report is open regardless")
+        sweep(plan, branch, out.strip().splitlines()[-1] if out.strip() else "the new report")
+    except gh.GhError as exc:
+        print(f"could not sweep superseded reports ({exc}); the new report is open regardless")
     return 0
