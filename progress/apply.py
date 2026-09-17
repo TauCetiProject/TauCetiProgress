@@ -148,7 +148,7 @@ def existing_pr(branch, repo=gh.ROADMAP_REPO, owner=None, states=("merged",)):
     return rows[0] if rows else None
 
 
-def superseded_prs(open_prs, area, cursor_sha, keep_branch, owners):
+def superseded_prs(open_prs, area, cursor_sha, keep_branch, owners, our_number=None):
     """Open reports for `area` that this run's report replaces: `[(row, reason)]`.
 
     Two things put a report beyond saving, and neither closes itself.
@@ -157,13 +157,23 @@ def superseded_prs(open_prs, area, cursor_sha, keep_branch, owners):
     the cursor recorded in `PROGRESS.md`, so a report whose `from_sha` is not that cursor can never
     satisfy it -- it is dead by construction, not merely behind. This is what happens the moment a
     sibling report for the same area merges: the cursor advances and every other open report for
-    that area is orphaned instantly. Nothing noticed, so they accumulated.
+    that area is orphaned instantly. Nothing noticed, so they accumulated. Being dead is a property
+    of the report alone, so this case needs no comparison with ours and applies whatever `our_number`
+    is.
 
     **It starts at the cursor but is older than ours.** Same starting point, and ours ends at the
     documented commit, so ours covers a superset of its window and nothing is lost by closing it.
-    Ordering by creation date rather than by comparing `to_sha` keeps this decidable from the branch
-    name alone, and makes the newest report win deterministically: two workers racing cannot each
-    decide the other is superseded and close it, which is the one way this could eat real work.
+
+    "Older" is decided by PULL REQUEST NUMBER, which GitHub allocates monotonically per repository.
+    A timestamp would not do: two workers can stamp the same second, and a clock that runs backwards
+    would invert the order. The number gives a total order with no clock in it, so the higher-numbered
+    report always wins and two workers racing can never each conclude the other is superseded and
+    close it -- which is the one way this could eat real work. A sibling numbered above ours therefore
+    supersedes US, and is left alone for its own sweep to reconcile.
+
+    Without a readable `our_number` no same-cursor report is closed at all. Closing one then would be
+    asserting an order we cannot establish, and the cost of being wrong (discarding a live report) is
+    far worse than the cost of leaving a duplicate for the next round.
 
     Scoped to reports we could have opened, like every other judgement in this module. Branch names
     are a pure function of the window, so a stranger can create one; closing theirs would let this
@@ -185,10 +195,31 @@ def superseded_prs(open_prs, area, cursor_sha, keep_branch, owners):
         if not cursor_sha.startswith(from7):
             out.append((row, f"its window starts at {from7}, but the {area} cursor is now "
                              f"{cursor_sha[:7]}, so it can never append"))
-        else:
-            out.append((row, f"superseded by a report over the same window start {from7}, "
-                             f"extended to the current documented commit"))
+            continue
+        if our_number is None:
+            continue
+        try:
+            number = int(row.get("number"))
+        except (TypeError, ValueError):
+            continue
+        if number < int(our_number):
+            out.append((row, f"superseded by #{our_number}, which starts at the same cursor "
+                             f"{from7} and runs to the current documented commit"))
     return out
+
+
+def pr_number_from_url(text):
+    """The pull request number in `gh pr create`'s output, or None if it cannot be read.
+
+    `gh` prints the URL of the pull request it made, so the trailing path segment is the number.
+    Returning None rather than guessing matters: the caller treats an unknown number as "cannot
+    establish an order" and closes nothing on that basis.
+    """
+    for line in reversed((text or "").strip().splitlines()):
+        tail = line.strip().rstrip("/").rsplit("/", 1)[-1]
+        if tail.isdigit():
+            return int(tail)
+    return None
 
 
 def close_superseded(rows, replacement_url):
@@ -416,6 +447,7 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
         rows = superseded_prs(
             gh.open_progress_prs(), plan["roadmap"], plan["from_sha"], branch,
             {gh.ROADMAP_REPO.split("/")[0], _own_login()},
+            our_number=pr_number_from_url(out),
         )
         close_superseded(rows, out.strip().splitlines()[-1] if out.strip() else "the new report")
     except Exception as exc:  # noqa: BLE001
