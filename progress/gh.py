@@ -13,6 +13,7 @@ Two design points worth stating, because both were defects in an earlier draft:
   right now".
 """
 
+import base64
 import json
 import subprocess
 import time
@@ -140,7 +141,24 @@ def open_progress_prs(repo=ROADMAP_REPO, branch_prefix="progress/"):
     out = gh([
         "pr", "list", "--repo", repo, "--state", "open",
         "--limit", "200", "--json",
-        "number,headRefName,title,url,createdAt,headRepositoryOwner",
+        "number,headRefName,title,url,createdAt,headRepositoryOwner,body",
     ])
     rows = json.loads(out)
     return [r for r in rows if (r.get("headRefName") or "").startswith(branch_prefix)]
+
+
+def file_on_default_branch(path, repo=ROADMAP_REPO, ref="main"):
+    """The text of `path` on `ref`, or None if it is not there.
+
+    Read through the API rather than from a clone on purpose. A worker's checkout is a snapshot from
+    whenever it started, and the questions this answers -- where is the cursor NOW, is this report
+    still the live one -- are exactly the ones a stale snapshot gets wrong.
+    """
+    try:
+        raw = gh(["api", f"repos/{repo}/contents/{path}?ref={ref}", "--jq", ".content"])
+    except GhError:
+        return None
+    try:
+        return base64.b64decode("".join(raw.split())).decode("utf-8", "surrogateescape")
+    except (ValueError, UnicodeDecodeError):
+        return None
