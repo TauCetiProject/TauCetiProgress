@@ -70,6 +70,46 @@ Wall-clock time is used only for display. A cursor made of timestamps would be w
 clock running fast advances it past PRs whose merge times then fall *before* the stored cursor, and
 those PRs are never reported at all.
 
+## The coverage header
+
+A status snapshot may carry a second machine header beside `tauceti-status:v1`:
+
+```text
+<!--tauceti-status:v1 {"roadmap":"EllipticCurves","to_sha":"…","ts":"…"}-->
+<!--tauceti-coverage:v1 {"layers":[{"id":"Layer 0","remaining":"Weil reciprocity","state":"partial"},{"id":"Layer 1","state":"done"},…],"readme_sha":"…","roadmap":"EllipticCurves","to_sha":"…"}-->
+# Status: EllipticCurves
+```
+
+It is the report's verdict on each layer of the roadmap, in a form a script can read: the prose
+already says which layers are done, partial or untouched, but nothing can aggregate prose across
+forty roadmaps. The consumer is the TauCeti site's Progress page (`scripts/roadmap_progress.py`
+in the TauCeti repository), which shows one strip per roadmap, one segment per layer.
+
+How it is made, following the design rule above that a model only ever writes prose:
+
+- `plan` extracts the roadmap's **layers** from its README (the `Layer` / `Lane` / `Part` /
+  `Stage` headings, or `L0A`-style labels) and records them in the plan with their ids, together
+  with `readme_sha`, a SHA-256 of the README's text. A README with no such headings yields no
+  layers and no header.
+- The writing prompt asks the model to end the status prose with a fenced ```` ```coverage ````
+  block, one line per listed id: `Layer 0: partial — what remains`. The state is one of `done`,
+  `partial`, `untouched`, `unassessed` (the material said nothing), and the optional note after
+  the dash is one line of at most 200 characters.
+- `apply` removes the block from the prose, checks that it names every listed layer exactly once
+  and nothing else, and writes the header. A block that does not fit is refused on the worker; a
+  body with no block gives a report with no header, exactly as before this header existed.
+- The gate treats the header as part of the canonical prefix: it must sit on the line after the
+  status header and nowhere else, name the same roadmap and commit, and pass the closed schema.
+  It has the same standing as the prose it summarises: not security-validated, and the gate proves
+  its shape, never its truth.
+
+`readme_sha` is what binds the assessment to the specification it was made against. Layer ids
+alone do not: a layer's requirements can change under an unchanged heading. The consumer refuses a
+header whose hash does not match the README it read the layers from, and shows those layers as
+unassessed with that reason, rather than applying an old verdict to new requirements. The gate
+cannot check the hash (it never checks out the roadmap repository), which is one more reason the
+header is a claim, not a certificate.
+
 ## Trust boundary
 
 `STATUS.md` and `PROGRESS.md` are **machine-owned, and their prose is not security-validated**.

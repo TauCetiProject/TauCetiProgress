@@ -44,7 +44,8 @@ def raises(fn, needle=None):
 def test_status_round_trip():
     text = files.render_status("ContourIntegration", A, "2026-07-30T11:34:41Z", "Some prose.")
     h = files.parse_status(text)
-    assert h == {"roadmap": "ContourIntegration", "to_sha": A, "ts": "2026-07-30T11:34:41Z"}, h
+    assert h == {"roadmap": "ContourIntegration", "to_sha": A, "ts": "2026-07-30T11:34:41Z",
+                 "coverage": None}, h
     # The standing "may be out of date" note is load-bearing: a reader must not take a snapshot
     # as authoritative about the current tip.
     assert "subsequent updates" in text
@@ -68,6 +69,62 @@ def test_cursor_and_reported_prs():
     log += files.render_section("PDE", B, C, [3], "w2", "y")
     assert files.cursor(log) == C
     assert files.reported_prs(log) == {1, 2, 3}
+
+
+H = "0" * 64
+COV = {"roadmap": "PDE", "to_sha": B, "readme_sha": H,
+       "layers": [{"id": "Lane A", "state": "partial", "remaining": "the trace theorem"},
+                  {"id": "Lane B", "state": "unassessed"}]}
+
+
+def _pair(area="PDE", coverage=None, status_prose=None):
+    """A first update for `area`: (new_status, new_progress) that validate_update accepts."""
+    prose = status_prose or ("Prose about where the roadmap stands, long enough to clear the floor. " * 6)
+    status = files.render_status(area, B, "t", prose, coverage)
+    progress = files.new_progress_file(area) + files.render_section(area, A, B, [1], "w", prose)
+    return status, progress
+
+
+def test_coverage_header_round_trips_and_passes_the_gate():
+    status, progress = _pair(coverage=COV)
+    assert files.parse_status(status)["coverage"] == COV
+    files.validate_update("PDE", None, status, None, progress, expect_from_sha=A)
+    # Without a coverage header the file is exactly what it was before the header existed.
+    plain, progress2 = _pair()
+    assert files.parse_status(plain)["coverage"] is None
+    files.validate_update("PDE", None, plain, None, progress2, expect_from_sha=A)
+
+
+def test_coverage_header_must_fit_the_status_header_and_the_schema():
+    raises(lambda: files.require_coverage(dict(COV, roadmap="ODE"), "PDE", B), "is for ODE")
+    raises(lambda: files.require_coverage(dict(COV, to_sha=A), "PDE", B), "describes")
+    raises(lambda: files.require_coverage(dict(COV, readme_sha="abc"), "PDE", B), "readme_sha")
+    raises(lambda: files.require_coverage(dict(COV, extra=1), "PDE", B), "unknown field")
+    raises(lambda: files.require_coverage({k: v for k, v in COV.items() if k != "readme_sha"}, "PDE", B), "missing field")
+    raises(lambda: files.require_coverage(dict(COV, layers=[]), "PDE", B), "non-empty")
+    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "soon"}]), "PDE", B), "expected one of")
+    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "done"}] * 2), "PDE", B), "twice")
+    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "done", "note": "x"}]), "PDE", B), "unknown field")
+    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "<b>", "state": "done"}]), "PDE", B), "short label")
+    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "done", "remaining": "x --> y"}]), "PDE", B), "angle brackets")
+    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "done", "remaining": "x" * 201}]), "PDE", B), "200")
+    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": f"L{i}", "state": "done"} for i in range(65)]), "PDE", B), "cap")
+
+
+def test_a_coverage_header_anywhere_but_the_prefix_is_refused():
+    status, progress = _pair()
+    header = f"<!--{files.COVERAGE_MARKER} {files.coverage_header(files.require_coverage(COV, 'PDE', B))}-->"
+    # Appended to the prose rather than sitting in the prefix: the shape check sees a prefix built
+    # WITH the parsed coverage and the file does not start with it.
+    raises(lambda: files.validate_update("PDE", None, status.rstrip("\n") + "\n" + header + "\n", None, progress, expect_from_sha=A),
+           "does not begin with the canonical header")
+    # Two of them: refused before shape is even considered.
+    doubled = status.replace("# Status: PDE", header + "\n" + header + "\n# Status: PDE", 1)
+    raises(lambda: files.validate_update("PDE", None, doubled, None, progress, expect_from_sha=A), "at most one")
+    # A coverage header for another commit beside a status header: refused whole.
+    wrong = files.render_status("PDE", B, "t", "x" * 300).replace(
+        "# Status: PDE", f"<!--{files.COVERAGE_MARKER} {files.coverage_header(dict(COV, to_sha=A))}-->\n# Status: PDE", 1)
+    raises(lambda: files.parse_status(wrong), "describes")
 
 
 def test_rejects_bad_shas_and_areas():

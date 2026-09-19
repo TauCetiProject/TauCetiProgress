@@ -18,7 +18,7 @@ import json
 import pathlib
 import re
 
-from . import files, gh, window
+from . import files, gh, layers as layers_mod, window
 from .window import CODE_REF
 
 IDLE_HOURS = 8.0
@@ -90,6 +90,17 @@ def discover_areas(roadmap_dir):
             if child.is_dir() and (child / "README.md").is_file():
                 found[child.name] = f"{prefix}/{child.name}" if prefix else child.name
     return found
+
+
+def read_area_layers(roadmap_dir, rel_dir):
+    """`(layers, readme_sha)` for one area: the README's layer headings and the hash of its text.
+
+    Both go into the plan so the writing model is told exactly which layers to assess, and so the
+    assessment it produces is bound to the README it was made against rather than to whatever
+    README is current when someone reads it.
+    """
+    text = (pathlib.Path(roadmap_dir) / rel_dir / "README.md").read_text(encoding="utf-8")
+    return layers_mod.headings(text), layers_mod.readme_sha(text)
 
 
 def read_area_files(roadmap_dir, rel_dir):
@@ -433,10 +444,13 @@ def build_plan(
             f"{cadence_reason}, but the busiest area ({best['area']}) has only "
             f"{len(best['prs'])} PR(s) in its window (< {min_prs})"
         )
+    area_layers, area_readme_sha = read_area_layers(roadmap_dir, best["rel_dir"])
 
     return {
         "roadmap": best["area"],
         "rel_dir": best["rel_dir"],
+        "layers": area_layers,
+        "readme_sha": area_readme_sha,
         "from_sha": best["from_sha"],
         "to_sha": to_sha,
         "prs": best["prs"],

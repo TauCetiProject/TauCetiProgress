@@ -5,7 +5,12 @@
 
 Both carry a machine-readable HTML-comment header followed by prose, following the
 `tauceti-<kind>:v1 {json}` convention the rest of the project already uses for scoreboards and
-target markers.
+target markers. A `STATUS.md` may carry a second header, `tauceti-coverage:v1`: the report's
+verdict on each layer of the roadmap (done, partial, untouched, or unassessed when the material
+says nothing), with what remains, in a form a script can read. Its prose says the same things;
+the marker exists so that forty roadmaps' worth of them can be put on one page (the TauCeti site's
+Progress page) without a person re-reading every report. It has exactly the standing of the prose
+beside it: a model's account, not security-validated, and never a claim Lean has checked.
 
 Everything here is pure: it takes and returns text, touches no network and no filesystem. That
 matters because the merge gate in CI runs these same functions on an untrusted PR's blobs, and it
@@ -20,6 +25,7 @@ import re
 # inside its prose, so bumping a version here is a coordinated change with the gate.
 STATUS_MARKER = "tauceti-status:v1"
 PROGRESS_MARKER = "tauceti-progress:v1"
+COVERAGE_MARKER = "tauceti-coverage:v1"
 
 # Any `tauceti-*:vN` marker at all. Model prose is checked against this, not just against the two
 # markers above: prose that forges a *scoreboard* or *target* marker is equally unwanted, and a
@@ -89,6 +95,21 @@ STATUS_DISCLAIMER = (
 # steered by a field this version silently ignored.
 STATUS_KEYS = {"roadmap", "to_sha", "ts"}
 SECTION_KEYS = {"roadmap", "from_sha", "to_sha", "prs"}
+COVERAGE_KEYS = {"roadmap", "to_sha", "readme_sha", "layers"}
+LAYER_KEYS = {"id", "state", "remaining"}
+
+# The four states a layer can be reported in. `unassessed` is a legitimate answer -- the supplied
+# material said nothing about the layer -- and is distinct from `untouched`, which is a claim.
+LAYER_STATES = ("done", "partial", "untouched", "unassessed")
+
+# Bounds on the coverage header. A roadmap has a dozen or two layers; a header with hundreds is
+# not one, and a `remaining` note is one line, not a second report. Both fields are interpolated
+# into an HTML comment, so neither may contain `<` or `>` (a `-->` inside the JSON would close the
+# comment and turn the rest of the header into visible text) nor control characters.
+MAX_LAYERS = 64
+LAYER_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 .\-]{0,39}\Z")
+REMAINING_RE = re.compile(r"\A[^<>\x00-\x1f\x7f]{1,200}\Z")
+_HEX64_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
 class FormatError(ValueError):
@@ -167,6 +188,66 @@ def parse_headers(text, marker):
 # ----- STATUS.md -------------------------------------------------------------------------------
 
 
+def require_coverage(obj, area, to_sha):
+    """A `tauceti-coverage:v1` payload, validated whole, or raise.
+
+    Closed schema, like the other headers. The payload must name the same roadmap and library commit
+    as the status header beside it, the README it assessed (a SHA-256 of that file's text: the
+    consumer refuses an assessment whose README hash does not match the README it read the layers
+    from, since a layer's requirements can change under an unchanged heading), and every layer once
+    with a legal state. Returned in canonical form, ready to serialise.
+    """
+    if not isinstance(obj, dict):
+        raise FormatError(f"{COVERAGE_MARKER} header must be a JSON object")
+    _require_keys(obj, COVERAGE_KEYS, COVERAGE_MARKER)
+    if _require_area(obj.get("roadmap"), "roadmap") != area:
+        raise FormatError(f"{COVERAGE_MARKER} header is for {obj['roadmap']}, expected {area}")
+    if _require_sha(obj.get("to_sha"), "to_sha") != to_sha:
+        raise FormatError(
+            f"{COVERAGE_MARKER} header describes {obj['to_sha'][:7]} but the status header "
+            f"describes {to_sha[:7]}"
+        )
+    readme_sha = obj.get("readme_sha")
+    if not isinstance(readme_sha, str) or not _HEX64_RE.match(readme_sha):
+        raise FormatError(f"readme_sha must be a 64-character lowercase hex SHA-256, got {readme_sha!r}")
+    layers = obj.get("layers")
+    if not isinstance(layers, list) or not layers:
+        raise FormatError("layers must be a non-empty list")
+    if len(layers) > MAX_LAYERS:
+        raise FormatError(f"layers lists {len(layers)} entries; the cap is {MAX_LAYERS}")
+    out, seen = [], set()
+    for entry in layers:
+        if not isinstance(entry, dict):
+            raise FormatError(f"each layer must be an object, got {entry!r}")
+        extra = sorted(set(entry) - LAYER_KEYS)
+        if extra:
+            raise FormatError(f"layer entry has unknown field(s): {', '.join(extra)}")
+        lid, state = entry.get("id"), entry.get("state")
+        if not isinstance(lid, str) or not LAYER_ID_RE.match(lid):
+            raise FormatError(f"layer id must be a short label such as 'Layer 3' or 'Lane G', got {lid!r}")
+        if lid in seen:
+            raise FormatError(f"layer {lid!r} appears twice")
+        seen.add(lid)
+        if state not in LAYER_STATES:
+            raise FormatError(f"layer {lid!r} has state {state!r}; expected one of {', '.join(LAYER_STATES)}")
+        clean = {"id": lid, "state": state}
+        if "remaining" in entry:
+            remaining = entry["remaining"]
+            if not isinstance(remaining, str) or not REMAINING_RE.match(remaining):
+                raise FormatError(
+                    f"layer {lid!r} has a 'remaining' note that is empty, over 200 characters, or "
+                    f"contains angle brackets or control characters"
+                )
+            clean["remaining"] = remaining
+        out.append(clean)
+    return {"roadmap": area, "to_sha": to_sha, "readme_sha": readme_sha, "layers": out}
+
+
+def coverage_header(coverage):
+    """The one canonical serialisation of a validated coverage payload."""
+    return json.dumps(coverage, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def _require_ts(value):
     """`ts` is display-only, but it is interpolated verbatim into the canonical prefix, so it must not
     be able to open an HTML comment and hide the disclaimer that follows it."""
@@ -177,13 +258,17 @@ def _require_ts(value):
     return value
 
 
-def status_prefix(area, to_sha, ts):
+def status_prefix(area, to_sha, ts, coverage=None):
     """The exact bytes a `STATUS.md` must begin with, given its own header values.
 
     Shared by the renderer and the validator so there is one definition. Checking a PREFIX rather
     than searching for substrings is what makes the framing canonical: with a substring check the
     heading and the disclaimer could sit anywhere, including inside a fenced code block, so a file
     could satisfy every check and still render as no report at all.
+
+    `coverage`, when given, is a payload `require_coverage` has accepted; its header follows the
+    status header on the next line, so it is part of the canonical prefix too and cannot sit
+    anywhere else in the file.
     """
     header = json.dumps(
         {"roadmap": _require_area(area, "roadmap"), "to_sha": _require_sha(to_sha, "to_sha"),
@@ -191,8 +276,12 @@ def status_prefix(area, to_sha, ts):
         sort_keys=True,
         separators=(",", ":"),
     )
+    cov = ""
+    if coverage is not None:
+        cov = f"<!--{COVERAGE_MARKER} {coverage_header(require_coverage(coverage, area, to_sha))}-->\n"
     return (
         f"<!--{STATUS_MARKER} {header}-->\n"
+        f"{cov}"
         f"# Status: {area}\n\n"
         f"This file documents the status of the {area} roadmap up until "
         f"`{to_sha[:7]}` ({ts}). There may have been subsequent updates.\n\n"
@@ -200,28 +289,41 @@ def status_prefix(area, to_sha, ts):
     )
 
 
-def render_status(area, to_sha, ts, body):
+def render_status(area, to_sha, ts, body, coverage=None):
     """A whole `STATUS.md`. `body` is the model's prose, without any heading of its own.
 
     The prose is deliberately preceded by a standing note that the file may be out of date: it is
     updated asynchronously from the PRs it describes, so a reader must never take it as
     authoritative about the current tip.
     """
-    return f"{status_prefix(area, to_sha, ts)}{body.strip()}\n"
+    return f"{status_prefix(area, to_sha, ts, coverage)}{body.strip()}\n"
 
 
 def parse_status(text):
-    """The header of a `STATUS.md`. Raises unless there is exactly one."""
+    """The headers of a `STATUS.md`. Raises unless there is exactly one status header.
+
+    The result carries `coverage`: the validated coverage payload when the file has one, else None.
+    A coverage header that does not fit the status header beside it (another roadmap, another
+    commit, a malformed layer) fails the whole parse; the gate never merges a file it could not
+    fully account for.
+    """
     headers = parse_headers(text, STATUS_MARKER)
     if len(headers) != 1:
         raise FormatError(f"expected exactly one {STATUS_MARKER} header, found {len(headers)}")
     h = headers[0]
     _require_keys(h, STATUS_KEYS, STATUS_MARKER)
-    return {
+    out = {
         "roadmap": _require_area(h.get("roadmap"), "roadmap"),
         "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
         "ts": _require_ts(h.get("ts")),
+        "coverage": None,
     }
+    covs = parse_headers(text, COVERAGE_MARKER)
+    if len(covs) > 1:
+        raise FormatError(f"expected at most one {COVERAGE_MARKER} header, found {len(covs)}")
+    if covs:
+        out["coverage"] = require_coverage(covs[0], out["roadmap"], out["to_sha"])
+    return out
 
 
 # ----- PROGRESS.md -----------------------------------------------------------------------------
@@ -351,14 +453,16 @@ def check_no_reserved_markers(body):
         raise FormatError(f"prose contains a reserved marker at offset {m.start()}: {m.group(0)!r}")
 
 
-def check_status_shape(text, area, to_sha, ts):
+def check_status_shape(text, area, to_sha, ts, coverage=None):
     """`STATUS.md` must begin with EXACTLY the canonical prefix for its own header values.
 
     A prefix comparison, not a set of substring searches. The looser version could be satisfied with
     the heading and the disclaimer buried anywhere in the file -- inside a fenced code block, say --
     so a document that rendered as no report at all still passed. Returns the body that follows.
+    The coverage header, when the file has one, is part of that prefix: it sits on the line after
+    the status header and nowhere else.
     """
-    expected = status_prefix(area, to_sha, ts)
+    expected = status_prefix(area, to_sha, ts, coverage)
     if not text.startswith(expected):
         # Say which part diverges; the whole prefix is too long to quote usefully.
         for label, probe in (
@@ -518,12 +622,16 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
 
     # Shape before content: both files must carry their canonical framing, so a generation cannot
     # drop the heading or the disclaimer and still parse. Each returns the body that follows it.
-    status_body = check_status_shape(new_status, area, status["to_sha"], status["ts"])
+    status_body = check_status_shape(new_status, area, status["to_sha"], status["ts"], status["coverage"])
     section_body = check_section_shape(added, area, section["from_sha"], section["to_sha"])
 
-    # Remove the ONE legitimate header from each, then scan what is left with no exemptions.
+    # Remove the legitimate headers from each (the status header, and the coverage header when the
+    # shape check just proved one sits in the prefix), then scan what is left with no exemptions.
     check_no_reserved_markers(strip_one_header(added, PROGRESS_MARKER))
-    check_no_reserved_markers(strip_one_header(new_status, STATUS_MARKER))
+    status_rest = strip_one_header(new_status, STATUS_MARKER)
+    if status["coverage"] is not None:
+        status_rest = strip_one_header(status_rest, COVERAGE_MARKER)
+    check_no_reserved_markers(status_rest)
 
     if old_status is not None:
         old = parse_status(old_status)

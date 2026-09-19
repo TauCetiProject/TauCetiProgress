@@ -33,7 +33,7 @@ import json
 import pathlib
 import subprocess
 
-from . import files, gh, window
+from . import files, gh, layers as layers_mod, window
 
 BRANCH_PREFIX = "progress/"
 # Recorded in the PR body so a reader (and the merge gate) can tell which TauCetiProgress produced
@@ -354,7 +354,22 @@ def render_update(plan, status_body, section_body, old_status, old_progress):
     area = plan["roadmap"]
     window_label = f"{(plan.get('from_date') or '')[:10]} to {(plan.get('to_date') or '')[:10]}"
 
-    status_text = files.render_status(area, plan["to_sha"], plan.get("to_date") or "", status_body)
+    # The status prose may end with a ```coverage block, one line per layer the plan listed. It
+    # becomes the coverage header and leaves the prose; a block that does not fit the plan's layers
+    # is refused here, so a half-right assessment never reaches a pull request. A body with no block
+    # is a report without a coverage header, as every report was before the header existed: the
+    # prose still stands on its own, and the consumer shows the layers as unassessed.
+    prose, entries = layers_mod.split_block(status_body)
+    coverage = None
+    if entries is not None:
+        if not plan.get("layers"):
+            print("the status body ends with a coverage block but the plan lists no layers; dropping it")
+        else:
+            coverage = layers_mod.coverage(area, plan["to_sha"], plan.get("readme_sha"), plan["layers"], entries)
+    elif plan.get("layers"):
+        print(f"the status body has no coverage block; {area}'s {len(plan['layers'])} layers stay unassessed")
+
+    status_text = files.render_status(area, plan["to_sha"], plan.get("to_date") or "", prose, coverage)
     section = files.render_section(
         area, plan["from_sha"], plan["to_sha"], plan["prs"], window_label, section_body
     )

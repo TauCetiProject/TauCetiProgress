@@ -94,6 +94,48 @@ def test_render_update_produces_a_valid_pair():
     assert len(files.parse_sections(progress)) == 1
 
 
+def _plan_with_layers():
+    plan = dict(PLAN)
+    plan["layers"] = [{"id": "Layer 0", "title": "Layer 0: curves", "line": 10},
+                      {"id": "Layer 1", "title": "Layer 1: cycles", "line": 20}]
+    plan["readme_sha"] = "0" * 64
+    return plan
+
+
+def test_render_update_turns_the_coverage_block_into_the_header():
+    plan = _plan_with_layers()
+    body = PROSE + "\n\n```coverage\nLayer 0: done\nLayer 1: partial — the homological version\n```\n"
+    status_text, _, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+    parsed = files.parse_status(status_text)
+    assert parsed["coverage"] == {"roadmap": plan["roadmap"], "to_sha": plan["to_sha"], "readme_sha": "0" * 64,
+                                  "layers": [{"id": "Layer 0", "state": "done"},
+                                             {"id": "Layer 1", "state": "partial", "remaining": "the homological version"}]}, parsed
+    assert "```coverage" not in status_text
+    assert status_text.rstrip().endswith(PROSE.rstrip())
+
+
+def test_render_update_refuses_a_block_that_does_not_fit_the_plan():
+    plan = _plan_with_layers()
+    body = PROSE + "\n\n```coverage\nLayer 0: done\n```\n"
+    try:
+        apply_mod.render_update(plan, body, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "says nothing about" in str(exc), exc
+    else:
+        raise AssertionError("a block missing a layer must be refused")
+
+
+def test_render_update_without_a_block_or_without_layers_is_a_plain_report():
+    plan = _plan_with_layers()
+    status_text, _, _ = apply_mod.render_update(plan, PROSE, PROSE, None, None)
+    assert files.parse_status(status_text)["coverage"] is None
+    # An older plan with no layers: a block is dropped rather than refused.
+    body = PROSE + "\n\n```coverage\nLayer 0: done\n```\n"
+    status_text, _, _ = apply_mod.render_update(dict(PLAN), body, PROSE, None, None)
+    assert files.parse_status(status_text)["coverage"] is None
+    assert "```coverage" not in status_text
+
+
 def test_render_update_appends_to_an_existing_log():
     old_log = files.new_progress_file("ContourIntegration") + files.render_section(
         "ContourIntegration", "9" * 40, A, [12], "earlier", PROSE

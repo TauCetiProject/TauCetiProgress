@@ -94,6 +94,16 @@ def test_the_status_prompt_is_voyager_shaped_and_bounded():
     assert files.MAX_STATUS_WORDS >= 750
 
 
+def test_the_status_prompt_asks_for_the_coverage_block_in_the_checked_shape():
+    """The block's states and its bound must not drift from what `files` accepts."""
+    text = (cli.PROMPT_DIR / "progress.md").read_text()
+    assert "```coverage" in text
+    for state in files.LAYER_STATES:
+        assert f"`{state}`" in text, state
+    assert "at most 200" in text and files.REMAINING_RE.pattern.endswith("{1,200}\\Z")
+    assert "`layers` list" in text and "__PLAN_FILE__" in text
+
+
 def test_both_status_prompts_prefer_readable_names_and_documentation():
     for name in ("progress.md", "status.md"):
         text = " ".join((cli.PROMPT_DIR / name).read_text().split())
