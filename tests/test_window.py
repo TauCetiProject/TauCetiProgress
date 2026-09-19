@@ -438,6 +438,55 @@ def test_a_cursor_in_no_history_at_all_is_still_refused():
                "not an ancestor")
 
 
+# ----- the layers the plan hands the model ------------------------------------------------------
+
+
+def test_the_plan_records_the_selected_areas_layers_and_readme_hash_exactly():
+    """`apply` binds the model's verdicts to what the plan says here, so the inventory must be the
+    README's layer headings in order, with ids and 1-based lines, and the hash must be of the
+    README's text -- the consumer compares against exactly that."""
+    import hashlib
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)"])
+        make_roadmap(roadmap, {"Curves": None})
+        readme = ("# Curves\n\n## Layers\n\n### Layer 0: the group law (Silverman III.2)\ntext\n"
+                  "### Layer 1: isogenies — the dual\n")
+        (pathlib.Path(roadmap) / "TauCetiRoadmap" / "Curves" / "README.md").write_text(readme, encoding="utf-8")
+        got = plan_against(code, roadmap, shas[2], {"Curves": [1, 2]})
+        assert got["layers"] == [{"id": "Layer 0", "title": "Layer 0: the group law", "line": 5},
+                                 {"id": "Layer 1", "title": "Layer 1: isogenies — the dual", "line": 7}], got["layers"]
+        assert got["readme_sha"] == hashlib.sha256(readme.encode("utf-8")).hexdigest()
+
+
+def test_an_umbrella_areas_sub_roadmaps_are_not_assessed_by_the_plan():
+    """RepresentationTheory is one labelled area whose README is an index of sub-roadmaps with
+    READMEs of their own. The plan reads only the area's own README: it has no layer headings, so
+    the plan lists no layers, the report carries no coverage header, and the children's layers are
+    not in the plan at all. That is this first version's scope, recorded here so that the
+    extraction cross-check with the consumer is not read as end-to-end support for the children:
+    on the Progress page they stay on hand transcriptions until a child assessment has a carrier
+    of its own."""
+    import hashlib
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)"])
+        make_roadmap(roadmap, {"Umbrella": None})
+        base = pathlib.Path(roadmap) / "TauCetiRoadmap" / "Umbrella"
+        index = ("# Umbrella\n\n## The roadmaps\n\n- [Spin](SpinRepresentations/README.md)\n"
+                 "- [Roots](RootSystems/README.md)\n")
+        (base / "README.md").write_text(index, encoding="utf-8")
+        for child in ("SpinRepresentations", "RootSystems"):
+            (base / child).mkdir()
+            (base / child / "README.md").write_text(
+                f"# {child}\n\n### Layer 0: basics\n### Layer 1: more\n", encoding="utf-8")
+            (base / child / "Suggested.lean").write_text("-- suggestions\n", encoding="utf-8")
+        got = plan_against(code, roadmap, shas[2], {"Umbrella": [1, 2]})
+        assert got["roadmap"] == "Umbrella"
+        assert got["layers"] == [], got["layers"]
+        assert got["readme_sha"] == hashlib.sha256(index.encode("utf-8")).hexdigest()
+        # The children are not areas of their own either: labelled areas are top-level only.
+        assert plan.discover_areas(roadmap) == {"Umbrella": "TauCetiRoadmap/Umbrella"}
+
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

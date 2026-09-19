@@ -85,23 +85,40 @@ def test_the_prompt_asks_for_no_more_than_the_checked_limit():
     assert files.MAX_SECTION_WORDS >= 300
 
 
-def test_the_status_prompt_is_voyager_shaped_and_bounded():
-    text = " ".join((cli.PROMPT_DIR / "progress.md").read_text().split())
-    assert "At most 750 words" in text
-    assert "### Named results" in text
-    assert "### Notable definitions and infrastructure" in text
-    assert "plain language first, references last" in text
+def test_both_status_prompts_are_voyager_shaped_and_bounded():
+    """Two prompt interfaces write a STATUS body: the worker's `progress` prompt (both files, driven
+    by a plan) and the standalone `status` prompt (one body, no plan). Both are held to the same
+    shape and the same ceiling."""
+    for name in ("progress.md", "status.md"):
+        text = " ".join((cli.PROMPT_DIR / name).read_text().split())
+        assert "At most 750 words" in text, name
+        assert "### Named results" in text, name
+        assert "### Notable definitions and infrastructure" in text, name
+        assert "plain language first, references last" in text, name
     assert files.MAX_STATUS_WORDS >= 750
 
 
-def test_the_status_prompt_asks_for_the_coverage_block_in_the_checked_shape():
-    """The block's states and its bound must not drift from what `files` accepts."""
+def test_the_progress_prompt_asks_for_the_coverage_block_in_the_checked_shape():
+    """The worker's prompt is the one handed a plan with a `layers` list, so it is the one that asks
+    for the block. Its states and its bound must not drift from what `files` accepts."""
     text = (cli.PROMPT_DIR / "progress.md").read_text()
     assert "```coverage" in text
     for state in files.LAYER_STATES:
         assert f"`{state}`" in text, state
     assert "at most 200" in text and files.REMAINING_RE.pattern.endswith("{1,200}\\Z")
     assert "`layers` list" in text and "__PLAN_FILE__" in text
+
+
+def test_the_standalone_status_prompt_is_prose_only_and_says_so():
+    """`prompt status` is given `__CONTEXT__` and no plan, so it has no layer list to assess against.
+    It must not ask for a block (the model would have to invent layer ids), and it must say that a
+    report written from it carries no coverage header, so nobody reads the other prompt's block
+    into this interface."""
+    text = (cli.PROMPT_DIR / "status.md").read_text()
+    assert "__CONTEXT__" in text and "__PLAN_FILE__" not in text
+    assert "```coverage" not in text
+    assert "no per-layer coverage header" in text
+    assert "prose-only" in text
 
 
 def test_both_status_prompts_prefer_readable_names_and_documentation():

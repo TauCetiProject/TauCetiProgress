@@ -103,6 +103,15 @@ How it is made, following the design rule above that a model only ever writes pr
   It has the same standing as the prose it summarises: not security-validated, and the gate proves
   its shape, never its truth.
 
+This first version covers the selected labelled area's own README, and nothing below it. An
+umbrella area whose README is an index of sub-roadmaps with READMEs of their own
+(RepresentationTheory) has no layer headings itself, so its reports carry no header, and the
+sub-roadmaps' layers are not assessed by this pipeline at all: on the Progress page they stay on
+hand transcriptions. A sub-roadmap assessment needs a carrier of its own -- its own roadmap
+identity, README hash and layer-id namespace -- agreed with the gate and the consumer together;
+flattening the children's layers under the parent's hash would misbind them, and would also
+overrun the header's layer bound.
+
 `readme_sha` is what binds the assessment to the specification it was made against. Layer ids
 alone do not: a layer's requirements can change under an unchanged heading. The consumer refuses a
 header whose hash does not match the README it read the layers from, and shows those layers as
