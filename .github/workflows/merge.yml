@@ -242,6 +242,30 @@ jobs:
             --jq .sha)"
           printf 'built %s (tree %s, parent %s)\n' "${commit:0:7}" "${tree:0:7}" "${MAIN_SHA:0:7}"
 
+          # Last look at the pull request, as late as possible. `state` was established during
+          # collection and everything since has trusted it, so a pull request closed while this run
+          # was validating would still land -- and closing one is how a superseded report is retired,
+          # which makes the cursor advance to the report somebody deliberately discarded and orphan
+          # the replacement that displaced it. The window was academic while only humans closed these;
+          # it is not now that the planner sweeps them.
+          #
+          # This does NOT reintroduce the pull request as an input to what gets written. The tree and
+          # the parent still come from the two pinned SHAs, and nothing read here can cause a landing:
+          # a forged answer can only fail to stop one that was already fully validated. Read to
+          # refuse, never to authorise.
+          #
+          # Fail closed, as everywhere else here: an unreadable answer is not a passing one.
+          now="$(gh api "repos/$REPO/pulls/$PR" \
+                   --jq '[.state, .head.sha, .base.ref, (.draft|tostring)] | join(" ")' \
+                 2>/dev/null || echo "")"
+          want="open $HEAD_SHA main false"
+          if [ "$now" != "$want" ]; then
+            printf '::warning title=not landed::the pull request is now %s, not %s; it changed after validation, so this report was not landed\n' \
+              "'${now:-unreadable}'" "'$want'"
+            echo "landed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # force=false is the compare-and-swap. It fails if main is no longer at MAIN_SHA, because
           # then this commit is not a fast-forward of it.
           #
