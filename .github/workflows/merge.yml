@@ -93,6 +93,7 @@ jobs:
       head_sha: ${{ steps.gate.outputs.head_sha }}
       main_sha: ${{ steps.gate.outputs.main_sha }}
       area: ${{ steps.gate.outputs.area }}
+      parent: ${{ steps.gate.outputs.parent }}
     steps:
       # The validator itself, at exactly the ref the caller pinned. Checking out this repository
       # (never the pull request) is what keeps the executed code trusted.
@@ -136,6 +137,7 @@ jobs:
             echo "head_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("head_sha",""))')"
             echo "main_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("main_sha",""))')"
             echo "area=$(python3 -c 'import json,re;a=json.load(open("bundle.json")).get("area","");print(a if re.fullmatch(r"[A-Za-z0-9]+", a or "") else "")')"
+            echo "parent=$(python3 -c 'import json;p=json.load(open("bundle.json")).get("parent","");print(p if p in ("TauCetiRoadmap","Completed") else "")')"
           } >> "$GITHUB_OUTPUT"
           if [ "$rc" -eq 0 ]; then
             echo "verdict=allow" >> "$GITHUB_OUTPUT"
@@ -374,7 +376,7 @@ jobs:
       # thing here that runs our own code, so fetch it at the SAME pinned ref the validator used --
       # a different ref would retire reports by rules nobody reviewed alongside the gate.
       - name: Check out the validator for the sweep
-        if: steps.land.outputs.landed == 'true' && needs.validate.outputs.area != ''
+        if: steps.land.outputs.landed == 'true' && needs.validate.outputs.area != '' && needs.validate.outputs.parent != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: TauCetiProject/TauCetiProgress
@@ -383,16 +385,17 @@ jobs:
           persist-credentials: false
 
       - name: Retire the reports this landing orphaned
-        if: steps.land.outputs.landed == 'true' && needs.validate.outputs.area != ''
+        if: steps.land.outputs.landed == 'true' && needs.validate.outputs.area != '' && needs.validate.outputs.parent != ''
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ github.repository }}
           AREA: ${{ needs.validate.outputs.area }}
+          PARENT: ${{ needs.validate.outputs.parent }}
           COMMIT: ${{ steps.land.outputs.commit }}
         run: |
           set -uo pipefail
           python3 -c 'import sys; sys.path.insert(0, "validator"); from progress.cli import main; sys.exit(main())' \
             sweep --repo "$REPO" --area "$AREA" \
-            --progress-path "TauCetiRoadmap/$AREA/PROGRESS.md" \
+            --progress-path "$PARENT/$AREA/PROGRESS.md" \
             --landed-url "https://github.com/$REPO/commit/$COMMIT" || \
             echo "::warning title=sweep did not run::orphaned reports in $AREA were left open"

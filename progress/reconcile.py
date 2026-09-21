@@ -80,15 +80,43 @@ def close_orphans(rows, landed_url=""):
     return failed
 
 
+def other_parent(progress_path):
+    """The same area's `PROGRESS.md` under the other parent directory, or None.
+
+    `TauCetiRoadmap/<area>` and `Completed/<area>` are different roadmaps that may both exist, which
+    is why the collector derives the parent from the changed paths rather than probing in a fixed
+    order. `sweep_area` needs it to answer a question the collector does not have to: whether the
+    name is ambiguous.
+    """
+    for a, b in (("TauCetiRoadmap/", "Completed/"), ("Completed/", "TauCetiRoadmap/")):
+        if progress_path.startswith(a):
+            return b + progress_path[len(a):]
+    return None
+
+
 def sweep_area(area, progress_path, landed_url="", repo=gh.ROADMAP_REPO):
     """Read the live cursor for `area` and retire every open report that cannot reach it.
 
     Returns `(closed, failed)`. Reads the cursor through the API rather than from a checkout: this
     runs moments after the ref moved, which is exactly when a clone is stale.
+
+    `progress_path` carries the parent the landing actually touched, because the cursor for
+    `TauCetiRoadmap/<area>` and for `Completed/<area>` are different values in different files.
+
+    Retires nothing at all when the name exists under BOTH parents. A report branch is
+    `progress/<from7>-<to7>/<Area>` and records no parent, so in that case the open reports cannot be
+    attributed to one roadmap or the other, and retiring on the cursor we happen to hold would retire
+    the other roadmap's live reports. Leaving a few orphans for a human beats discarding live work;
+    the ambiguity is reported rather than resolved by guessing.
     """
     live = files.cursor(gh.file_on_default_branch(progress_path, repo=repo) or "") or ""
     if not live:
-        print(f"no cursor for {area} on {repo}; nothing retired")
+        print(f"no cursor at {progress_path} on {repo}; nothing retired")
+        return 0, 0
+    sibling = other_parent(progress_path)
+    if sibling and gh.file_on_default_branch(sibling, repo=repo) is not None:
+        print(f"{area} exists under both parents ({progress_path} and {sibling}); report branches "
+              f"do not record which, so nothing is retired")
         return 0, 0
     rows = orphaned_prs(gh.open_progress_prs(repo=repo), area, live)
     if not rows:

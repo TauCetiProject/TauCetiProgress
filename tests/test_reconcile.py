@@ -138,6 +138,55 @@ def test_apply_no_longer_closes_anything():
         assert not hasattr(apply, gone), f"apply.{gone} still exists"
 
 
+
+def test_other_parent_maps_both_ways():
+    assert reconcile.other_parent("TauCetiRoadmap/X/PROGRESS.md") == "Completed/X/PROGRESS.md"
+    assert reconcile.other_parent("Completed/X/PROGRESS.md") == "TauCetiRoadmap/X/PROGRESS.md"
+    assert reconcile.other_parent("Elsewhere/X/PROGRESS.md") is None
+
+
+def test_an_ambiguous_area_retires_nothing():
+    """`TauCetiRoadmap/X` and `Completed/X` are different roadmaps with different cursors, and a
+    report branch records only the name. Retiring on whichever cursor we hold would discard the
+    other roadmap's live reports."""
+    seen = []
+    orig = reconcile.gh.file_on_default_branch
+    reconcile.gh.file_on_default_branch = lambda path, repo=None: (
+        seen.append(path) or "<!--tauceti-progress:v1 {\"to_sha\":\"37aec57229a4a5828884027165b25804aac01ac8\"}-->")
+    orig_cursor = reconcile.files.cursor
+    reconcile.files.cursor = lambda text: "37aec57229a4a5828884027165b25804aac01ac8"
+    orig_open = reconcile.gh.open_progress_prs
+    reconcile.gh.open_progress_prs = lambda repo=None: [pr(372, from7="b218626")]
+    try:
+        assert reconcile.sweep_area("X", "TauCetiRoadmap/X/PROGRESS.md") == (0, 0)
+        assert "Completed/X/PROGRESS.md" in seen
+    finally:
+        reconcile.gh.file_on_default_branch = orig
+        reconcile.files.cursor = orig_cursor
+        reconcile.gh.open_progress_prs = orig_open
+
+
+def test_an_unambiguous_area_retires_normally():
+    orig = reconcile.gh.file_on_default_branch
+    reconcile.gh.file_on_default_branch = lambda path, repo=None: (
+        "text" if path.startswith("TauCetiRoadmap/") else None)
+    orig_cursor = reconcile.files.cursor
+    reconcile.files.cursor = lambda text: CURSOR
+    orig_open = reconcile.gh.open_progress_prs
+    reconcile.gh.open_progress_prs = lambda repo=None: [pr(372, from7="b218626")]
+    closed_calls = []
+    orig_close = reconcile.close_orphans
+    reconcile.close_orphans = lambda rows, url="": closed_calls.append(len(rows)) or 0
+    try:
+        assert reconcile.sweep_area("ModularForms", "TauCetiRoadmap/ModularForms/PROGRESS.md") == (1, 0)
+        assert closed_calls == [1]
+    finally:
+        reconcile.gh.file_on_default_branch = orig
+        reconcile.files.cursor = orig_cursor
+        reconcile.gh.open_progress_prs = orig_open
+        reconcile.close_orphans = orig_close
+
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)
