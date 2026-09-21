@@ -138,13 +138,34 @@ def open_progress_prs(repo=ROADMAP_REPO, branch_prefix="progress/"):
     refuses permanently never merges and never closes itself, and without an age it would mark its
     area in flight forever, silently stopping that roadmap's reporting for every operator.
     """
-    out = gh([
-        "pr", "list", "--repo", repo, "--state", "open",
-        "--limit", "200", "--json",
-        "number,headRefName,title,url,createdAt,headRepositoryOwner,body",
-    ])
-    rows = json.loads(out)
-    return [r for r in rows if (r.get("headRefName") or "").startswith(branch_prefix)]
+    # Paginated, not capped. `gh pr list --limit N` fetches N and filters afterwards, so any cap is
+    # a starvation lever: enough newer pull requests of any kind push the progress branches past it,
+    # and an area's stranded reports then become invisible to the cleanup indefinitely. Nothing has
+    # to be merged, or even plausible, to do that. `--paginate` walks the whole set instead.
+    #
+    # `--slurp` so the pages arrive as ONE array; `--jq` cannot be combined with it, hence the map
+    # in Python. The REST shape differs from `gh pr list --json`, so it is renamed to match rather
+    # than leaking two vocabularies to the callers.
+    out = gh(["api", "--paginate", "--slurp",
+              f"repos/{repo}/pulls?state=open&per_page=100"])
+    rows = []
+    for page in json.loads(out):
+        for r in page:
+            head = r.get("head") or {}
+            ref = head.get("ref") or ""
+            if not ref.startswith(branch_prefix):
+                continue
+            rows.append({
+                "number": r.get("number"),
+                "headRefName": ref,
+                "baseRefName": (r.get("base") or {}).get("ref") or "",
+                "title": r.get("title") or "",
+                "url": r.get("html_url") or "",
+                "createdAt": r.get("created_at") or "",
+                "headRepositoryOwner": {"login": ((head.get("repo") or {}).get("owner") or {}).get("login") or ""},
+                "body": r.get("body") or "",
+            })
+    return rows
 
 
 def file_on_default_branch(path, repo=ROADMAP_REPO, ref="main"):

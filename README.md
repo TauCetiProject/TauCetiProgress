@@ -60,6 +60,17 @@ that snapshot until it writes; and "covers more" has to be read from a pull requ
 anyone can edit. Waiting for the ref update removes all three, because there is then nothing left to
 predict — only a fact to observe.
 
+The fact is read *positively*, from committed history: a report is retired only when `PROGRESS.md`
+shows its starting cursor already appended at and moved past. The near-miss is to retire on
+disagreement with the current cursor instead, which sounds equivalent and is not — a contents read
+can be stale, and a report starting *ahead* of a stale answer disagrees with it exactly as loudly as
+a spent one. Reading less history can only shrink the evidence, so a stale answer retires fewer
+reports rather than a live one.
+
+Only branches matching the gate's own grammar, targeting the branch a report must target, are ever
+touched. Anything else is somebody's ordinary pull request that happens to begin with `progress/`,
+and failing an automated gate is not a reason to close a human's work.
+
 ## The window cursor is a SHA, on the docs-tracking branch
 
 A window is the half-open commit range `(from_sha, to_sha]` on TauCeti's **`docgen`** branch, where

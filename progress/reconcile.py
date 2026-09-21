@@ -1,69 +1,103 @@
 """Retire the reports a landing has just made unmergeable.
 
-An area can hold more than one open report, and nothing used to close the ones that lose. They
+An area can hold several open reports, and nothing used to close the ones that lose. They
 accumulated: 13 of the 15 open progress pull requests were stranded this way when this was written.
 
-**What makes a report unmergeable is a fact, not a prediction.** The gate requires a byte-exact
-append at the cursor recorded in `PROGRESS.md`, so once `main` moves, every open report for that
-area whose window does not start at the new cursor can never satisfy it again. That is decidable
-from the branch name and the cursor alone -- no metadata, no comparison of windows, no ordering.
+**Retire on positive evidence, never on disagreement with a snapshot.** A report is retired only
+when the committed `PROGRESS.md` shows its starting cursor has already been consumed -- that is,
+some section already appended at it and the log has moved past. Anything else is left alone.
 
-An earlier version of this closed reports *before* the replacement landed, by arguing that one
-window contained another. Three things were wrong with it, and they are why this module runs where
-it does:
+That distinction is the whole of this module's safety. "Its cursor is not the current one" sounds
+equivalent and is not: a contents read can be stale, and a report starting *ahead* of a stale answer
+disagrees with it exactly as loudly as one starting behind. Under-reading committed history can only
+shrink the consumed set, so a stale answer retires fewer reports, never a live one.
 
-* It could cancel a landing that was already in flight. Close the loser, have the winner then fail
-  its build, and nothing lands -- and the loser is now closed-unmerged, which `apply` treats as
-  permanently refused, so no later run repairs it.
+An earlier version closed reports *before* a replacement landed, by arguing one window contained
+another. Three things were wrong with it, and they are why this module runs where it does:
+
+* It could cancel a landing already in flight. Close the loser, have the winner then fail its build,
+  and nothing lands -- and the loser is now closed-unmerged, which `apply` treats as permanently
+  refused, so no later run repairs it.
 * It raced the gate. The gate reads `state` when it collects and trusts that snapshot until it
-  writes, so a report closed while a run was validating landed anyway. Closing only after the swap
-  has happened removes the race rather than narrowing it.
+  writes, so a report closed while a run was validating landed anyway.
 * It trusted a pull request body. Containment was read from metadata anyone can edit, so a stale or
   forged narrower body got a live report closed.
 
-Running after the compare-and-swap removes all three at once: the ref update has already chosen the
-winner, so there is nothing left to predict.
+Running after the compare-and-swap removes all three: the ref update has already chosen the winner.
 
 Ownership is deliberately not consulted here, unlike everywhere in `apply`. There the question was
 whose work may be superseded, and the answer had to be "only our own" or a stranger could be vetoed.
 Here the report is unmergeable for everybody, by construction. Leaving it open is not kindness: it
-marks the area in flight, so it delays the next report for its own author as much as anyone.
+marks the area in flight, so it delays the next report for its own author as much as anyone. What
+protects a stranger instead is the grammar: only a branch the generator itself could have produced,
+targeting the branch a report must target, is ever touched.
 """
 
 from . import files, gh
+from .gate import BRANCH_RE
 
-BRANCH_PREFIX = "progress/"
+BASE_BRANCH = "main"
 
 
-def orphaned_prs(open_prs, area, live_cursor):
-    """Open reports for `area` that can no longer append at `live_cursor`: `[(row, reason)]`.
+def retirement_evidence(progress_text):
+    """`(consumed, live)` from a committed `PROGRESS.md`.
 
-    `live_cursor` must be the cursor as it is NOW, read after the landing. Passing a stale one
-    inverts the test: a run holding an old cursor would read the only mergeable report as the
-    orphan. An empty cursor returns nothing rather than guessing.
+    `live` is the cursor a new report must start at; `consumed` is every cursor the log has already
+    appended at and moved past. A report starting at one of those can never append again, and the
+    log is committed history rather than a mutable field, so the evidence does not rot.
+
+    Reading less history than exists shrinks `consumed`, which can only retire fewer reports. That
+    is the direction a stale or truncated read must fail in.
     """
-    if not live_cursor:
-        return []
+    try:
+        sections = files.parse_sections(progress_text or "")
+    except Exception:  # noqa: BLE001 -- a malformed log is evidence of nothing
+        return set(), ""
+    if not sections:
+        return set(), ""
+    live = sections[-1]["to_sha"]
+    consumed = {s["from_sha"] for s in sections} | {s["to_sha"] for s in sections}
+    consumed.discard(live)
+    return consumed, live
+
+
+def retirable_prs(open_prs, area, consumed, live):
+    """Open reports for `area` whose starting cursor is provably spent: `[(row, reason)]`.
+
+    The branch grammar is the gate's own, not a looser one. `progress/<7 hex>-<7 hex>/<Area>` is what
+    the generator produces; anything else is somebody's ordinary pull request that happens to start
+    with `progress/`, and "it cannot pass an automated gate" is not a reason to close a human's work.
+    The base branch is checked for the same reason.
+
+    A seven-character prefix is not a commit. One that matches both a spent cursor and the live one
+    proves nothing, so such a report is kept: under-retiring is recoverable, the opposite is not.
+    """
     out = []
     for row in open_prs:
-        parts = (row.get("headRefName") or "").split("/")
-        if len(parts) != 3 or parts[-1] != area:
+        m = BRANCH_RE.match(row.get("headRefName") or "")
+        if not m or m.group(3) != area:
             continue
-        from7 = parts[1].split("-")[0] if "-" in parts[1] else ""
-        if not from7:
+        if (row.get("baseRefName") or BASE_BRANCH) != BASE_BRANCH:
             continue
-        if not live_cursor.startswith(from7):
-            out.append((row, f"its window starts at {from7}; the {area} cursor is now "
-                             f"{live_cursor[:7]}, so it can no longer append"))
+        from7 = m.group(1)
+        if live and live.startswith(from7):
+            continue
+        spent = [c for c in consumed if c.startswith(from7)]
+        if not spent:
+            continue
+        out.append((row, f"its window starts at {from7}, which {area} already appended at and "
+                         f"moved past; the cursor is now {live[:7] or 'unknown'}"))
     return out
 
 
-def close_orphans(rows, landed_url=""):
-    """Close each orphaned report, saying why. Returns the number that could not be closed.
+def close_orphans(rows, landed_url="", repo=gh.ROADMAP_REPO):
+    """Close each retirable report, saying why. Returns the number that could not be closed.
 
-    Failures are counted rather than raised: the content is already on `main` by the time this runs,
-    so a cleanup that does not complete must not turn a successful landing into a failed one. The
-    count is returned so the caller can still say so out loud.
+    `repo` is threaded rather than defaulted at the call site: reading one repository's pull request
+    numbers and closing another's by the same number is a whole-repository mix-up waiting to happen.
+
+    Failures are counted rather than raised. The content is already on `main` by the time this runs,
+    so a cleanup that does not complete must not turn a successful landing into a failed one.
     """
     failed = 0
     for row, reason in rows:
@@ -72,11 +106,11 @@ def close_orphans(rows, landed_url=""):
             note += f" The window it would have appended to was taken by {landed_url}."
         note += " Reopening will not help; a fresh report for the current cursor is what is needed."
         try:
-            gh.gh(["pr", "close", str(row["number"]), "--repo", gh.ROADMAP_REPO, "--comment", note])
-            print(f"retired #{row['number']}: {reason}")
+            gh.gh(["pr", "close", str(row["number"]), "--repo", repo, "--comment", note])
+            print(f"retired {repo}#{row['number']}: {reason}")
         except gh.GhError as exc:
             failed += 1
-            print(f"could not close #{row['number']} ({exc}); leaving it open")
+            print(f"could not close {repo}#{row['number']} ({exc}); leaving it open")
     return failed
 
 
@@ -85,8 +119,7 @@ def other_parent(progress_path):
 
     `TauCetiRoadmap/<area>` and `Completed/<area>` are different roadmaps that may both exist, which
     is why the collector derives the parent from the changed paths rather than probing in a fixed
-    order. `sweep_area` needs it to answer a question the collector does not have to: whether the
-    name is ambiguous.
+    order.
     """
     for a, b in (("TauCetiRoadmap/", "Completed/"), ("Completed/", "TauCetiRoadmap/")):
         if progress_path.startswith(a):
@@ -95,32 +128,31 @@ def other_parent(progress_path):
 
 
 def sweep_area(area, progress_path, landed_url="", repo=gh.ROADMAP_REPO):
-    """Read the live cursor for `area` and retire every open report that cannot reach it.
+    """Retire every open report for `area` whose starting cursor the committed log has spent.
 
-    Returns `(closed, failed)`. Reads the cursor through the API rather than from a checkout: this
-    runs moments after the ref moved, which is exactly when a clone is stale.
+    Returns `(closed, failed)`. `progress_path` carries the parent the landing actually touched,
+    because `TauCetiRoadmap/<area>` and `Completed/<area>` keep different cursors in different files.
 
-    `progress_path` carries the parent the landing actually touched, because the cursor for
-    `TauCetiRoadmap/<area>` and for `Completed/<area>` are different values in different files.
-
-    Retires nothing at all when the name exists under BOTH parents. A report branch is
-    `progress/<from7>-<to7>/<Area>` and records no parent, so in that case the open reports cannot be
-    attributed to one roadmap or the other, and retiring on the cursor we happen to hold would retire
-    the other roadmap's live reports. Leaving a few orphans for a human beats discarding live work;
-    the ambiguity is reported rather than resolved by guessing.
+    Retires nothing when the name exists under BOTH parents. A report branch records no parent, so
+    the open reports cannot be attributed to one roadmap or the other, and retiring on the log we
+    happen to be holding would retire the other roadmap's live reports.
     """
-    live = files.cursor(gh.file_on_default_branch(progress_path, repo=repo) or "") or ""
-    if not live:
-        print(f"no cursor at {progress_path} on {repo}; nothing retired")
+    text = gh.file_on_default_branch(progress_path, repo=repo)
+    if text is None:
+        print(f"no log at {progress_path} in {repo}; nothing retired")
         return 0, 0
     sibling = other_parent(progress_path)
     if sibling and gh.file_on_default_branch(sibling, repo=repo) is not None:
         print(f"{area} exists under both parents ({progress_path} and {sibling}); report branches "
               f"do not record which, so nothing is retired")
         return 0, 0
-    rows = orphaned_prs(gh.open_progress_prs(repo=repo), area, live)
+    consumed, live = retirement_evidence(text)
+    if not consumed:
+        print(f"{area}: no spent cursors in {progress_path}; nothing retired")
+        return 0, 0
+    rows = retirable_prs(gh.open_progress_prs(repo=repo), area, consumed, live)
     if not rows:
         print(f"{area}: nothing to retire at cursor {live[:7]}")
         return 0, 0
-    failed = close_orphans(rows, landed_url)
+    failed = close_orphans(rows, landed_url, repo=repo)
     return len(rows) - failed, failed

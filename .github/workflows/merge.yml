@@ -180,6 +180,9 @@ jobs:
     needs: validate
     if: needs.validate.outputs.verdict == 'allow' && inputs.dry_run == false
     runs-on: ubuntu-latest
+    outputs:
+      landed: ${{ steps.land.outputs.landed }}
+      commit: ${{ steps.land.outputs.commit }}
     steps:
       # Minted only after validation succeeded, and scoped to this repository.
       - name: Mint the App token
@@ -372,11 +375,35 @@ jobs:
       # Never fails the run. The content is on `main` by now, so a cleanup that cannot finish must
       # not turn a completed merge into a red one; the command says what it could not close and the
       # next landing retries it.
-      # This job has had no checkout until now: it only ever called `gh`. The sweep is the first
-      # thing here that runs our own code, so fetch it at the SAME pinned ref the validator used --
-      # a different ref would retire reports by rules nobody reviewed alongside the gate.
-      - name: Check out the validator for the sweep
-        if: steps.land.outputs.landed == 'true' && needs.validate.outputs.area != '' && needs.validate.outputs.parent != ''
+
+  # A SEPARATE JOB, and deliberately not part of `merge`.
+  #
+  # Three reasons, each of which was a defect when this lived inside `merge`:
+  #
+  #   * It does not need the bypass credential and must not hold it. Retiring a report is an ordinary
+  #     `pull-requests: write` operation; the App token exists to write to a ruleset-protected branch,
+  #     which this never does. Running here on the default token removes that authority from the only
+  #     code in this workflow that touches pull requests it did not validate.
+  #   * A failure here must never redden a completed merge. Inside `merge`, a failed `actions/checkout`
+  #     fails the job after the content is already on `main`, and no `|| true` on a later step can
+  #     catch a failing `uses:` step.
+  #   * A step-level `if:` carries an implicit `success()`, so a hiccup in the close step above would
+  #     have silently skipped the cleanup rather than merely delaying it. `always()` here says what
+  #     was meant: the landing happened, so reconcile regardless of what else did or did not.
+  #
+  # `continue-on-error` so the workflow's overall conclusion still reflects the merge.
+  reconcile:
+    needs: [validate, merge]
+    if: always() && needs.merge.outputs.landed == 'true' && needs.validate.outputs.area != '' && needs.validate.outputs.parent != ''
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # At the SAME pinned ref the validator used. A different ref would retire reports by rules
+      # nobody reviewed alongside the gate.
+      - name: Check out the validator
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: TauCetiProject/TauCetiProgress
@@ -384,18 +411,17 @@ jobs:
           path: validator
           persist-credentials: false
 
-      - name: Retire the reports this landing orphaned
-        if: steps.land.outputs.landed == 'true' && needs.validate.outputs.area != '' && needs.validate.outputs.parent != ''
+      - name: Retire the reports this landing spent
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           AREA: ${{ needs.validate.outputs.area }}
           PARENT: ${{ needs.validate.outputs.parent }}
-          COMMIT: ${{ steps.land.outputs.commit }}
+          COMMIT: ${{ needs.merge.outputs.commit }}
         run: |
           set -uo pipefail
           python3 -c 'import sys; sys.path.insert(0, "validator"); from progress.cli import main; sys.exit(main())' \
             sweep --repo "$REPO" --area "$AREA" \
             --progress-path "$PARENT/$AREA/PROGRESS.md" \
             --landed-url "https://github.com/$REPO/commit/$COMMIT" || \
-            echo "::warning title=sweep did not run::orphaned reports in $AREA were left open"
+            echo "::warning title=sweep did not run::spent reports in $AREA were left open"
