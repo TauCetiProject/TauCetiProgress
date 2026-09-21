@@ -32,11 +32,33 @@ tauceti-progress due                      is an update due? (one API call, no cl
 tauceti-progress plan   --roadmap-dir DIR pick the roadmap and the PR window
 tauceti-progress facts  --plan FILE       what declarations actually landed in the window
 tauceti-progress apply  --plan FILE ...   write the files, open the PR (resumable)
+tauceti-progress sweep  --area AREA ...   retire the reports a landing just orphaned
 tauceti-progress announce --section FILE  post a new section to Zulip (idempotent)
 ```
 
 `due` is the only one that runs often; it exits 75 ("no progress") when nothing is due, matching
-the worker's convention. `plan` runs at most once a day.
+the worker's convention. `plan` runs at most once a day. `sweep` is not run by the worker at all:
+the merge workflow calls it after a landing, for the reason in the next section.
+
+## An area may hold several open reports, and only one can win
+
+Two operators, or one operator across two rounds, can have reports open for the same area at once.
+They cannot both land: the gate requires a byte-exact append at the cursor in `PROGRESS.md`, so the
+moment one lands and the cursor moves, every other open report for that area is unmergeable for
+good.
+
+Nothing used to notice, and they accumulated — one unmergeable report per area per round, never
+shed. What retires them is `sweep`, called by the merge workflow *after* the compare-and-swap has
+already chosen a winner.
+
+After, specifically, because the alternative does not work. Retiring a report on the grounds that
+some other open report covers more of the window means acting on a prediction, and a prediction can
+be wrong in three ways that all cost real work: the favoured report may fail its build, leaving
+nothing landed and the retired one closed-unmerged, which `apply` treats as permanently refused; the
+close may race the merge workflow, which reads a pull request's state when it collects and trusts
+that snapshot until it writes; and "covers more" has to be read from a pull request body, which
+anyone can edit. Waiting for the ref update removes all three, because there is then nothing left to
+predict — only a fact to observe.
 
 ## The window cursor is a SHA, on the docs-tracking branch
 

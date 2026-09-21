@@ -116,6 +116,27 @@ def cmd_apply(args):
     )
 
 
+def cmd_sweep(args):
+    """Retire the reports the landing just orphaned. Never fails the caller.
+
+    This runs after the content is already on `main`, so nothing it does can un-land a report and a
+    failure here must not be reported as a failed merge. It says what it could not do and exits 0.
+    """
+    from . import reconcile
+
+    closed, failed = reconcile.sweep_area(
+        area=args.area,
+        progress_path=args.progress_path,
+        landed_url=args.landed_url or "",
+        repo=args.repo,
+    )
+    print(f"retired {closed}, could not close {failed}")
+    if failed:
+        print(f"::warning title=reports left open::{failed} orphaned report(s) in {args.area} "
+              f"could not be closed; they will be retired on the next landing")
+    return 0
+
+
 def cmd_announce(args):
     from . import announce as announce_mod
 
@@ -172,6 +193,15 @@ def build_parser():
     # missing prompt properly.
     pr.add_argument("name", help="which prompt (progress, status)")
     pr.set_defaults(fn=cmd_prompt)
+
+    s = sub.add_parser("sweep", help="retire the reports a landing has just orphaned")
+    s.add_argument("--area", required=True, help="the roadmap whose cursor just moved")
+    s.add_argument("--progress-path", required=True,
+                   help="path to that roadmap's PROGRESS.md, read from the default branch")
+    s.add_argument("--landed-url", default=None, help="the report that took the window, for the note")
+    from . import gh as gh_mod
+    s.add_argument("--repo", default=gh_mod.ROADMAP_REPO)
+    s.set_defaults(fn=cmd_sweep)
 
     n = sub.add_parser("announce", help="post a section to Zulip")
     n.add_argument("--section", required=True, help="file holding the rendered section")

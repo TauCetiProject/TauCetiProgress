@@ -242,6 +242,45 @@ jobs:
             --jq .sha)"
           printf 'built %s (tree %s, parent %s)\n' "${commit:0:7}" "${tree:0:7}" "${MAIN_SHA:0:7}"
 
+          # Last look at the pull request, as late as possible. `state` was established during
+          # collection and everything since has trusted it, so a pull request withdrawn while this
+          # run was validating would land anyway. Retiring a report is now something this workflow
+          # itself does after a landing, so the case is rarer than it was -- but a human can still
+          # close one mid-run, and "closing it stopped it" should be true rather than usually true.
+          #
+          # This does NOT reintroduce the pull request as an input to what gets written. The tree and
+          # the parent still come from the two pinned SHAs, and nothing read here can cause a landing:
+          # a forged answer can only fail to stop one that was already fully validated. Read to
+          # refuse, never to authorise.
+          #
+          # Three attempts, because the distinction that matters is between an ANSWER that says the
+          # pull request moved and NO ANSWER at all. Treating a timeout as "it moved" would report a
+          # green run that landed nothing, and the planner then finds the pull request still open and
+          # in flight, so nothing reopens or retriggers it: one blip would strand a valid report for
+          # good. An answered mismatch is a considered non-landing and exits clean; an unanswered
+          # read is infrastructure failing and exits non-zero, which is the same distinction the gate
+          # draws between a refusal and a crash.
+          want="open $HEAD_SHA main false"
+          now=""
+          for attempt in 1 2 3; do
+            now="$(gh api "repos/$REPO/pulls/$PR" \
+                     --jq '[.state, .head.sha, .base.ref, (.draft|tostring)] | join(" ")' \
+                   2> reread.err)" && break
+            now=""
+            [ "$attempt" = 3 ] || sleep $(( attempt * 3 ))
+          done
+          if [ -z "$now" ]; then
+            echo "::error title=could not re-read the pull request::giving up rather than landing or silently skipping; this run failed, the report is untouched and the next run retries it"
+            cat reread.err || true
+            exit 1
+          fi
+          if [ "$now" != "$want" ]; then
+            printf '::warning title=not landed::the pull request is now %s, not %s; it changed after validation, so this report was not landed\n' \
+              "'$now'" "'$want'"
+            echo "landed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # force=false is the compare-and-swap. It fails if main is no longer at MAIN_SHA, because
           # then this commit is not a fast-forward of it.
           #
@@ -319,3 +358,41 @@ jobs:
           else
             echo "head is in $head_repo, not $REPO; leaving its branch alone"
           fi
+
+      # Retire the reports this landing has just made unmergeable.
+      #
+      # AFTER the swap, never before. `main` has moved, so every other open report for this area
+      # whose window does not start at the new cursor is unmergeable as a matter of fact rather than
+      # prediction -- the gate's append check can never pass for it again. Closing one earlier, on
+      # the strength of a report that had not yet landed, could cancel a valid landing whose
+      # replacement then failed, and raced this very workflow's own `state` snapshot.
+      #
+      # Never fails the run. The content is on `main` by now, so a cleanup that cannot finish must
+      # not turn a completed merge into a red one; the command says what it could not close and the
+      # next landing retries it.
+      # This job has had no checkout until now: it only ever called `gh`. The sweep is the first
+      # thing here that runs our own code, so fetch it at the SAME pinned ref the validator used --
+      # a different ref would retire reports by rules nobody reviewed alongside the gate.
+      - name: Check out the validator for the sweep
+        if: steps.land.outputs.landed == 'true' && needs.validate.outputs.area != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: TauCetiProject/TauCetiProgress
+          ref: ${{ inputs.progress_ref }}
+          path: validator
+          persist-credentials: false
+
+      - name: Retire the reports this landing orphaned
+        if: steps.land.outputs.landed == 'true' && needs.validate.outputs.area != ''
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          AREA: ${{ needs.validate.outputs.area }}
+          COMMIT: ${{ steps.land.outputs.commit }}
+        run: |
+          set -uo pipefail
+          python3 -c 'import sys; sys.path.insert(0, "validator"); from progress.cli import main; sys.exit(main())' \
+            sweep --repo "$REPO" --area "$AREA" \
+            --progress-path "TauCetiRoadmap/$AREA/PROGRESS.md" \
+            --landed-url "https://github.com/$REPO/commit/$COMMIT" || \
+            echo "::warning title=sweep did not run::orphaned reports in $AREA were left open"
