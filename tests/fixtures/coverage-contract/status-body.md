@@ -14,7 +14,9 @@ degree formula. Layer 2 is untouched.
 - **Hasse's bound** — needs the degree of Frobenius minus one, which needs Layer 1.
 
 ```coverage
-Layer 1: partial — the dual isogeny and the degree formula
-Layer 0: done
-Layer 2: untouched
+[
+  {"id": "Layer 1", "state": "partial", "remaining": "the dual isogeny and the degree formula"},
+  {"id": "Layer 0", "state": "done"},
+  {"id": "Layer 2", "state": "untouched"}
+]
 ```

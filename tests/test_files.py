@@ -96,19 +96,29 @@ def test_coverage_header_round_trips_and_passes_the_gate():
 
 
 def test_coverage_header_must_fit_the_status_header_and_the_schema():
-    raises(lambda: files.require_coverage(dict(COV, roadmap="ODE"), "PDE", B), "is for ODE")
-    raises(lambda: files.require_coverage(dict(COV, to_sha=A), "PDE", B), "describes")
-    raises(lambda: files.require_coverage(dict(COV, readme_sha="abc"), "PDE", B), "readme_sha")
-    raises(lambda: files.require_coverage(dict(COV, extra=1), "PDE", B), "unknown field")
-    raises(lambda: files.require_coverage({k: v for k, v in COV.items() if k != "readme_sha"}, "PDE", B), "missing field")
-    raises(lambda: files.require_coverage(dict(COV, layers=[]), "PDE", B), "non-empty")
-    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "soon"}]), "PDE", B), "expected one of")
-    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "done"}] * 2), "PDE", B), "twice")
-    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "done", "note": "x"}]), "PDE", B), "unknown field")
-    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "<b>", "state": "done"}]), "PDE", B), "short label")
-    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "done", "remaining": "x --> y"}]), "PDE", B), "angle brackets")
-    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": "Lane A", "state": "done", "remaining": "x" * 201}]), "PDE", B), "200")
-    raises(lambda: files.require_coverage(dict(COV, layers=[{"id": f"L{i}", "state": "done"} for i in range(65)]), "PDE", B), "cap")
+    lane = {"id": "Lane A", "state": "done"}
+    cases = [
+        ("another roadmap", dict(COV, roadmap="ODE"), "is for ODE"),
+        ("another commit", dict(COV, to_sha=A), "describes"),
+        ("a short README hash", dict(COV, readme_sha="abc"), "readme_sha"),
+        ("an unknown field", dict(COV, extra=1), "unknown field"),
+        ("a missing field", {k: v for k, v in COV.items() if k != "readme_sha"}, "missing field"),
+        ("no layers", dict(COV, layers=[]), "non-empty"),
+        ("an illegal state", dict(COV, layers=[dict(lane, state="soon")]), "expected one of"),
+        ("a layer twice", dict(COV, layers=[lane, lane]), "twice"),
+        ("an unknown layer field", dict(COV, layers=[dict(lane, note="x")]), "unknown field"),
+        ("an unsafe id", dict(COV, layers=[dict(lane, id="<b>")]), "short label"),
+        ("a note that closes the comment", dict(COV, layers=[dict(lane, remaining="x --> y")]), "angle brackets"),
+        ("an overlong note", dict(COV, layers=[dict(lane, remaining="x" * 201)]), "200"),
+        ("too many layers", dict(COV, layers=[{"id": f"L{i}", "state": "done"} for i in range(65)]), "cap"),
+    ]
+    for label, payload, needle in cases:
+        try:
+            files.require_coverage(payload, "PDE", B)
+        except FormatError as exc:
+            assert needle in str(exc), f"{label}: {exc}"
+        else:
+            raise AssertionError(f"{label}: accepted")
 
 
 def test_a_coverage_header_anywhere_but_the_prefix_is_refused():

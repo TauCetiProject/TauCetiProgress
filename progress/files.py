@@ -5,12 +5,9 @@
 
 Both carry a machine-readable HTML-comment header followed by prose, following the
 `tauceti-<kind>:v1 {json}` convention the rest of the project already uses for scoreboards and
-target markers. A `STATUS.md` may carry a second header, `tauceti-coverage:v1`: the report's
-verdict on each layer of the roadmap (done, partial, untouched, or unassessed when the material
-says nothing), with what remains, in a form a script can read. Its prose says the same things;
-the marker exists so that forty roadmaps' worth of them can be put on one page (the TauCeti site's
-Progress page) without a person re-reading every report. It has exactly the standing of the prose
-beside it: a model's account, not security-validated, and never a claim Lean has checked.
+target markers. A `STATUS.md` may carry a second header, `tauceti-coverage:v1`, the report's
+verdict on each layer of the roadmap in a form a script can read (README.md, "The coverage
+header"). It has the standing of the prose beside it: a model's account, not a checked claim.
 
 Everything here is pure: it takes and returns text, touches no network and no filesystem. That
 matters because the merge gate in CI runs these same functions on an untrusted PR's blobs, and it
@@ -189,13 +186,13 @@ def parse_headers(text, marker):
 
 
 def require_coverage(obj, area, to_sha):
-    """A `tauceti-coverage:v1` payload, validated whole, or raise.
+    """A `tauceti-coverage:v1` payload, validated whole, or raise. The one schema, used by the
+    worker on the model's block and by the gate on a pull request's file.
 
-    Closed schema, like the other headers. The payload must name the same roadmap and library commit
-    as the status header beside it, the README it assessed (a SHA-256 of that file's text: the
-    consumer refuses an assessment whose README hash does not match the README it read the layers
-    from, since a layer's requirements can change under an unchanged heading), and every layer once
-    with a legal state. Returned in canonical form, ready to serialise.
+    Closed, like the other headers: the same roadmap and library commit as the status header beside
+    it, a `readme_sha` (SHA-256 of the README assessed), and every layer once with a legal state.
+    Duplicate ids are refused here, before anything keys a dictionary by id. Returned in canonical
+    form, ready to serialise.
     """
     if not isinstance(obj, dict):
         raise FormatError(f"{COVERAGE_MARKER} header must be a JSON object")

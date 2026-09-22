@@ -102,10 +102,12 @@ def _plan_with_layers():
     return plan
 
 
+BLOCK = '\n\n```coverage\n[{"id": "Layer 0", "state": "done"}, {"id": "Layer 1", "state": "partial", "remaining": "the homological version"}]\n```\n'
+
+
 def test_render_update_turns_the_coverage_block_into_the_header():
     plan = _plan_with_layers()
-    body = PROSE + "\n\n```coverage\nLayer 0: done\nLayer 1: partial — the homological version\n```\n"
-    status_text, _, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+    status_text, _, _ = apply_mod.render_update(plan, PROSE + BLOCK, PROSE, None, None)
     parsed = files.parse_status(status_text)
     assert parsed["coverage"] == {"roadmap": plan["roadmap"], "to_sha": plan["to_sha"], "readme_sha": "0" * 64,
                                   "layers": [{"id": "Layer 0", "state": "done"},
@@ -116,7 +118,7 @@ def test_render_update_turns_the_coverage_block_into_the_header():
 
 def test_render_update_refuses_a_block_that_does_not_fit_the_plan():
     plan = _plan_with_layers()
-    body = PROSE + "\n\n```coverage\nLayer 0: done\n```\n"
+    body = PROSE + '\n\n```coverage\n[{"id": "Layer 0", "state": "done"}]\n```\n'
     try:
         apply_mod.render_update(plan, body, PROSE, None, None)
     except files.FormatError as exc:
@@ -130,10 +132,59 @@ def test_render_update_without_a_block_or_without_layers_is_a_plain_report():
     status_text, _, _ = apply_mod.render_update(plan, PROSE, PROSE, None, None)
     assert files.parse_status(status_text)["coverage"] is None
     # An older plan with no layers: a block is dropped rather than refused.
-    body = PROSE + "\n\n```coverage\nLayer 0: done\n```\n"
-    status_text, _, _ = apply_mod.render_update(dict(PLAN), body, PROSE, None, None)
+    status_text, _, _ = apply_mod.render_update(dict(PLAN), PROSE + BLOCK, PROSE, None, None)
     assert files.parse_status(status_text)["coverage"] is None
     assert "```coverage" not in status_text
+
+
+# ----- the wire contract with the consumer ----------------------------------------------------
+#
+# `tests/fixtures/coverage-contract/` holds a README, a model status body with its block, and the
+# exact header line the consumer (TauCeti's scripts/roadmap_progress.py) was recorded accepting.
+# The consumer keeps its own extraction and validation code; this proves the producer still emits
+# byte for byte what it accepted, offline. It is not a live cross-repository test.
+
+FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "coverage-contract"
+
+
+def _contract_plan(readme_text=None):
+    from progress import layers, plan as plan_mod
+    exp = json.loads((FIXTURE / "expected.json").read_text(encoding="utf-8"))
+    if readme_text is None:
+        lay, sha = plan_mod.read_area_layers(FIXTURE.parent, FIXTURE.name)
+    else:
+        lay, sha = layers.headings(readme_text), layers.readme_sha(readme_text)
+    return exp, {"roadmap": exp["roadmap"], "rel_dir": f"TauCetiRoadmap/{exp['roadmap']}",
+                 "from_sha": exp["from_sha"], "to_sha": exp["to_sha"], "prs": [1, 2],
+                 "from_date": "2026-01-01T00:00:00Z", "to_date": "2026-02-01T00:00:00Z",
+                 "layers": lay, "readme_sha": sha, "bootstrapped": True}
+
+
+def test_the_producer_emits_the_header_the_consumer_was_recorded_accepting():
+    exp, plan = _contract_plan()
+    assert [l["id"] for l in plan["layers"]] == exp["layer_ids"], plan["layers"]
+    assert [l["line"] for l in plan["layers"]] == exp["layer_lines"], plan["layers"]
+    assert plan["readme_sha"] == exp["readme_sha"]
+    body = (FIXTURE / "status-body.md").read_text(encoding="utf-8")
+    status_text, progress_text, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+    assert status_text.splitlines()[1] == exp["header_line"], status_text.splitlines()[1]
+    assert "```coverage" not in status_text
+    files.validate_update(exp["roadmap"], None, status_text, None, progress_text)  # the gate accepts the pair
+
+
+def test_editing_the_readme_changes_the_hash_the_consumer_refuses_on():
+    """Same layer ids, different specification: the hash is of the whole text, so the consumer
+    (which compares it against the README it reads) refuses the old assessment."""
+    readme = (FIXTURE / "README.md").read_text(encoding="utf-8")
+    exp, _ = _contract_plan()
+    for edited in (readme + "\nA new requirement in Layer 2.\n",
+                   readme.replace("Hasse's bound", "the Hasse–Weil bound")):
+        _, plan = _contract_plan(edited)
+        assert [l["id"] for l in plan["layers"]] == exp["layer_ids"]
+        assert plan["readme_sha"] != exp["readme_sha"]
+        body = (FIXTURE / "status-body.md").read_text(encoding="utf-8")
+        status_text, _, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+        assert status_text.splitlines()[1] != exp["header_line"]
 
 
 def test_render_update_appends_to_an_existing_log():

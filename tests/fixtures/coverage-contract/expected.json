@@ -1,77 +1,11 @@
 {
-  "_comment": "Producer/consumer contract for tauceti-coverage:v1. `producer` is what plan+apply emit from README.md and status-body.md; `consumer` is what TauCeti's scripts/roadmap_progress.py at `consumer.revision` made of it. Regenerate only when the contract changes, and record the consumer revision you checked against.",
+  "_comment": "The wire contract for tauceti-coverage:v1: the exact header line plan+apply emit from README.md and status-body.md. Recorded independently of the producer and checked by hand against TauCeti's scripts/roadmap_progress.py at `consumer_revision` (states_from_marker accepted it, layer ids and lines agreed). Regenerate only when the wire format changes, and record the consumer revision checked.",
   "roadmap": "EllipticCurvesContract",
   "from_sha": "a1b2c3d000000000000000000000000000000000",
   "to_sha": "b9c8d7e000000000000000000000000000000000",
-  "producer": {
-    "readme_sha": "496c26a6ee3a7751c35cbfbb89ed261de05a4c967756a4620a42a8cec0627e98",
-    "layers": [
-      {
-        "id": "Layer 0",
-        "title": "Layer 0: the group law",
-        "line": 13
-      },
-      {
-        "id": "Layer 1",
-        "title": "Layer 1: isogenies and the dual — degree, separability",
-        "line": 17
-      },
-      {
-        "id": "Layer 2",
-        "title": "Layer 2: Hasse's bound",
-        "line": 21
-      }
-    ],
-    "coverage": {
-      "roadmap": "EllipticCurvesContract",
-      "to_sha": "b9c8d7e000000000000000000000000000000000",
-      "readme_sha": "496c26a6ee3a7751c35cbfbb89ed261de05a4c967756a4620a42a8cec0627e98",
-      "layers": [
-        {
-          "id": "Layer 0",
-          "state": "done"
-        },
-        {
-          "id": "Layer 1",
-          "state": "partial",
-          "remaining": "the dual isogeny and the degree formula"
-        },
-        {
-          "id": "Layer 2",
-          "state": "untouched"
-        }
-      ]
-    },
-    "header_line": "<!--tauceti-coverage:v1 {\"layers\":[{\"id\":\"Layer 0\",\"state\":\"done\"},{\"id\":\"Layer 1\",\"remaining\":\"the dual isogeny and the degree formula\",\"state\":\"partial\"},{\"id\":\"Layer 2\",\"state\":\"untouched\"}],\"readme_sha\":\"496c26a6ee3a7751c35cbfbb89ed261de05a4c967756a4620a42a8cec0627e98\",\"roadmap\":\"EllipticCurvesContract\",\"to_sha\":\"b9c8d7e000000000000000000000000000000000\"}-->",
-    "status_prefix_lines": [
-      "<!--tauceti-status:v1 {\"roadmap\":\"EllipticCurvesContract\",\"to_sha\":\"b9c8d7e000000000000000000000000000000000\",\"ts\":\"2026-02-01T00:00:00Z\"}-->",
-      "<!--tauceti-coverage:v1 {\"layers\":[{\"id\":\"Layer 0\",\"state\":\"done\"},{\"id\":\"Layer 1\",\"remaining\":\"the dual isogeny and the degree formula\",\"state\":\"partial\"},{\"id\":\"Layer 2\",\"state\":\"untouched\"}],\"readme_sha\":\"496c26a6ee3a7751c35cbfbb89ed261de05a4c967756a4620a42a8cec0627e98\",\"roadmap\":\"EllipticCurvesContract\",\"to_sha\":\"b9c8d7e000000000000000000000000000000000\"}-->",
-      "# Status: EllipticCurvesContract"
-    ]
-  },
-  "consumer": {
-    "revision": "9477d5cfbd541efe61b163b86418f8f68e47271d",
-    "layer_ids": [
-      "Layer 0",
-      "Layer 1",
-      "Layer 2"
-    ],
-    "layer_lines": [
-      13,
-      17,
-      21
-    ],
-    "states": [
-      "done",
-      "partial",
-      "untouched"
-    ],
-    "remaining": {
-      "Layer 1": "the dual isogeny and the degree formula"
-    },
-    "refused_edited_readme_body": "marker assessed a different README than the one the layers were read from",
-    "refused_edited_title_same_ids": "marker assessed a different README than the one the layers were read from",
-    "refused_other_library_commit": "marker describes a different library commit than the status header",
-    "status_header_to_sha": "b9c8d7e000000000000000000000000000000000"
-  }
+  "readme_sha": "496c26a6ee3a7751c35cbfbb89ed261de05a4c967756a4620a42a8cec0627e98",
+  "layer_ids": ["Layer 0", "Layer 1", "Layer 2"],
+  "layer_lines": [13, 17, 21],
+  "header_line": "<!--tauceti-coverage:v1 {\"layers\":[{\"id\":\"Layer 0\",\"state\":\"done\"},{\"id\":\"Layer 1\",\"remaining\":\"the dual isogeny and the degree formula\",\"state\":\"partial\"},{\"id\":\"Layer 2\",\"state\":\"untouched\"}],\"readme_sha\":\"496c26a6ee3a7751c35cbfbb89ed261de05a4c967756a4620a42a8cec0627e98\",\"roadmap\":\"EllipticCurvesContract\",\"to_sha\":\"b9c8d7e000000000000000000000000000000000\"}-->",
+  "consumer_revision": "b48d6c94cc5c8abba44c6eeee6b844a8a22f2bd0"
 }

@@ -99,10 +99,10 @@ def test_both_status_prompts_are_voyager_shaped_and_bounded():
 
 
 def test_the_progress_prompt_asks_for_the_coverage_block_in_the_checked_shape():
-    """The worker's prompt is the one handed a plan with a `layers` list, so it is the one that asks
-    for the block. Its states and its bound must not drift from what `files` accepts."""
+    """The worker's prompt is handed the plan's `layers`, so it asks for the block; its states and
+    its note bound must not drift from what `files` accepts."""
     text = (cli.PROMPT_DIR / "progress.md").read_text()
-    assert "```coverage" in text
+    assert "```coverage" in text and '"state"' in text and '"remaining"' in text
     for state in files.LAYER_STATES:
         assert f"`{state}`" in text, state
     assert "at most 200" in text and files.REMAINING_RE.pattern.endswith("{1,200}\\Z")
@@ -110,15 +110,10 @@ def test_the_progress_prompt_asks_for_the_coverage_block_in_the_checked_shape():
 
 
 def test_the_standalone_status_prompt_is_prose_only_and_says_so():
-    """`prompt status` is given `__CONTEXT__` and no plan, so it has no layer list to assess against.
-    It must not ask for a block (the model would have to invent layer ids), and it must say that a
-    report written from it carries no coverage header, so nobody reads the other prompt's block
-    into this interface."""
+    """`prompt status` gets `__CONTEXT__` and no plan, so no layer list to assess against."""
     text = (cli.PROMPT_DIR / "status.md").read_text()
     assert "__CONTEXT__" in text and "__PLAN_FILE__" not in text
-    assert "```coverage" not in text
-    assert "no per-layer coverage header" in text
-    assert "prose-only" in text
+    assert "```coverage" not in text and "no per-layer coverage header" in text
 
 
 def test_both_status_prompts_prefer_readable_names_and_documentation():

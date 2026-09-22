@@ -105,23 +105,27 @@ into a heading, or narrate the development process.
 
 **Then, after the prose, one fenced block giving your verdict on each layer.** `__PLAN_FILE__` has
 a `layers` list, the README's own layer headings with an `id` each (`Layer 3`, `Lane G`, `L0A`).
-If that list is empty, write no block. Otherwise end the file with exactly this, one line per id in
-the plan's order, every id once and no others:
+If that list is empty, write no block. Otherwise end the file with exactly this: a fence named
+`coverage` holding a JSON array with one object per id in the plan's order, every id once and no
+others:
 
 ```coverage
-Layer 0: partial — the fundamental identity and Weil reciprocity
-Layer 1: done
-Layer 2: untouched
-Layer 3: unassessed
+[
+  {"id": "Layer 0", "state": "partial", "remaining": "the fundamental identity and Weil reciprocity"},
+  {"id": "Layer 1", "state": "done"},
+  {"id": "Layer 2", "state": "untouched"},
+  {"id": "Layer 3", "state": "unassessed"}
+]
 ```
 
-The state is one of `done`, `partial`, `untouched`, `unassessed`, and it must agree with what your
+`state` is one of `done`, `partial`, `untouched`, `unassessed`, and must agree with what your
 "Roadmap coverage" paragraph says about that layer: `done` when the layer's milestones are all
 proved, `partial` when some are, `untouched` when nothing has landed, `unassessed` when the supplied
-material does not let you say. After the state, optionally an em dash and one line, at most 200
-characters, naming what remains for the next contributor. No angle brackets in it. A script turns
-this block into a machine-readable header and removes it from the prose; the report is refused if
-a line names a layer the plan does not list or leaves one out.
+material does not let you say. `remaining` is optional: one line, at most 200 characters, no angle
+brackets, naming what remains for the next contributor; omit the key rather than leave it empty.
+No other keys. A script turns this block into a machine-readable header and removes it from the
+prose; the report is refused if the block is not valid JSON, names a layer the plan does not list,
+or leaves one out.
 
 Do not write a top-level `#` heading in either file; the scripts add the headings and the machine
 headers.

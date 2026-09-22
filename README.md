@@ -80,44 +80,46 @@ A status snapshot may carry a second machine header beside `tauceti-status:v1`:
 # Status: EllipticCurves
 ```
 
-It is the report's verdict on each layer of the roadmap, in a form a script can read: the prose
-already says which layers are done, partial or untouched, but nothing can aggregate prose across
-forty roadmaps. The consumer is the TauCeti site's Progress page (`scripts/roadmap_progress.py`
-in the TauCeti repository), which shows one strip per roadmap, one segment per layer.
+It is the report's verdict on each layer of the roadmap, in a form a script can read; the prose
+says the same things, but nothing can aggregate prose across forty roadmaps. The consumer is the
+TauCeti site's Progress page (`scripts/roadmap_progress.py` in the TauCeti repository).
 
-How it is made, following the design rule above that a model only ever writes prose:
+**Wire schema.** `roadmap` and `to_sha` equal the status header's; `readme_sha` is the SHA-256 of
+the README the layers were read from; `layers` is a non-empty list (at most 64) of
+`{"id", "state", "remaining"?}` with `id` a short label (`Layer 3`, `Lane G`, `L0A`), `state` one
+of `done`, `partial`, `untouched`, `unassessed` (the material said nothing), and `remaining` an
+optional one-line note of at most 200 characters with no angle brackets. No other keys anywhere.
+Keys are sorted and the JSON is compact; `files.require_coverage` is the one definition, and both
+the worker and the gate run it.
 
-- `plan` extracts the roadmap's **layers** from its README (the `Layer` / `Lane` / `Part` /
-  `Stage` headings, or `L0A`-style labels) and records them in the plan with their ids, together
-  with `readme_sha`, a SHA-256 of the README's text. A README with no such headings yields no
-  layers and no header.
-- The writing prompt asks the model to end the status prose with a fenced ```` ```coverage ````
-  block, one line per listed id: `Layer 0: partial — what remains`. The state is one of `done`,
-  `partial`, `untouched`, `unassessed` (the material said nothing), and the optional note after
-  the dash is one line of at most 200 characters.
-- `apply` removes the block from the prose, checks that it names every listed layer exactly once
-  and nothing else, and writes the header. A block that does not fit is refused on the worker; a
-  body with no block gives a report with no header, exactly as before this header existed.
-- The gate treats the header as part of the canonical prefix: it must sit on the line after the
-  status header and nowhere else, name the same roadmap and commit, and pass the closed schema.
-  It has the same standing as the prose it summarises: not security-validated, and the gate proves
-  its shape, never its truth.
+**Trust boundary.** The model supplies only the assessments, as a JSON array inside a fenced
+```` ```coverage ```` block at the end of its status prose. Code supplies everything else: `plan`
+records the README's layer headings (`Layer` / `Lane` / `Part` / `Stage`, or `L0A`-style labels)
+and `readme_sha` in the plan; `apply` removes the block, validates the payload against the schema,
+checks it names every listed layer exactly once and nothing else, and writes the header; the gate
+treats the header as part of the canonical prefix (the line after the status header, nowhere
+else) and re-validates it. The gate proves the header's shape, never its truth, and cannot check
+`readme_sha` (it never checks out the roadmap repository): the header is a claim, not a
+certificate.
 
-This first version covers the selected labelled area's own README, and nothing below it. An
-umbrella area whose README is an index of sub-roadmaps with READMEs of their own
-(RepresentationTheory) has no layer headings itself, so its reports carry no header, and the
-sub-roadmaps' layers are not assessed by this pipeline at all: on the Progress page they stay on
-hand transcriptions. A sub-roadmap assessment needs a carrier of its own -- its own roadmap
-identity, README hash and layer-id namespace -- agreed with the gate and the consumer together;
-flattening the children's layers under the parent's hash would misbind them, and would also
-overrun the header's layer bound.
+**Missing block.** A README with no layer headings gives a plan with no layers and a report with no
+header. A body with no block gives a report with no header, as every report was before the header
+existed. A block that is present but malformed, not JSON, or does not fit the plan is refused on
+the worker, so a half-right assessment never reaches a pull request.
 
-`readme_sha` is what binds the assessment to the specification it was made against. Layer ids
-alone do not: a layer's requirements can change under an unchanged heading. The consumer refuses a
-header whose hash does not match the README it read the layers from, and shows those layers as
-unassessed with that reason, rather than applying an old verdict to new requirements. The gate
-cannot check the hash (it never checks out the roadmap repository), which is one more reason the
-header is a claim, not a certificate.
+**README hash.** `readme_sha` binds an assessment to the specification it was made against: layer
+ids alone do not, since a layer's requirements can change under an unchanged heading. The consumer
+refuses a header whose hash does not match the README it reads and shows those layers as
+unassessed with that reason.
+
+**Scope.** This version covers the selected labelled area's own README and nothing below it. An
+umbrella area whose README is an index of sub-roadmaps (RepresentationTheory) has no layer
+headings, so its reports carry no header and the children are not assessed by this pipeline; a
+sub-roadmap assessment needs a carrier of its own, agreed with the gate and the consumer together.
+
+**Rollout.** Merge here, then bump the two pins in TauCetiRoadmap's `progress-*.yml` workflows and
+the worker's `PROGRESS_REF` to the same SHA, together: the generator and the gate must run one
+version. Reports written before the bump simply have no header.
 
 ## Trust boundary
 

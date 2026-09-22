@@ -442,9 +442,8 @@ def test_a_cursor_in_no_history_at_all_is_still_refused():
 
 
 def test_the_plan_records_the_selected_areas_layers_and_readme_hash_exactly():
-    """`apply` binds the model's verdicts to what the plan says here, so the inventory must be the
-    README's layer headings in order, with ids and 1-based lines, and the hash must be of the
-    README's text -- the consumer compares against exactly that."""
+    """The inventory `apply` binds the verdicts to: the README's layer headings in order, with ids
+    and 1-based lines, and a hash of the README's text."""
     import hashlib
     with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
         shas = make_repo(code, ["init", "a (#1)", "b (#2)"])
@@ -459,13 +458,9 @@ def test_the_plan_records_the_selected_areas_layers_and_readme_hash_exactly():
 
 
 def test_an_umbrella_areas_sub_roadmaps_are_not_assessed_by_the_plan():
-    """RepresentationTheory is one labelled area whose README is an index of sub-roadmaps with
-    READMEs of their own. The plan reads only the area's own README: it has no layer headings, so
-    the plan lists no layers, the report carries no coverage header, and the children's layers are
-    not in the plan at all. That is this first version's scope, recorded here so that the
-    extraction cross-check with the consumer is not read as end-to-end support for the children:
-    on the Progress page they stay on hand transcriptions until a child assessment has a carrier
-    of its own."""
+    """An umbrella area (RepresentationTheory) has an index README with no layer headings: the plan
+    lists no layers, the report carries no header, and the children are not assessed. Top-level
+    scope only, by design (README.md, "Scope")."""
     import hashlib
     with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
         shas = make_repo(code, ["init", "a (#1)", "b (#2)"])
