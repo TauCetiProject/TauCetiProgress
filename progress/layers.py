@@ -84,6 +84,10 @@ def split_block(body):
         entries = json.loads(body[start.end():close.start()])
     except json.JSONDecodeError as exc:
         raise files.FormatError(f"the ```coverage block is not valid JSON: {exc}") from exc
+    # `None` is how this function says "no block", so a block holding JSON `null` must not decode
+    # to it: the caller would take a present, malformed block for an absent one and drop it.
+    if entries is None:
+        raise files.FormatError("the ```coverage block holds JSON null, not a list of layers")
     return body[:start.start()].rstrip() + "\n", entries
 
 

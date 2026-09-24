@@ -137,6 +137,22 @@ def test_render_update_without_a_block_or_without_layers_is_a_plain_report():
     assert "```coverage" not in status_text
 
 
+def test_render_update_tells_an_absent_block_from_a_null_one():
+    """`split_block` returns `None` for "no block", which is also what `json.loads("null")` gives;
+    a null block must be refused, not mistaken for a missing one and published headerless."""
+    plan = _plan_with_layers()
+    try:
+        apply_mod.render_update(plan, PROSE + "\n\n```coverage\nnull\n```\n", PROSE, None, None)
+    except files.FormatError as exc:
+        assert "null" in str(exc), exc
+    else:
+        raise AssertionError("a ```coverage block holding null must be refused")
+    status_text, _, _ = apply_mod.render_update(plan, PROSE, PROSE, None, None)
+    assert files.parse_status(status_text)["coverage"] is None
+    status_text, _, _ = apply_mod.render_update(plan, PROSE + BLOCK, PROSE, None, None)
+    assert [l["id"] for l in files.parse_status(status_text)["coverage"]["layers"]] == ["Layer 0", "Layer 1"]
+
+
 # ----- the wire contract with the consumer ----------------------------------------------------
 #
 # `tests/fixtures/coverage-contract/` holds a README, a model status body with its block, and the

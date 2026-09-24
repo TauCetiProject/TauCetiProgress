@@ -109,6 +109,7 @@ def test_split_block_refuses_a_block_it_cannot_take_whole():
         ("two blocks", BLOCK + BLOCK, "more than one"),
         ("unclosed", PROSE + "\n```coverage\n[]\n", "not closed"),
         ("not JSON", PROSE + "\n```coverage\nLayer 0: done\n```\n", "not valid JSON"),
+        ("null", PROSE + "\n```coverage\nnull\n```\n", "JSON null"),
     ]
     for label, body, needle in cases:
         raises(lambda: layers.split_block(body), needle, label)

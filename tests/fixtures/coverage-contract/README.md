@@ -26,4 +26,4 @@ The bound `|#E(F_q) - q - 1| <= 2 sqrt q` from the degree of Frobenius minus one
 
 ### Example A: y^2 = x^3 + 1 over F_7
 
-Six points.
+Eleven affine points, so twelve with the point at infinity.
