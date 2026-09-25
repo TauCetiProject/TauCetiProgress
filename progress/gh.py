@@ -31,6 +31,14 @@ class GhError(RuntimeError):
     """A `gh` invocation failed."""
 
 
+class GhNotFound(GhError):
+    """GitHub answered 404: the thing asked for is not there.
+
+    A subclass so every existing `except GhError` still catches it. It exists for the callers that
+    must tell "GitHub says no" from "GitHub did not answer", which are different facts.
+    """
+
+
 def gh(args, retries=3):
     """Run `gh` and return stdout, retrying transient failures.
 
@@ -45,6 +53,9 @@ def gh(args, retries=3):
         last = proc.stderr.strip()
         if attempt + 1 < retries:
             time.sleep(2 ** attempt)
+    # Retried like anything else first: a 404 immediately after a write can be replication lag.
+    if "(HTTP 404)" in last:
+        raise GhNotFound(f"gh {' '.join(args)}: not found: {last}")
     raise GhError(f"gh {' '.join(args)} failed after {retries} attempts: {last}")
 
 
@@ -158,6 +169,7 @@ def open_progress_prs(repo=ROADMAP_REPO, branch_prefix="progress/"):
             rows.append({
                 "number": r.get("number"),
                 "headRefName": ref,
+                "headSha": head.get("sha") or "",
                 "baseRefName": (r.get("base") or {}).get("ref") or "",
                 "title": r.get("title") or "",
                 "url": r.get("html_url") or "",
@@ -169,17 +181,22 @@ def open_progress_prs(repo=ROADMAP_REPO, branch_prefix="progress/"):
 
 
 def file_on_default_branch(path, repo=ROADMAP_REPO, ref="main"):
-    """The text of `path` on `ref`, or None if it is not there.
+    """The text of `path` on `ref`, or None if GitHub says it is not there.
 
     Read through the API rather than from a clone on purpose. A worker's checkout is a snapshot from
     whenever it started, and the questions this answers -- where is the cursor NOW, is this report
     still the live one -- are exactly the ones a stale snapshot gets wrong.
+
+    None means a 404 and nothing else. Any other failure raises `GhError`, because "absent" and
+    "could not tell" drive opposite decisions: the cleanup retires reports only when a same-named
+    roadmap under the other parent is absent, and treating a timeout as absence would let it act on
+    the wrong roadmap's log.
     """
     try:
         raw = gh(["api", f"repos/{repo}/contents/{path}?ref={ref}", "--jq", ".content"])
-    except GhError:
+    except GhNotFound:
         return None
     try:
         return base64.b64decode("".join(raw.split())).decode("utf-8", "surrogateescape")
-    except (ValueError, UnicodeDecodeError):
-        return None
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise GhError(f"{repo}:{path}@{ref} exists but could not be decoded: {exc}") from exc

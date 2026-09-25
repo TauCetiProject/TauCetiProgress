@@ -67,6 +67,13 @@ can be stale, and a report starting *ahead* of a stale answer disagrees with it 
 a spent one. Reading less history can only shrink the evidence, so a stale answer retires fewer
 reports rather than a live one.
 
+That holds for full SHAs, not for the seven characters a branch name carries: a report starting at a
+commit the stale read has not seen can share its prefix with a spent cursor. The branch name only
+nominates candidates; a report is retired when the full `from_sha` of the section its own head
+appends is a spent cursor, and kept whenever that cannot be read. For the same reason, "is there a
+same-named roadmap under the other parent" is answered only by a 404; a lookup that fails retires
+nothing, since reports cannot be attributed to one roadmap or the other when both exist.
+
 Only branches matching the gate's own grammar, targeting the branch a report must target, are ever
 touched. Anything else is somebody's ordinary pull request that happens to begin with `progress/`,
 and failing an automated gate is not a reason to close a human's work.

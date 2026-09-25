@@ -251,7 +251,10 @@ jobs:
           # collection and everything since has trusted it, so a pull request withdrawn while this
           # run was validating would land anyway. Retiring a report is now something this workflow
           # itself does after a landing, so the case is rarer than it was -- but a human can still
-          # close one mid-run, and "closing it stopped it" should be true rather than usually true.
+          # close one mid-run. This narrows that window; it does not eliminate it. A close or a
+          # retarget between this read and the ref PATCH below is not seen, and the compare-and-swap
+          # still lands if `main` has not moved. No read can close that gap, because GitHub offers
+          # no way to make a ref update conditional on a pull request's state.
           #
           # This does NOT reintroduce the pull request as an input to what gets written. The tree and
           # the parent still come from the two pinned SHAs, and nothing read here can cause a landing:

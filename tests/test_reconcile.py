@@ -49,11 +49,15 @@ D = "ddddddd" + "0" * 33
 
 
 def pr(number, area="ModularForms", from7="bbbbbbb", to7="ccccccc", owner="TauCetiProject",
-       base="main"):
+       base="main", start=None):
+    """A report row. `start` is the full SHA its window really starts at; by default the fixture
+    whose prefix the branch names."""
     return {"number": number, "url": f"https://example.invalid/{number}",
             "headRefName": f"progress/{from7}-{to7}/{area}",
+            "headSha": f"head{number}",
             "baseRefName": base,
-            "headRepositoryOwner": {"login": owner}}
+            "headRepositoryOwner": {"login": owner},
+            "_start": start if start is not None else from7 + "0" * 33}
 
 
 def evidence(text):
@@ -62,7 +66,7 @@ def evidence(text):
 
 def retire(rows, text=None, area="ModularForms"):
     consumed, live = evidence(text if text is not None else log((A, B), (B, C)))
-    return reconcile.retirable_prs(rows, area, consumed, live)
+    return reconcile.retirable_prs(rows, area, consumed, live, start_of=lambda r: r.get("_start"))
 
 
 def test_evidence_names_spent_cursors_and_the_live_one():
@@ -105,6 +109,43 @@ def test_a_prefix_matching_both_spent_and_live_is_kept():
     live_twin = "aaaaaaa" + "9" * 33
     rows = retire([pr(1, from7="aaaaaaa")], text=log((A, live_twin)))
     assert rows == []
+
+
+def test_a_stale_log_and_a_prefix_collision_keep_the_live_report():
+    """The stale log says A -> B, but history has moved on to B -> C, and C shares A's seven-character
+    prefix. The report genuinely starting at C matches spent A by prefix and is not the stale live B,
+    so a prefix-only rule would retire it. Its full starting SHA is C, which the log never spent."""
+    c_twin = "aaaaaaa" + "c" * 33
+    rows = retire([pr(1, from7="aaaaaaa", start=c_twin)], text=log((A, B)))
+    assert rows == []
+
+
+def test_a_report_whose_full_start_cannot_be_read_is_kept():
+    for start in ("", None, "fffffff" + "0" * 33):
+        row = pr(1, from7="aaaaaaa")
+        row["_start"] = start
+        assert retire([row]) == [], start
+
+
+def test_report_start_reads_the_heads_newest_section():
+    orig = reconcile.gh.file_on_default_branch
+    heads = {"head1": log((A, B), (B, C)), "head2": log((A, B)), "head3": "garbage"}
+
+    def fake(path, repo=None, ref="main"):
+        if ref == "head4":
+            raise reconcile.gh.GhError("timeout")
+        return heads.get(ref)
+    reconcile.gh.file_on_default_branch = fake
+    try:
+        path = "TauCetiRoadmap/ModularForms/PROGRESS.md"
+        assert reconcile.report_start(pr(1, from7="bbbbbbb", to7="ccccccc"), path) == B
+        # The branch and the head disagree: kept.
+        assert reconcile.report_start(pr(2, from7="bbbbbbb", to7="ccccccc"), path) is None
+        assert reconcile.report_start(pr(3), path) is None
+        assert reconcile.report_start(pr(4), path) is None
+        assert reconcile.report_start(pr(5), path) is None  # 404
+    finally:
+        reconcile.gh.file_on_default_branch = orig
 
 
 def test_a_branch_outside_the_gates_grammar_is_never_touched():
@@ -175,11 +216,95 @@ def test_other_parent_maps_both_ways():
     assert reconcile.other_parent("Elsewhere/X/PROGRESS.md") is None
 
 
-def _fake_files(text_by_path, open_prs):
+def _fake_files(text_by_path, open_prs, heads=None):
+    """`text_by_path` is `main`; `heads` maps a head SHA to that report's `PROGRESS.md`. A value that
+    is an exception is raised instead, standing in for a read that did not answer."""
     orig = (reconcile.gh.file_on_default_branch, reconcile.gh.open_progress_prs)
-    reconcile.gh.file_on_default_branch = lambda path, repo=None: text_by_path.get(path)
+
+    def read(path, repo=None, ref="main"):
+        got = text_by_path.get(path) if ref == "main" else (heads or {}).get(ref)
+        if isinstance(got, Exception):
+            raise got
+        return got
+    reconcile.gh.file_on_default_branch = read
     reconcile.gh.open_progress_prs = lambda repo=None: open_prs
     return orig
+
+
+def _no_close():
+    orig = reconcile.close_orphans
+
+    def refuse(*a, **kw):
+        raise AssertionError("close_orphans must not be called")
+    reconcile.close_orphans = refuse
+    return orig
+
+
+def test_only_a_404_reads_as_absent():
+    """`file_on_default_branch` is None for GitHub's 404 and raises for everything else."""
+    import subprocess
+    from progress import gh
+
+    def fake_run(stderr):
+        return lambda *a, **kw: subprocess.CompletedProcess(a, 1, stdout="", stderr=stderr)
+    orig = (gh.subprocess.run, gh.time.sleep)
+    gh.time.sleep = lambda s: None
+    try:
+        gh.subprocess.run = fake_run("gh: Not Found (HTTP 404)")
+        assert gh.file_on_default_branch("Completed/X/PROGRESS.md") is None
+        for err in ("gh: Server Error (HTTP 502)", "gh: API rate limit exceeded (HTTP 403)",
+                    "error connecting to api.github.com"):
+            gh.subprocess.run = fake_run(err)
+            try:
+                gh.file_on_default_branch("Completed/X/PROGRESS.md")
+            except gh.GhNotFound:
+                raise AssertionError(f"{err!r} read as absent")
+            except gh.GhError:
+                pass
+            else:
+                raise AssertionError(f"{err!r} did not raise")
+    finally:
+        gh.subprocess.run, gh.time.sleep = orig
+
+
+def test_a_sibling_lookup_that_fails_retires_nothing():
+    """GitHub not answering is not GitHub saying 404. The sibling may exist, and if it does the
+    reports cannot be attributed to either roadmap."""
+    orig = _fake_files({"TauCetiRoadmap/X/PROGRESS.md": log((A, B), (B, C)),
+                        "Completed/X/PROGRESS.md": reconcile.gh.GhError("HTTP 502")},
+                       [pr(1, area="X", from7="aaaaaaa")],
+                       heads={"head1": log((A, B))})
+    orig_close = _no_close()
+    try:
+        assert reconcile.sweep_area("X", "TauCetiRoadmap/X/PROGRESS.md") == (0, 0)
+    finally:
+        reconcile.gh.file_on_default_branch, reconcile.gh.open_progress_prs = orig
+        reconcile.close_orphans = orig_close
+
+
+def test_a_failed_read_of_the_log_retires_nothing():
+    orig = _fake_files({"TauCetiRoadmap/X/PROGRESS.md": reconcile.gh.GhError("HTTP 502")},
+                       [pr(1, area="X", from7="aaaaaaa")])
+    orig_close = _no_close()
+    try:
+        assert reconcile.sweep_area("X", "TauCetiRoadmap/X/PROGRESS.md") == (0, 0)
+    finally:
+        reconcile.gh.file_on_default_branch, reconcile.gh.open_progress_prs = orig
+        reconcile.close_orphans = orig_close
+
+
+def test_sweep_keeps_a_live_report_behind_a_stale_log_and_a_prefix_collision():
+    """End to end: `main` reads stale as A -> B while the report at C (C[:7] == A[:7]) is live."""
+    c_twin = "aaaaaaa" + "c" * 33
+    orig = _fake_files({"Completed/X/PROGRESS.md": log((A, B))},
+                       [pr(1, area="X", from7="aaaaaaa", to7="ddddddd")],
+                       heads={"head1": log((A, B), (B, c_twin), (c_twin, D))})
+    orig_close = _no_close()
+    try:
+        assert reconcile.sweep_area("X", "Completed/X/PROGRESS.md") == (0, 0)
+    finally:
+        reconcile.gh.file_on_default_branch, reconcile.gh.open_progress_prs = orig
+        reconcile.close_orphans = orig_close
 
 
 def test_an_ambiguous_area_retires_nothing():
@@ -193,7 +318,8 @@ def test_an_ambiguous_area_retires_nothing():
 
 def test_an_unambiguous_area_retires_and_uses_the_landing_parent():
     orig = _fake_files({"Completed/X/PROGRESS.md": log((A, B), (B, C))},
-                       [pr(1, area="X", from7="aaaaaaa")])
+                       [pr(1, area="X", from7="aaaaaaa", to7="bbbbbbb")],
+                       heads={"head1": log((A, B))})
     closed = []
     orig_close = reconcile.close_orphans
     reconcile.close_orphans = lambda rows, url="", repo=None: closed.append(len(rows)) or 0

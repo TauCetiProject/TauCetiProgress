@@ -12,6 +12,12 @@ equivalent and is not: a contents read can be stale, and a report starting *ahea
 disagrees with it exactly as loudly as one starting behind. Under-reading committed history can only
 shrink the consumed set, so a stale answer retires fewer reports, never a live one.
 
+That argument holds for full SHAs only. A branch name carries seven hex characters, and a report
+starting at a commit a stale log has not seen yet can share its prefix with a cursor the log did
+see. So the branch is only the cheap filter; the decision compares the report's full starting SHA,
+read from its own head, against the full SHAs of the log, and keeps the report whenever that SHA
+cannot be read.
+
 An earlier version closed reports *before* a replacement landed, by arguing one window contained
 another. Three things were wrong with it, and they are why this module runs where it does:
 
@@ -61,7 +67,7 @@ def retirement_evidence(progress_text):
     return consumed, live
 
 
-def retirable_prs(open_prs, area, consumed, live):
+def retirable_prs(open_prs, area, consumed, live, start_of):
     """Open reports for `area` whose starting cursor is provably spent: `[(row, reason)]`.
 
     The branch grammar is the gate's own, not a looser one. `progress/<7 hex>-<7 hex>/<Area>` is what
@@ -69,8 +75,10 @@ def retirable_prs(open_prs, area, consumed, live):
     with `progress/`, and "it cannot pass an automated gate" is not a reason to close a human's work.
     The base branch is checked for the same reason.
 
-    A seven-character prefix is not a commit. One that matches both a spent cursor and the live one
-    proves nothing, so such a report is kept: under-retiring is recoverable, the opposite is not.
+    A seven-character prefix is not a commit, so the branch only nominates candidates. `start_of(row)`
+    must return the report's full starting SHA, or None when it cannot be established, and the report
+    is retired only if that full SHA is itself a spent cursor and not the live one. A prefix match
+    alone never retires anything: under-retiring is recoverable, the opposite is not.
     """
     out = []
     for row in open_prs:
@@ -79,15 +87,49 @@ def retirable_prs(open_prs, area, consumed, live):
             continue
         if (row.get("baseRefName") or BASE_BRANCH) != BASE_BRANCH:
             continue
-        from7 = m.group(1)
+        from7, to7 = m.group(1), m.group(2)
         if live and live.startswith(from7):
             continue
-        spent = [c for c in consumed if c.startswith(from7)]
-        if not spent:
+        if not any(c.startswith(from7) for c in consumed):
             continue
-        out.append((row, f"its window starts at {from7}, which {area} already appended at and "
+        start = start_of(row)
+        if not start or not start.startswith(from7):
+            print(f"#{row.get('number')}: could not establish the full starting SHA behind "
+                  f"{from7}; kept")
+            continue
+        if start == live or start not in consumed:
+            continue
+        out.append((row, f"its window starts at {start[:7]}, which {area} already appended at and "
                          f"moved past; the cursor is now {live[:7] or 'unknown'}"))
     return out
+
+
+def report_start(row, progress_path, repo=gh.ROADMAP_REPO):
+    """The full SHA a report's window starts at, read from the report's own head, or None.
+
+    The newest section of the head's `PROGRESS.md` is the one the report appends, and its `from_sha`
+    is the cursor it was generated against. It must agree with the branch name at both ends; if it
+    does not, or the head cannot be read or parsed, the answer is None and the report is kept.
+
+    This is content the pull request's author controls, and that is acceptable here: it only ever
+    decides whether that same pull request is closed, and only in conjunction with a spent cursor
+    read from `main`.
+    """
+    m = BRANCH_RE.match(row.get("headRefName") or "")
+    head = row.get("headSha") or ""
+    if not m or not head:
+        return None
+    try:
+        text = gh.file_on_default_branch(progress_path, repo=repo, ref=head)
+        sections = files.parse_sections(text or "")
+    except Exception:  # noqa: BLE001 -- unreadable or malformed means "cannot tell": keep it
+        return None
+    if not sections:
+        return None
+    last = sections[-1]
+    if not last["from_sha"].startswith(m.group(1)) or not last["to_sha"].startswith(m.group(2)):
+        return None
+    return last["from_sha"]
 
 
 def close_orphans(rows, landed_url="", repo=gh.ROADMAP_REPO):
@@ -133,24 +175,37 @@ def sweep_area(area, progress_path, landed_url="", repo=gh.ROADMAP_REPO):
     Returns `(closed, failed)`. `progress_path` carries the parent the landing actually touched,
     because `TauCetiRoadmap/<area>` and `Completed/<area>` keep different cursors in different files.
 
-    Retires nothing when the name exists under BOTH parents. A report branch records no parent, so
+    Retires nothing when the name exists under BOTH parents, or when it cannot tell whether it does. A report branch records no parent, so
     the open reports cannot be attributed to one roadmap or the other, and retiring on the log we
     happen to be holding would retire the other roadmap's live reports.
     """
-    text = gh.file_on_default_branch(progress_path, repo=repo)
+    try:
+        text = gh.file_on_default_branch(progress_path, repo=repo)
+    except gh.GhError as exc:
+        print(f"could not read {progress_path} in {repo} ({exc}); nothing retired")
+        return 0, 0
     if text is None:
         print(f"no log at {progress_path} in {repo}; nothing retired")
         return 0, 0
     sibling = other_parent(progress_path)
-    if sibling and gh.file_on_default_branch(sibling, repo=repo) is not None:
-        print(f"{area} exists under both parents ({progress_path} and {sibling}); report branches "
-              f"do not record which, so nothing is retired")
-        return 0, 0
+    if sibling:
+        # Fails closed. Only GitHub saying 404 counts as absent; a lookup that did not answer could
+        # be hiding the very sibling whose live reports this would otherwise retire.
+        try:
+            sibling_text = gh.file_on_default_branch(sibling, repo=repo)
+        except gh.GhError as exc:
+            print(f"could not tell whether {sibling} exists ({exc}); nothing retired")
+            return 0, 0
+        if sibling_text is not None:
+            print(f"{area} exists under both parents ({progress_path} and {sibling}); report "
+                  f"branches do not record which, so nothing is retired")
+            return 0, 0
     consumed, live = retirement_evidence(text)
     if not consumed:
         print(f"{area}: no spent cursors in {progress_path}; nothing retired")
         return 0, 0
-    rows = retirable_prs(gh.open_progress_prs(repo=repo), area, consumed, live)
+    rows = retirable_prs(gh.open_progress_prs(repo=repo), area, consumed, live,
+                         start_of=lambda row: report_start(row, progress_path, repo=repo))
     if not rows:
         print(f"{area}: nothing to retire at cursor {live[:7]}")
         return 0, 0
