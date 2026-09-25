@@ -18,7 +18,7 @@ New `PROGRESS.md` sections are announced in the **Tau Ceti > Progress logs** Zul
 The rubrics-and-machinery split of
 [TauCetiReview](https://github.com/TauCetiProject/TauCetiReview), applied to reporting: the
 prompts and the tooling live here, the output lands in TauCetiRoadmap, and
-[TauCetiWorker](https://github.com/kim-em/TauCetiWorker) drives it.
+[TauCetiWorker](https://github.com/TauCetiProject/TauCetiWorker) drives it.
 
 The design rule is that **a model only ever writes prose**. Every decision — whether an update is
 due, which roadmap it covers, which PRs are in the window, and what mathematics actually landed —
