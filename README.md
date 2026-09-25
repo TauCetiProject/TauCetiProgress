@@ -103,9 +103,12 @@ else) and re-validates it. The gate proves the header's shape, never its truth, 
 certificate.
 
 **Missing block.** A README with no layer headings gives a plan with no layers and a report with no
-header. A body with no block gives a report with no header, as every report was before the header
-existed. A block that is present but malformed, not JSON, or does not fit the plan is refused on
-the worker, so a half-right assessment never reaches a pull request.
+header. When the plan lists layers, the worker refuses a body with no block, just as it refuses a
+block that is malformed, not JSON, or does not fit the plan: a new report changes the report hash,
+which retires the site's hand transcription of the old report, so publishing it headerless would
+turn assessed layers into unassessed ones. The model always has `unassessed` for a layer it cannot
+judge. The gate is deliberately more lenient and still accepts a status file without the header,
+which is what every report written before the header existed looks like.
 
 **README hash.** `readme_sha` binds an assessment to the specification it was made against: layer
 ids alone do not, since a layer's requirements can change under an unchanged heading. The consumer
@@ -120,6 +123,22 @@ sub-roadmap assessment needs a carrier of its own, agreed with the gate and the 
 **Rollout.** Merge here, then bump the two pins in TauCetiRoadmap's `progress-*.yml` workflows and
 the worker's `PROGRESS_REF` to the same SHA, together: the generator and the gate must run one
 version. Reports written before the bump simply have no header.
+
+**Leaving the hand transcriptions.** Today the site reads layer states from a hand-transcribed
+file in the TauCeti repository (`scripts/roadmap_coverage.json`), each entry bound to the exact
+report it was read from. Nothing is backfilled:
+
+- *Top-level areas.* An area's transcription stays valid until its next report. After the bump
+  that report carries a header (the worker refuses one without it when there are layers), the
+  site reads the header instead, and the transcription is retired. Existing reports are not
+  regenerated to add headers; each area moves over on its normal cadence, and its entry can then
+  be deleted from the transcription file.
+- *Umbrella sub-roadmaps.* The twelve RepresentationTheory children stay hand-maintained. Their
+  entries are bound to the umbrella's report, so all twelve retire together when the umbrella's next
+  report lands, and the site shows them as retired, keeping the old reading and its commit, until
+  someone re-transcribes them against the new report. Taking them off hand transcription is
+  follow-up work: each child needs a carrier of its own (a roadmap identity, a README hash, an id
+  namespace), agreed with the gate and the consumer, which this version does not provide.
 
 ## Trust boundary
 

@@ -354,11 +354,14 @@ def render_update(plan, status_body, section_body, old_status, old_progress):
     area = plan["roadmap"]
     window_label = f"{(plan.get('from_date') or '')[:10]} to {(plan.get('to_date') or '')[:10]}"
 
-    # The status prose may end with a ```coverage block, one line per layer the plan listed. It
+    # The status prose ends with a ```coverage block, one line per layer the plan listed. It
     # becomes the coverage header and leaves the prose; a block that does not fit the plan's layers
-    # is refused here, so a half-right assessment never reaches a pull request. A body with no block
-    # is a report without a coverage header, as every report was before the header existed: the
-    # prose still stands on its own, and the consumer shows the layers as unassessed.
+    # is refused here, so a half-right assessment never reaches a pull request. So is a missing one
+    # when the plan lists layers: a new report changes the report hash, which retires the site's
+    # hand transcription of the old one, so a headerless report would turn assessed layers into
+    # unassessed ones. `unassessed` is always available to the model when it cannot say. Only the
+    # worker insists; the gate still accepts a status file without the header, as every report was
+    # before the header existed.
     prose, entries = layers_mod.split_block(status_body)
     coverage = None
     if entries is not None:
@@ -367,7 +370,10 @@ def render_update(plan, status_body, section_body, old_status, old_progress):
         else:
             coverage = layers_mod.coverage(area, plan["to_sha"], plan.get("readme_sha"), plan["layers"], entries)
     elif plan.get("layers"):
-        print(f"the status body has no coverage block; {area}'s {len(plan['layers'])} layers stay unassessed")
+        raise files.FormatError(
+            f"the status body has no ```coverage block, but the plan lists {len(plan['layers'])} layers "
+            f"for {area}; every one needs a state, `unassessed` when the material does not say"
+        )
 
     status_text = files.render_status(area, plan["to_sha"], plan.get("to_date") or "", prose, coverage)
     section = files.render_section(

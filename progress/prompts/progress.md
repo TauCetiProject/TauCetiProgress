@@ -124,8 +124,9 @@ proved, `partial` when some are, `untouched` when nothing has landed, `unassesse
 material does not let you say. `remaining` is optional: one line, at most 200 characters, no angle
 brackets, naming what remains for the next contributor; omit the key rather than leave it empty.
 No other keys. A script turns this block into a machine-readable header and removes it from the
-prose; the report is refused if the block is not valid JSON, names a layer the plan does not list,
-or leaves one out.
+prose; the report is refused if the block is missing, is not valid JSON, names a layer the plan
+does not list, or leaves one out. When you cannot judge a layer, say `unassessed`; do not leave the
+block out.
 
 Do not write a top-level `#` heading in either file; the scripts add the headings and the machine
 headers.

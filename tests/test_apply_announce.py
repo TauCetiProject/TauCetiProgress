@@ -127,9 +127,26 @@ def test_render_update_refuses_a_block_that_does_not_fit_the_plan():
         raise AssertionError("a block missing a layer must be refused")
 
 
-def test_render_update_without_a_block_or_without_layers_is_a_plain_report():
+def test_render_update_refuses_a_missing_block_when_the_plan_lists_layers():
+    """A new report retires the site's hand transcription of the old one, so the worker must not
+    publish one without a header when there are layers to assess. The gate is more lenient: a
+    status file without the header, as every report was before it existed, still passes."""
     plan = _plan_with_layers()
-    status_text, _, _ = apply_mod.render_update(plan, PROSE, PROSE, None, None)
+    try:
+        apply_mod.render_update(plan, PROSE, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "no ```coverage block" in str(exc) and "unassessed" in str(exc), exc
+    else:
+        raise AssertionError("a report with layers to assess and no block must be refused")
+    headerless = files.render_status(plan["roadmap"], plan["to_sha"], plan["to_date"], PROSE, None)
+    progress = files.new_progress_file(plan["roadmap"]) + files.render_section(
+        plan["roadmap"], plan["from_sha"], plan["to_sha"], plan["prs"], "window", PROSE)
+    files.validate_update(plan["roadmap"], None, headerless, None, progress, expect_from_sha=plan["from_sha"])
+
+
+def test_render_update_without_layers_is_a_plain_report():
+    # A README with no layer headings: no block is asked for, none is needed.
+    status_text, _, _ = apply_mod.render_update(dict(PLAN), PROSE, PROSE, None, None)
     assert files.parse_status(status_text)["coverage"] is None
     # An older plan with no layers: a block is dropped rather than refused.
     status_text, _, _ = apply_mod.render_update(dict(PLAN), PROSE + BLOCK, PROSE, None, None)
@@ -139,16 +156,14 @@ def test_render_update_without_a_block_or_without_layers_is_a_plain_report():
 
 def test_render_update_tells_an_absent_block_from_a_null_one():
     """`split_block` returns `None` for "no block", which is also what `json.loads("null")` gives;
-    a null block must be refused, not mistaken for a missing one and published headerless."""
+    a null block must be refused on its own account, not mistaken for a missing one."""
     plan = _plan_with_layers()
     try:
         apply_mod.render_update(plan, PROSE + "\n\n```coverage\nnull\n```\n", PROSE, None, None)
     except files.FormatError as exc:
-        assert "null" in str(exc), exc
+        assert "JSON null" in str(exc), exc
     else:
         raise AssertionError("a ```coverage block holding null must be refused")
-    status_text, _, _ = apply_mod.render_update(plan, PROSE, PROSE, None, None)
-    assert files.parse_status(status_text)["coverage"] is None
     status_text, _, _ = apply_mod.render_update(plan, PROSE + BLOCK, PROSE, None, None)
     assert [l["id"] for l in files.parse_status(status_text)["coverage"]["layers"]] == ["Layer 0", "Layer 1"]
 
