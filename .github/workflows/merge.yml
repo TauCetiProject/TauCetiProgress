@@ -93,6 +93,7 @@ jobs:
       head_sha: ${{ steps.gate.outputs.head_sha }}
       main_sha: ${{ steps.gate.outputs.main_sha }}
       area: ${{ steps.gate.outputs.area }}
+      parent: ${{ steps.gate.outputs.parent }}
     steps:
       # The validator itself, at exactly the ref the caller pinned. Checking out this repository
       # (never the pull request) is what keeps the executed code trusted.
@@ -136,6 +137,7 @@ jobs:
             echo "head_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("head_sha",""))')"
             echo "main_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("main_sha",""))')"
             echo "area=$(python3 -c 'import json,re;a=json.load(open("bundle.json")).get("area","");print(a if re.fullmatch(r"[A-Za-z0-9]+", a or "") else "")')"
+            echo "parent=$(python3 -c 'import json;p=json.load(open("bundle.json")).get("parent","");print(p if p in ("TauCetiRoadmap","Completed") else "")')"
           } >> "$GITHUB_OUTPUT"
           if [ "$rc" -eq 0 ]; then
             echo "verdict=allow" >> "$GITHUB_OUTPUT"
@@ -178,6 +180,9 @@ jobs:
     needs: validate
     if: needs.validate.outputs.verdict == 'allow' && inputs.dry_run == false
     runs-on: ubuntu-latest
+    outputs:
+      landed: ${{ steps.land.outputs.landed }}
+      commit: ${{ steps.land.outputs.commit }}
     steps:
       # Minted only after validation succeeded, and scoped to this repository.
       - name: Mint the App token
@@ -241,6 +246,48 @@ jobs:
             -f parents[]="$MAIN_SHA" \
             --jq .sha)"
           printf 'built %s (tree %s, parent %s)\n' "${commit:0:7}" "${tree:0:7}" "${MAIN_SHA:0:7}"
+
+          # Last look at the pull request, as late as possible. `state` was established during
+          # collection and everything since has trusted it, so a pull request withdrawn while this
+          # run was validating would land anyway. Retiring a report is now something this workflow
+          # itself does after a landing, so the case is rarer than it was -- but a human can still
+          # close one mid-run. This narrows that window; it does not eliminate it. A close or a
+          # retarget between this read and the ref PATCH below is not seen, and the compare-and-swap
+          # still lands if `main` has not moved. No read can close that gap, because GitHub offers
+          # no way to make a ref update conditional on a pull request's state.
+          #
+          # This does NOT reintroduce the pull request as an input to what gets written. The tree and
+          # the parent still come from the two pinned SHAs, and nothing read here can cause a landing:
+          # a forged answer can only fail to stop one that was already fully validated. Read to
+          # refuse, never to authorise.
+          #
+          # Three attempts, because the distinction that matters is between an ANSWER that says the
+          # pull request moved and NO ANSWER at all. Treating a timeout as "it moved" would report a
+          # green run that landed nothing, and the planner then finds the pull request still open and
+          # in flight, so nothing reopens or retriggers it: one blip would strand a valid report for
+          # good. An answered mismatch is a considered non-landing and exits clean; an unanswered
+          # read is infrastructure failing and exits non-zero, which is the same distinction the gate
+          # draws between a refusal and a crash.
+          want="open $HEAD_SHA main false"
+          now=""
+          for attempt in 1 2 3; do
+            now="$(gh api "repos/$REPO/pulls/$PR" \
+                     --jq '[.state, .head.sha, .base.ref, (.draft|tostring)] | join(" ")' \
+                   2> reread.err)" && break
+            now=""
+            [ "$attempt" = 3 ] || sleep $(( attempt * 3 ))
+          done
+          if [ -z "$now" ]; then
+            echo "::error title=could not re-read the pull request::giving up rather than landing or silently skipping; this run failed, the report is untouched and the next run retries it"
+            cat reread.err || true
+            exit 1
+          fi
+          if [ "$now" != "$want" ]; then
+            printf '::warning title=not landed::the pull request is now %s, not %s; it changed after validation, so this report was not landed\n' \
+              "'$now'" "'$want'"
+            echo "landed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # force=false is the compare-and-swap. It fails if main is no longer at MAIN_SHA, because
           # then this commit is not a fast-forward of it.
@@ -319,3 +366,65 @@ jobs:
           else
             echo "head is in $head_repo, not $REPO; leaving its branch alone"
           fi
+
+      # Retire the reports this landing has just made unmergeable.
+      #
+      # AFTER the swap, never before. `main` has moved, so every other open report for this area
+      # whose window does not start at the new cursor is unmergeable as a matter of fact rather than
+      # prediction -- the gate's append check can never pass for it again. Closing one earlier, on
+      # the strength of a report that had not yet landed, could cancel a valid landing whose
+      # replacement then failed, and raced this very workflow's own `state` snapshot.
+      #
+      # Never fails the run. The content is on `main` by now, so a cleanup that cannot finish must
+      # not turn a completed merge into a red one; the command says what it could not close and the
+      # next landing retries it.
+
+  # A SEPARATE JOB, and deliberately not part of `merge`.
+  #
+  # Three reasons, each of which was a defect when this lived inside `merge`:
+  #
+  #   * It does not need the bypass credential and must not hold it. Retiring a report is an ordinary
+  #     `pull-requests: write` operation; the App token exists to write to a ruleset-protected branch,
+  #     which this never does. Running here on the default token removes that authority from the only
+  #     code in this workflow that touches pull requests it did not validate.
+  #   * A failure here must never redden a completed merge. Inside `merge`, a failed `actions/checkout`
+  #     fails the job after the content is already on `main`, and no `|| true` on a later step can
+  #     catch a failing `uses:` step.
+  #   * A step-level `if:` carries an implicit `success()`, so a hiccup in the close step above would
+  #     have silently skipped the cleanup rather than merely delaying it. `always()` here says what
+  #     was meant: the landing happened, so reconcile regardless of what else did or did not.
+  #
+  # `continue-on-error` so the workflow's overall conclusion still reflects the merge.
+  reconcile:
+    needs: [validate, merge]
+    if: always() && needs.merge.outputs.landed == 'true' && needs.validate.outputs.area != '' && needs.validate.outputs.parent != ''
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # At the SAME pinned ref the validator used. A different ref would retire reports by rules
+      # nobody reviewed alongside the gate.
+      - name: Check out the validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: TauCetiProject/TauCetiProgress
+          ref: ${{ inputs.progress_ref }}
+          path: validator
+          persist-credentials: false
+
+      - name: Retire the reports this landing spent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          AREA: ${{ needs.validate.outputs.area }}
+          PARENT: ${{ needs.validate.outputs.parent }}
+          COMMIT: ${{ needs.merge.outputs.commit }}
+        run: |
+          set -uo pipefail
+          python3 -c 'import sys; sys.path.insert(0, "validator"); from progress.cli import main; sys.exit(main())' \
+            sweep --repo "$REPO" --area "$AREA" \
+            --progress-path "$PARENT/$AREA/PROGRESS.md" \
+            --landed-url "https://github.com/$REPO/commit/$COMMIT" || \
+            echo "::warning title=sweep did not run::spent reports in $AREA were left open"

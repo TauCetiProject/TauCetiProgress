@@ -476,7 +476,11 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
             f"branch says the window ends at {prov['to_prefix']} but the section says "
             f"{section['to_sha'][:7]}"
         )
-    return {"area": area, "head_sha": head_sha, "main_sha": main_sha, "section": section}
+    # `parent` travels with `area` because the pair, not the name alone, identifies a roadmap:
+    # the same name can exist under both `TauCetiRoadmap/` and `Completed/`, and anything that
+    # acts on "the cursor for this area" without it can read the wrong file.
+    return {"area": area, "parent": parent, "head_sha": head_sha, "main_sha": main_sha,
+            "section": section}
 
 
 def summary(result):
