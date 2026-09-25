@@ -18,7 +18,7 @@ import json
 import pathlib
 import re
 
-from . import files, gh, window
+from . import files, gh, layers as layers_mod, window
 from .window import CODE_REF
 
 IDLE_HOURS = 8.0
@@ -90,6 +90,44 @@ def discover_areas(roadmap_dir):
             if child.is_dir() and (child / "README.md").is_file():
                 found[child.name] = f"{prefix}/{child.name}" if prefix else child.name
     return found
+
+
+def read_area_layers(roadmap_dir, rel_dir):
+    """`(layers, readme_sha)` for one area: the README's layer headings and the hash of its text.
+
+    Both go into the plan so the writing model is told exactly which layers to assess, and so the
+    assessment it produces is bound to the README it was made against rather than to whatever
+    README is current when someone reads it.
+    """
+    text = (pathlib.Path(roadmap_dir) / rel_dir / "README.md").read_text(encoding="utf-8")
+    return layers_mod.headings(text), layers_mod.readme_sha(text)
+
+
+def read_sub_roadmaps(roadmap_dir, area, rel_dir):
+    """The sub-roadmaps of an umbrella area, each with its own layers and README hash.
+
+    A sub-roadmap is a directory directly below the area that is itself a roadmap: a `README.md`
+    and a `Suggested.lean`, which keeps a `references/` folder with a README of its own out. That is
+    the consumer's rule (`read_roadmaps` in TauCeti's `scripts/roadmap_progress.py`). The area's
+    label covers all of them, so its report is the only account of them, and each gets its own
+    coverage header, bound to its own README. One with no layer headings, or whose directory name
+    the header format cannot carry, is left out: there is nothing it could say about it.
+    """
+    base = pathlib.Path(roadmap_dir) / rel_dir
+    out = []
+    for child in sorted(p for p in base.iterdir() if p.is_dir()):
+        if not ((child / "README.md").is_file() and (child / "Suggested.lean").is_file()):
+            continue
+        if not re.match(r"\A[A-Za-z0-9]+\Z", child.name):
+            print(f"{area}/{child.name}: not an alphanumeric directory name; its layers stay unassessed")
+            continue
+        text = (child / "README.md").read_text(encoding="utf-8")
+        found = layers_mod.headings(text)
+        if found:
+            out.append({"roadmap": files.sub_roadmap_id(area, child.name),
+                        "readme": f"{rel_dir}/{child.name}/README.md",
+                        "readme_sha": layers_mod.readme_sha(text), "layers": found})
+    return out
 
 
 def read_area_files(roadmap_dir, rel_dir):
@@ -433,10 +471,15 @@ def build_plan(
             f"{cadence_reason}, but the busiest area ({best['area']}) has only "
             f"{len(best['prs'])} PR(s) in its window (< {min_prs})"
         )
+    area_layers, area_readme_sha = read_area_layers(roadmap_dir, best["rel_dir"])
+    sub_roadmaps = read_sub_roadmaps(roadmap_dir, best["area"], best["rel_dir"])
 
     return {
         "roadmap": best["area"],
         "rel_dir": best["rel_dir"],
+        "layers": area_layers,
+        "readme_sha": area_readme_sha,
+        "sub_roadmaps": sub_roadmaps,
         "from_sha": best["from_sha"],
         "to_sha": to_sha,
         "prs": best["prs"],

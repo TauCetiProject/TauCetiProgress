@@ -438,6 +438,76 @@ def test_a_cursor_in_no_history_at_all_is_still_refused():
                "not an ancestor")
 
 
+# ----- the layers the plan hands the model ------------------------------------------------------
+
+
+def test_the_plan_records_the_selected_areas_layers_and_readme_hash_exactly():
+    """The inventory `apply` binds the verdicts to: the README's layer headings in order, with ids
+    and 1-based lines, and a hash of the README's text."""
+    import hashlib
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)"])
+        make_roadmap(roadmap, {"Curves": None})
+        readme = ("# Curves\n\n## Layers\n\n### Layer 0: the group law (Silverman III.2)\ntext\n"
+                  "### Layer 1: isogenies — the dual\n")
+        (pathlib.Path(roadmap) / "TauCetiRoadmap" / "Curves" / "README.md").write_text(readme, encoding="utf-8")
+        got = plan_against(code, roadmap, shas[2], {"Curves": [1, 2]})
+        assert got["layers"] == [{"id": "Layer 0", "title": "Layer 0: the group law", "line": 5},
+                                 {"id": "Layer 1", "title": "Layer 1: isogenies — the dual", "line": 7}], got["layers"]
+        assert got["readme_sha"] == hashlib.sha256(readme.encode("utf-8")).hexdigest()
+
+
+def test_an_umbrella_areas_sub_roadmaps_are_assessed_each_against_its_own_readme():
+    """An umbrella area (RepresentationTheory) has an index README with no layer headings; its
+    label covers every sub-roadmap, so the plan lists each one's layers and README hash under its
+    `Area/Child` id. A directory without `Suggested.lean` (a `references/` folder) is not one, and
+    a sub-roadmap with no layer headings has nothing to assess."""
+    import hashlib
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)"])
+        make_roadmap(roadmap, {"Umbrella": None})
+        base = pathlib.Path(roadmap) / "TauCetiRoadmap" / "Umbrella"
+        index = ("# Umbrella\n\n## The roadmaps\n\n- [Spin](SpinRepresentations/README.md)\n"
+                 "- [Roots](RootSystems/README.md)\n")
+        (base / "README.md").write_text(index, encoding="utf-8")
+        readmes = {}
+        for child, body in (("SpinRepresentations", "### Layer 0: basics\n### Layer 1: more\n"),
+                            ("RootSystems", "### Layer 0: axioms\n"),
+                            ("Unlayered", "Prose only.\n"),
+                            ("references", "### Layer 9: not a roadmap\n")):
+            (base / child).mkdir()
+            readmes[child] = f"# {child}\n\n{body}"
+            (base / child / "README.md").write_text(readmes[child], encoding="utf-8")
+            if child != "references":
+                (base / child / "Suggested.lean").write_text("-- suggestions\n", encoding="utf-8")
+        got = plan_against(code, roadmap, shas[2], {"Umbrella": [1, 2]})
+        assert got["roadmap"] == "Umbrella"
+        assert got["layers"] == [], got["layers"]
+        assert got["readme_sha"] == hashlib.sha256(index.encode("utf-8")).hexdigest()
+        sha = lambda child: hashlib.sha256(readmes[child].encode("utf-8")).hexdigest()
+        assert got["sub_roadmaps"] == [
+            {"roadmap": "Umbrella/RootSystems", "readme": "TauCetiRoadmap/Umbrella/RootSystems/README.md",
+             "readme_sha": sha("RootSystems"),
+             "layers": [{"id": "Layer 0", "title": "Layer 0: axioms", "line": 3}]},
+            {"roadmap": "Umbrella/SpinRepresentations",
+             "readme": "TauCetiRoadmap/Umbrella/SpinRepresentations/README.md",
+             "readme_sha": sha("SpinRepresentations"),
+             "layers": [{"id": "Layer 0", "title": "Layer 0: basics", "line": 3},
+                        {"id": "Layer 1", "title": "Layer 1: more", "line": 4}]},
+        ], got["sub_roadmaps"]
+        # The children are not areas of their own: labelled areas are top-level only.
+        assert plan.discover_areas(roadmap) == {"Umbrella": "TauCetiRoadmap/Umbrella"}
+
+
+def test_an_ordinary_area_has_no_sub_roadmaps():
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)"])
+        make_roadmap(roadmap, {"Curves": None})
+        refs = pathlib.Path(roadmap) / "TauCetiRoadmap" / "Curves" / "references"
+        refs.mkdir()
+        (refs / "README.md").write_text("### Layer 0: a paper\n", encoding="utf-8")
+        assert plan_against(code, roadmap, shas[2], {"Curves": [1, 2]})["sub_roadmaps"] == []
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

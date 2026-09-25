@@ -44,7 +44,8 @@ def raises(fn, needle=None):
 def test_status_round_trip():
     text = files.render_status("ContourIntegration", A, "2026-07-30T11:34:41Z", "Some prose.")
     h = files.parse_status(text)
-    assert h == {"roadmap": "ContourIntegration", "to_sha": A, "ts": "2026-07-30T11:34:41Z"}, h
+    assert h == {"roadmap": "ContourIntegration", "to_sha": A, "ts": "2026-07-30T11:34:41Z",
+                 "coverage": None, "sub_coverage": []}, h
     # The standing "may be out of date" note is load-bearing: a reader must not take a snapshot
     # as authoritative about the current tip.
     assert "subsequent updates" in text
@@ -68,6 +69,127 @@ def test_cursor_and_reported_prs():
     log += files.render_section("PDE", B, C, [3], "w2", "y")
     assert files.cursor(log) == C
     assert files.reported_prs(log) == {1, 2, 3}
+
+
+H = "0" * 64
+COV = {"roadmap": "PDE", "to_sha": B, "readme_sha": H,
+       "layers": [{"id": "Lane A", "state": "partial", "remaining": "the trace theorem"},
+                  {"id": "Lane B", "state": "unassessed"}]}
+
+
+def _pair(area="PDE", coverage=None, status_prose=None):
+    """A first update for `area`: (new_status, new_progress) that validate_update accepts."""
+    prose = status_prose or ("Prose about where the roadmap stands, long enough to clear the floor. " * 6)
+    status = files.render_status(area, B, "t", prose, coverage)
+    progress = files.new_progress_file(area) + files.render_section(area, A, B, [1], "w", prose)
+    return status, progress
+
+
+def test_coverage_header_round_trips_and_passes_the_gate():
+    status, progress = _pair(coverage=COV)
+    assert files.parse_status(status)["coverage"] == COV
+    files.validate_update("PDE", None, status, None, progress, expect_from_sha=A)
+    # Without a coverage header the file is exactly what it was before the header existed.
+    plain, progress2 = _pair()
+    assert files.parse_status(plain)["coverage"] is None
+    files.validate_update("PDE", None, plain, None, progress2, expect_from_sha=A)
+
+
+def test_coverage_header_must_fit_the_status_header_and_the_schema():
+    lane = {"id": "Lane A", "state": "done"}
+    cases = [
+        ("another roadmap", dict(COV, roadmap="ODE"), "is for 'ODE'"),
+        ("a sub-roadmap id for the area", dict(COV, roadmap="PDE/Heat"), "expected PDE"),
+        ("another commit", dict(COV, to_sha=A), "describes"),
+        ("a short README hash", dict(COV, readme_sha="abc"), "readme_sha"),
+        ("an unknown field", dict(COV, extra=1), "unknown field"),
+        ("a missing field", {k: v for k, v in COV.items() if k != "readme_sha"}, "missing field"),
+        ("no layers", dict(COV, layers=[]), "non-empty"),
+        ("an illegal state", dict(COV, layers=[dict(lane, state="soon")]), "expected one of"),
+        ("a layer twice", dict(COV, layers=[lane, lane]), "twice"),
+        ("an unknown layer field", dict(COV, layers=[dict(lane, note="x")]), "unknown field"),
+        ("an unsafe id", dict(COV, layers=[dict(lane, id="<b>")]), "short label"),
+        ("a note that closes the comment", dict(COV, layers=[dict(lane, remaining="x --> y")]), "angle brackets"),
+        ("an overlong note", dict(COV, layers=[dict(lane, remaining="x" * 201)]), "200"),
+        ("a lone surrogate in a note", dict(COV, layers=[dict(lane, remaining="a \ud800 b")]), "lone surrogates"),
+        ("too many layers", dict(COV, layers=[{"id": f"L{i}", "state": "done"} for i in range(65)]), "cap"),
+    ]
+    for label, payload, needle in cases:
+        try:
+            files.require_coverage(payload, "PDE", B)
+        except FormatError as exc:
+            assert needle in str(exc), f"{label}: {exc}"
+        else:
+            raise AssertionError(f"{label}: accepted")
+
+
+def test_a_coverage_header_anywhere_but_the_prefix_is_refused():
+    status, progress = _pair()
+    header = f"<!--{files.COVERAGE_MARKER} {files.coverage_header(files.require_coverage(COV, 'PDE', B))}-->"
+    # Appended to the prose rather than sitting in the prefix: the shape check sees a prefix built
+    # WITH the parsed coverage and the file does not start with it.
+    raises(lambda: files.validate_update("PDE", None, status.rstrip("\n") + "\n" + header + "\n", None, progress, expect_from_sha=A),
+           "does not begin with the canonical header")
+    # Two of them: refused before shape is even considered.
+    doubled = status.replace("# Status: PDE", header + "\n" + header + "\n# Status: PDE", 1)
+    raises(lambda: files.validate_update("PDE", None, doubled, None, progress, expect_from_sha=A), "more than one")
+    # A coverage header for another commit beside a status header: refused whole.
+    wrong = files.render_status("PDE", B, "t", "x" * 300).replace(
+        "# Status: PDE", f"<!--{files.COVERAGE_MARKER} {files.coverage_header(dict(COV, to_sha=A))}-->\n# Status: PDE", 1)
+    raises(lambda: files.parse_status(wrong), "describes")
+
+
+# ----- an umbrella area: one coverage header per sub-roadmap -------------------------------------
+
+def _sub(child, state="done"):
+    return {"roadmap": f"PDE/{child}", "to_sha": B, "readme_sha": H,
+            "layers": [{"id": "Layer 0", "state": state}]}
+
+
+def _umbrella(subs, coverage=None):
+    prose = "Prose about where the roadmap stands, long enough to clear the floor. " * 6
+    status = files.render_status("PDE", B, "t", prose, coverage, subs)
+    return status, files.new_progress_file("PDE") + files.render_section("PDE", A, B, [1], "w", prose)
+
+
+def test_sub_roadmap_headers_round_trip_and_pass_the_gate():
+    subs = [_sub("Heat"), _sub("Wave", "partial")]
+    for coverage in (None, COV):
+        status, progress = _umbrella(subs, coverage)
+        lines = status.splitlines()
+        # Status header, the area's own coverage when there is one, then the children in order.
+        own = 1 if coverage else 0
+        assert lines[1 + own].startswith(f"<!--{files.COVERAGE_MARKER} ") and '"PDE/Heat"' in lines[1 + own]
+        assert '"PDE/Wave"' in lines[2 + own] and lines[3 + own] == "# Status: PDE"
+        parsed = files.parse_status(status)
+        assert parsed["coverage"] == coverage and parsed["sub_coverage"] == subs, parsed
+        files.validate_update("PDE", None, status, None, progress, expect_from_sha=A)
+
+
+def test_sub_roadmap_headers_are_refused_out_of_place():
+    heat, wave = _sub("Heat"), _sub("Wave")
+    cases = [
+        ("out of order", [wave, heat], "ascending order"),
+        ("a child twice", [heat, heat], "ascending order"),
+        ("another area's child", [dict(heat, roadmap="ODE/Heat")], "expected PDE or PDE/<sub-roadmap>"),
+        ("a grandchild", [dict(heat, roadmap="PDE/Heat/Deep")], "alphanumeric"),
+        ("a path escape", [dict(heat, roadmap="PDE/..")], "alphanumeric"),
+        ("the area itself", [dict(heat, roadmap="PDE")], "must name PDE/<sub-roadmap>"),
+        ("another commit", [dict(heat, to_sha=A)], "describes"),
+        ("too many", [_sub(f"C{i:02d}") for i in range(files.MAX_SUB_ROADMAPS + 1)], "cap"),
+    ]
+    for label, subs, needle in cases:
+        raises(lambda: files.render_status("PDE", B, "t", "x", None, subs), needle)
+    # Written by hand in the wrong order, the file parses but is not the canonical prefix.
+    status, progress = _umbrella([heat, wave])
+    h = lambda c: f"<!--{files.COVERAGE_MARKER} {files.coverage_header(c)}-->"
+    swapped = status.replace(h(heat) + "\n" + h(wave), h(wave) + "\n" + h(heat), 1)
+    assert swapped != status
+    raises(lambda: files.validate_update("PDE", None, swapped, None, progress, expect_from_sha=A), "ascending order")
+    # Below the heading rather than in the prefix.
+    moved = status.replace(h(wave) + "\n", "", 1).rstrip("\n") + "\n" + h(wave) + "\n"
+    raises(lambda: files.validate_update("PDE", None, moved, None, progress, expect_from_sha=A),
+           "does not begin with the canonical header")
 
 
 def test_rejects_bad_shas_and_areas():

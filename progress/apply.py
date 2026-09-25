@@ -33,7 +33,7 @@ import json
 import pathlib
 import subprocess
 
-from . import files, gh, window
+from . import files, gh, layers as layers_mod, window
 
 BRANCH_PREFIX = "progress/"
 # Recorded in the PR body so a reader (and the merge gate) can tell which TauCetiProgress produced
@@ -354,7 +354,34 @@ def render_update(plan, status_body, section_body, old_status, old_progress):
     area = plan["roadmap"]
     window_label = f"{(plan.get('from_date') or '')[:10]} to {(plan.get('to_date') or '')[:10]}"
 
-    status_text = files.render_status(area, plan["to_sha"], plan.get("to_date") or "", status_body)
+    # The status prose ends with a ```coverage block, one line per layer the plan listed (for an
+    # umbrella area, per layer of each sub-roadmap too). It becomes the coverage headers and leaves
+    # the prose; a block that does not fit the plan's layers is refused here, so a half-right
+    # assessment never reaches a pull request. So is a missing one when the plan lists layers: a
+    # new report changes the report hash, which retires the site's hand transcription of the old
+    # one, so a headerless report would turn assessed layers into unassessed ones. `unassessed` is
+    # always available to the model when it cannot say. Only the worker insists; the gate still
+    # accepts a status file without the header, as every report was before the header existed.
+    prose, block = layers_mod.split_block(status_body)
+    own_layers, sub_roadmaps = plan.get("layers") or [], plan.get("sub_roadmaps") or []
+    coverage, sub_coverage = None, []
+    if block is not None:
+        if not own_layers and not sub_roadmaps:
+            print("the status body ends with a coverage block but the plan lists no layers; dropping it")
+        else:
+            coverage, sub_coverage = layers_mod.coverage_block(
+                area, plan["to_sha"], plan.get("readme_sha"), own_layers, sub_roadmaps, block
+            )
+    elif own_layers or sub_roadmaps:
+        count = len(own_layers) + sum(len(sub["layers"]) for sub in sub_roadmaps)
+        raise files.FormatError(
+            f"the status body has no ```coverage block, but the plan lists {count} layers "
+            f"for {area}; every one needs a state, `unassessed` when the material does not say"
+        )
+
+    status_text = files.render_status(
+        area, plan["to_sha"], plan.get("to_date") or "", prose, coverage, sub_coverage
+    )
     section = files.render_section(
         area, plan["from_sha"], plan["to_sha"], plan["prs"], window_label, section_body
     )

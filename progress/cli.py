@@ -170,7 +170,9 @@ def build_parser():
     # A plain string, not `choices=`: that would enumerate the directory at import time, so a build
     # that shipped no prompts would fail while merely parsing `--help`. `cmd_prompt` reports a
     # missing prompt properly.
-    pr.add_argument("name", help="which prompt (progress, status)")
+    pr.add_argument("name", help="which prompt: progress (the worker's two-file prompt, with the "
+                    "per-layer coverage block) or status (a standalone prose-only STATUS body, "
+                    "which yields a report with no coverage header)")
     pr.set_defaults(fn=cmd_prompt)
 
     n = sub.add_parser("announce", help="post a section to Zulip")

@@ -94,6 +94,216 @@ def test_render_update_produces_a_valid_pair():
     assert len(files.parse_sections(progress)) == 1
 
 
+def _plan_with_layers():
+    plan = dict(PLAN)
+    plan["layers"] = [{"id": "Layer 0", "title": "Layer 0: curves", "line": 10},
+                      {"id": "Layer 1", "title": "Layer 1: cycles", "line": 20}]
+    plan["readme_sha"] = "0" * 64
+    return plan
+
+
+BLOCK = '\n\n```coverage\n[{"id": "Layer 0", "state": "done"}, {"id": "Layer 1", "state": "partial", "remaining": "the homological version"}]\n```\n'
+
+
+def test_render_update_turns_the_coverage_block_into_the_header():
+    plan = _plan_with_layers()
+    status_text, _, _ = apply_mod.render_update(plan, PROSE + BLOCK, PROSE, None, None)
+    parsed = files.parse_status(status_text)
+    assert parsed["coverage"] == {"roadmap": plan["roadmap"], "to_sha": plan["to_sha"], "readme_sha": "0" * 64,
+                                  "layers": [{"id": "Layer 0", "state": "done"},
+                                             {"id": "Layer 1", "state": "partial", "remaining": "the homological version"}]}, parsed
+    assert "```coverage" not in status_text
+    assert status_text.rstrip().endswith(PROSE.rstrip())
+
+
+def test_render_update_refuses_a_block_that_does_not_fit_the_plan():
+    plan = _plan_with_layers()
+    body = PROSE + '\n\n```coverage\n[{"id": "Layer 0", "state": "done"}]\n```\n'
+    try:
+        apply_mod.render_update(plan, body, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "says nothing about" in str(exc), exc
+    else:
+        raise AssertionError("a block missing a layer must be refused")
+
+
+def test_render_update_refuses_a_missing_block_when_the_plan_lists_layers():
+    """A new report retires the site's hand transcription of the old one, so the worker must not
+    publish one without a header when there are layers to assess. The gate is more lenient: a
+    status file without the header, as every report was before it existed, still passes."""
+    plan = _plan_with_layers()
+    try:
+        apply_mod.render_update(plan, PROSE, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "no ```coverage block" in str(exc) and "unassessed" in str(exc), exc
+    else:
+        raise AssertionError("a report with layers to assess and no block must be refused")
+    headerless = files.render_status(plan["roadmap"], plan["to_sha"], plan["to_date"], PROSE, None)
+    progress = files.new_progress_file(plan["roadmap"]) + files.render_section(
+        plan["roadmap"], plan["from_sha"], plan["to_sha"], plan["prs"], "window", PROSE)
+    files.validate_update(plan["roadmap"], None, headerless, None, progress, expect_from_sha=plan["from_sha"])
+
+
+def test_render_update_refuses_a_lone_surrogate_as_a_format_error():
+    """JSON can spell a lone surrogate, which no UTF-8 file can hold. It must be refused as a
+    malformed block, not surface later as a UnicodeEncodeError while the files are written."""
+    plan = _plan_with_layers()
+    body = PROSE + '\n\n```coverage\n[{"id": "Layer 0", "state": "done"}, ' \
+                   '{"id": "Layer 1", "state": "partial", "remaining": "a \\ud800 b"}]\n```\n'
+    try:
+        apply_mod.render_update(plan, body, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "lone surrogates" in str(exc), exc
+    else:
+        raise AssertionError("a note holding a lone surrogate must be refused")
+
+
+def test_render_update_without_layers_is_a_plain_report():
+    # A README with no layer headings: no block is asked for, none is needed.
+    status_text, _, _ = apply_mod.render_update(dict(PLAN), PROSE, PROSE, None, None)
+    assert files.parse_status(status_text)["coverage"] is None
+    # An older plan with no layers: a block is dropped rather than refused.
+    status_text, _, _ = apply_mod.render_update(dict(PLAN), PROSE + BLOCK, PROSE, None, None)
+    assert files.parse_status(status_text)["coverage"] is None
+    assert "```coverage" not in status_text
+
+
+def test_render_update_tells_an_absent_block_from_a_null_one():
+    """`split_block` returns `None` for "no block", which is also what `json.loads("null")` gives;
+    a null block must be refused on its own account, not mistaken for a missing one."""
+    plan = _plan_with_layers()
+    try:
+        apply_mod.render_update(plan, PROSE + "\n\n```coverage\nnull\n```\n", PROSE, None, None)
+    except files.FormatError as exc:
+        assert "JSON null" in str(exc), exc
+    else:
+        raise AssertionError("a ```coverage block holding null must be refused")
+    status_text, _, _ = apply_mod.render_update(plan, PROSE + BLOCK, PROSE, None, None)
+    assert [l["id"] for l in files.parse_status(status_text)["coverage"]["layers"]] == ["Layer 0", "Layer 1"]
+
+
+def _umbrella_plan():
+    plan = dict(PLAN)
+    plan["layers"], plan["readme_sha"] = [], "0" * 64
+    root = f"TauCetiRoadmap/{plan['roadmap']}"
+    plan["sub_roadmaps"] = [
+        {"roadmap": f"{plan['roadmap']}/Residues", "readme": f"{root}/Residues/README.md", "readme_sha": "1" * 64,
+         "layers": [{"id": "Layer 0", "title": "Layer 0: poles", "line": 3}]},
+        {"roadmap": f"{plan['roadmap']}/Winding", "readme": f"{root}/Winding/README.md", "readme_sha": "2" * 64,
+         "layers": [{"id": "Lane A", "title": "Lane A: cycles", "line": 3}, {"id": "Lane B", "title": "Lane B: homotopy", "line": 5}]},
+    ]
+    return plan
+
+
+def test_render_update_gives_each_sub_roadmap_its_own_header():
+    plan = _umbrella_plan()
+    area = plan["roadmap"]
+    block = {f"{area}/Winding": [{"id": "Lane B", "state": "untouched"}, {"id": "Lane A", "state": "done"}],
+             f"{area}/Residues": [{"id": "Layer 0", "state": "partial", "remaining": "the argument principle"}]}
+    body = PROSE + "\n\n```coverage\n" + json.dumps(block, indent=2) + "\n```\n"
+    status_text, progress_text, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+    parsed = files.parse_status(status_text)
+    assert parsed["coverage"] is None
+    assert parsed["sub_coverage"] == [
+        {"roadmap": f"{area}/Residues", "to_sha": B, "readme_sha": "1" * 64,
+         "layers": [{"id": "Layer 0", "state": "partial", "remaining": "the argument principle"}]},
+        {"roadmap": f"{area}/Winding", "to_sha": B, "readme_sha": "2" * 64,
+         "layers": [{"id": "Lane A", "state": "done"}, {"id": "Lane B", "state": "untouched"}]},
+    ], parsed["sub_coverage"]
+    assert "```coverage" not in status_text
+    files.validate_update(area, None, status_text, None, progress_text, expect_from_sha=A)
+    # The umbrella's layers are its children's: a report without the block is refused for them too.
+    try:
+        apply_mod.render_update(plan, PROSE, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "lists 3 layers" in str(exc), exc
+    else:
+        raise AssertionError("an umbrella report with no block must be refused")
+    # So is one that answers for only some of its children.
+    del block[f"{area}/Winding"]
+    body = PROSE + "\n\n```coverage\n" + json.dumps(block) + "\n```\n"
+    try:
+        apply_mod.render_update(plan, body, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "Winding" in str(exc), exc
+    else:
+        raise AssertionError("a block leaving out a sub-roadmap must be refused")
+
+
+# ----- the wire contract with the consumer ----------------------------------------------------
+#
+# `tests/fixtures/coverage-contract/` holds a README, a model status body with its block, and the
+# exact header line the consumer (TauCeti's scripts/roadmap_progress.py) was recorded accepting.
+# The consumer keeps its own extraction and validation code; this proves the producer still emits
+# byte for byte what it accepted, offline. It is not a live cross-repository test.
+
+FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "coverage-contract"
+
+
+def _contract_plan(readme_text=None):
+    from progress import layers, plan as plan_mod
+    exp = json.loads((FIXTURE / "expected.json").read_text(encoding="utf-8"))
+    if readme_text is None:
+        lay, sha = plan_mod.read_area_layers(FIXTURE.parent, FIXTURE.name)
+    else:
+        lay, sha = layers.headings(readme_text), layers.readme_sha(readme_text)
+    return exp, {"roadmap": exp["roadmap"], "rel_dir": f"TauCetiRoadmap/{exp['roadmap']}",
+                 "from_sha": exp["from_sha"], "to_sha": exp["to_sha"], "prs": [1, 2],
+                 "from_date": "2026-01-01T00:00:00Z", "to_date": "2026-02-01T00:00:00Z",
+                 "layers": lay, "readme_sha": sha, "bootstrapped": True}
+
+
+def test_the_producer_emits_the_header_the_consumer_was_recorded_accepting():
+    exp, plan = _contract_plan()
+    assert [l["id"] for l in plan["layers"]] == exp["layer_ids"], plan["layers"]
+    assert [l["line"] for l in plan["layers"]] == exp["layer_lines"], plan["layers"]
+    assert plan["readme_sha"] == exp["readme_sha"]
+    body = (FIXTURE / "status-body.md").read_text(encoding="utf-8")
+    status_text, progress_text, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+    assert status_text.splitlines()[1] == exp["header_line"], status_text.splitlines()[1]
+    assert "```coverage" not in status_text
+    files.validate_update(exp["roadmap"], None, status_text, None, progress_text)  # the gate accepts the pair
+
+
+UMBRELLA = FIXTURE.parent / "coverage-contract-umbrella"
+
+
+def test_the_producer_emits_the_sub_roadmap_headers_the_consumer_was_recorded_accepting():
+    from progress import plan as plan_mod
+    exp = json.loads((UMBRELLA / "expected.json").read_text(encoding="utf-8"))
+    lay, sha = plan_mod.read_area_layers(UMBRELLA.parent, UMBRELLA.name)
+    subs = plan_mod.read_sub_roadmaps(UMBRELLA.parent, exp["roadmap"], UMBRELLA.name)
+    assert lay == [] and sha == exp["readme_sha"]
+    # `references/` has a README with a layer-like heading but no Suggested.lean: not a sub-roadmap.
+    assert {s["roadmap"]: {"readme_sha": s["readme_sha"], "layer_ids": [l["id"] for l in s["layers"]],
+                           "layer_lines": [l["line"] for l in s["layers"]]} for s in subs} == exp["sub_roadmaps"], subs
+    plan = {"roadmap": exp["roadmap"], "rel_dir": f"TauCetiRoadmap/{exp['roadmap']}",
+            "from_sha": exp["from_sha"], "to_sha": exp["to_sha"], "prs": [1, 2],
+            "from_date": "2026-01-01T00:00:00Z", "to_date": "2026-02-01T00:00:00Z",
+            "layers": lay, "readme_sha": sha, "sub_roadmaps": subs, "bootstrapped": True}
+    body = (UMBRELLA / "status-body.md").read_text(encoding="utf-8")
+    status_text, progress_text, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+    lines = status_text.splitlines()
+    assert lines[1:3] == exp["header_lines"], lines[1:3]
+    assert lines[3] == f"# Status: {exp['roadmap']}"
+    files.validate_update(exp["roadmap"], None, status_text, None, progress_text)
+
+
+def test_editing_the_readme_changes_the_hash_the_consumer_refuses_on():
+    """Same layer ids, different specification: the hash is of the whole text, so the consumer
+    (which compares it against the README it reads) refuses the old assessment."""
+    readme = (FIXTURE / "README.md").read_text(encoding="utf-8")
+    exp, _ = _contract_plan()
+    for edited in (readme + "\nA new requirement in Layer 2.\n",
+                   readme.replace("Hasse's bound", "the Hasse–Weil bound")):
+        _, plan = _contract_plan(edited)
+        assert [l["id"] for l in plan["layers"]] == exp["layer_ids"]
+        assert plan["readme_sha"] != exp["readme_sha"]
+        body = (FIXTURE / "status-body.md").read_text(encoding="utf-8")
+        status_text, _, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+        assert status_text.splitlines()[1] != exp["header_line"]
+
+
 def test_render_update_appends_to_an_existing_log():
     old_log = files.new_progress_file("ContourIntegration") + files.render_section(
         "ContourIntegration", "9" * 40, A, [12], "earlier", PROSE

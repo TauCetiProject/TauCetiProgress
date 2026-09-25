@@ -1,0 +1,11 @@
+{
+  "_comment": "The wire contract for tauceti-coverage:v1: the exact header line plan+apply emit from README.md and status-body.md. Recorded independently of the producer and checked by hand against TauCeti's scripts/roadmap_progress.py at `consumer_revision` (states_from_marker accepted it, layer ids and lines agreed). Regenerate only when the wire format changes, and record the consumer revision checked.",
+  "roadmap": "EllipticCurvesContract",
+  "from_sha": "a1b2c3d000000000000000000000000000000000",
+  "to_sha": "b9c8d7e000000000000000000000000000000000",
+  "readme_sha": "9b23e82296f39eb408b792d59cd563ef2ac725544fb6b22d47b4a78dcf09fc0a",
+  "layer_ids": ["Layer 0", "Layer 1", "Layer 2"],
+  "layer_lines": [13, 17, 21],
+  "header_line": "<!--tauceti-coverage:v1 {\"layers\":[{\"id\":\"Layer 0\",\"state\":\"done\"},{\"id\":\"Layer 1\",\"remaining\":\"the dual isogeny and the degree formula\",\"state\":\"partial\"},{\"id\":\"Layer 2\",\"state\":\"untouched\"}],\"readme_sha\":\"9b23e82296f39eb408b792d59cd563ef2ac725544fb6b22d47b4a78dcf09fc0a\",\"roadmap\":\"EllipticCurvesContract\",\"to_sha\":\"b9c8d7e000000000000000000000000000000000\"}-->",
+  "consumer_revision": "b48d6c94cc5c8abba44c6eeee6b844a8a22f2bd0"
+}

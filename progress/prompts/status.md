@@ -8,6 +8,9 @@ Your entire output is that prose. A script writes the file, adds the header, and
 request. Write no top-level heading (one is added for you), no preamble, and nothing about this
 instruction.
 
+This is the standalone, prose-only prompt: you are given no layer list, so write no `coverage`
+block, and a report written from it carries no per-layer coverage header.
+
 ## What you are given
 
 - **The roadmap's `README.md`**: the human-written plan, its layers or lanes, and its acceptance
