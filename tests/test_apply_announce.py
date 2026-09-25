@@ -168,6 +168,54 @@ def test_render_update_tells_an_absent_block_from_a_null_one():
     assert [l["id"] for l in files.parse_status(status_text)["coverage"]["layers"]] == ["Layer 0", "Layer 1"]
 
 
+def _umbrella_plan():
+    plan = dict(PLAN)
+    plan["layers"], plan["readme_sha"] = [], "0" * 64
+    root = f"TauCetiRoadmap/{plan['roadmap']}"
+    plan["sub_roadmaps"] = [
+        {"roadmap": f"{plan['roadmap']}/Residues", "readme": f"{root}/Residues/README.md", "readme_sha": "1" * 64,
+         "layers": [{"id": "Layer 0", "title": "Layer 0: poles", "line": 3}]},
+        {"roadmap": f"{plan['roadmap']}/Winding", "readme": f"{root}/Winding/README.md", "readme_sha": "2" * 64,
+         "layers": [{"id": "Lane A", "title": "Lane A: cycles", "line": 3}, {"id": "Lane B", "title": "Lane B: homotopy", "line": 5}]},
+    ]
+    return plan
+
+
+def test_render_update_gives_each_sub_roadmap_its_own_header():
+    plan = _umbrella_plan()
+    area = plan["roadmap"]
+    block = {f"{area}/Winding": [{"id": "Lane B", "state": "untouched"}, {"id": "Lane A", "state": "done"}],
+             f"{area}/Residues": [{"id": "Layer 0", "state": "partial", "remaining": "the argument principle"}]}
+    body = PROSE + "\n\n```coverage\n" + json.dumps(block, indent=2) + "\n```\n"
+    status_text, progress_text, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+    parsed = files.parse_status(status_text)
+    assert parsed["coverage"] is None
+    assert parsed["sub_coverage"] == [
+        {"roadmap": f"{area}/Residues", "to_sha": B, "readme_sha": "1" * 64,
+         "layers": [{"id": "Layer 0", "state": "partial", "remaining": "the argument principle"}]},
+        {"roadmap": f"{area}/Winding", "to_sha": B, "readme_sha": "2" * 64,
+         "layers": [{"id": "Lane A", "state": "done"}, {"id": "Lane B", "state": "untouched"}]},
+    ], parsed["sub_coverage"]
+    assert "```coverage" not in status_text
+    files.validate_update(area, None, status_text, None, progress_text, expect_from_sha=A)
+    # The umbrella's layers are its children's: a report without the block is refused for them too.
+    try:
+        apply_mod.render_update(plan, PROSE, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "lists 3 layers" in str(exc), exc
+    else:
+        raise AssertionError("an umbrella report with no block must be refused")
+    # So is one that answers for only some of its children.
+    del block[f"{area}/Winding"]
+    body = PROSE + "\n\n```coverage\n" + json.dumps(block) + "\n```\n"
+    try:
+        apply_mod.render_update(plan, body, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "Winding" in str(exc), exc
+    else:
+        raise AssertionError("a block leaving out a sub-roadmap must be refused")
+
+
 # ----- the wire contract with the consumer ----------------------------------------------------
 #
 # `tests/fixtures/coverage-contract/` holds a README, a model status body with its block, and the
@@ -201,6 +249,30 @@ def test_the_producer_emits_the_header_the_consumer_was_recorded_accepting():
     assert status_text.splitlines()[1] == exp["header_line"], status_text.splitlines()[1]
     assert "```coverage" not in status_text
     files.validate_update(exp["roadmap"], None, status_text, None, progress_text)  # the gate accepts the pair
+
+
+UMBRELLA = FIXTURE.parent / "coverage-contract-umbrella"
+
+
+def test_the_producer_emits_the_sub_roadmap_headers_the_consumer_was_recorded_accepting():
+    from progress import plan as plan_mod
+    exp = json.loads((UMBRELLA / "expected.json").read_text(encoding="utf-8"))
+    lay, sha = plan_mod.read_area_layers(UMBRELLA.parent, UMBRELLA.name)
+    subs = plan_mod.read_sub_roadmaps(UMBRELLA.parent, exp["roadmap"], UMBRELLA.name)
+    assert lay == [] and sha == exp["readme_sha"]
+    # `references/` has a README with a layer-like heading but no Suggested.lean: not a sub-roadmap.
+    assert {s["roadmap"]: {"readme_sha": s["readme_sha"], "layer_ids": [l["id"] for l in s["layers"]],
+                           "layer_lines": [l["line"] for l in s["layers"]]} for s in subs} == exp["sub_roadmaps"], subs
+    plan = {"roadmap": exp["roadmap"], "rel_dir": f"TauCetiRoadmap/{exp['roadmap']}",
+            "from_sha": exp["from_sha"], "to_sha": exp["to_sha"], "prs": [1, 2],
+            "from_date": "2026-01-01T00:00:00Z", "to_date": "2026-02-01T00:00:00Z",
+            "layers": lay, "readme_sha": sha, "sub_roadmaps": subs, "bootstrapped": True}
+    body = (UMBRELLA / "status-body.md").read_text(encoding="utf-8")
+    status_text, progress_text, _ = apply_mod.render_update(plan, body, PROSE, None, None)
+    lines = status_text.splitlines()
+    assert lines[1:3] == exp["header_lines"], lines[1:3]
+    assert lines[3] == f"# Status: {exp['roadmap']}"
+    files.validate_update(exp["roadmap"], None, status_text, None, progress_text)
 
 
 def test_editing_the_readme_changes_the_hash_the_consumer_refuses_on():

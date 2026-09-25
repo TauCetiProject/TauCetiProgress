@@ -5,9 +5,10 @@
 
 Both carry a machine-readable HTML-comment header followed by prose, following the
 `tauceti-<kind>:v1 {json}` convention the rest of the project already uses for scoreboards and
-target markers. A `STATUS.md` may carry a second header, `tauceti-coverage:v1`, the report's
-verdict on each layer of the roadmap in a form a script can read (README.md, "The coverage
-header"). It has the standing of the prose beside it: a model's account, not a checked claim.
+target markers. A `STATUS.md` may also carry `tauceti-coverage:v1` headers, the report's verdict
+on each layer in a form a script can read (README.md, "The coverage header"): one for the area's
+own README, and one for each sub-roadmap of an umbrella area. They have the standing of the prose
+beside them: a model's account, not a checked claim.
 
 Everything here is pure: it takes and returns text, touches no network and no filesystem. That
 matters because the merge gate in CI runs these same functions on an untrusted PR's blobs, and it
@@ -104,6 +105,8 @@ LAYER_STATES = ("done", "partial", "untouched", "unassessed")
 # into an HTML comment, so neither may contain `<` or `>` (a `-->` inside the JSON would close the
 # comment and turn the rest of the header into visible text) nor control characters.
 MAX_LAYERS = 64
+# An umbrella area (RepresentationTheory has twelve) carries one coverage header per sub-roadmap.
+MAX_SUB_ROADMAPS = 32
 LAYER_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 .\-]{0,39}\Z")
 REMAINING_RE = re.compile(r"\A[^<>\x00-\x1f\x7f]{1,200}\Z")
 _HEX64_RE = re.compile(r"\A[0-9a-f]{64}\Z")
@@ -185,20 +188,42 @@ def parse_headers(text, marker):
 # ----- STATUS.md -------------------------------------------------------------------------------
 
 
-def require_coverage(obj, area, to_sha):
+def sub_roadmap_id(area, child):
+    """`Area/Child`, the id a sub-roadmap's coverage header names it by: its directory under the
+    area's. Both halves are directory names and held to the same alphanumeric rule."""
+    return f"{_require_area(area, 'roadmap')}/{_require_area(child, 'sub-roadmap')}"
+
+
+def coverage_roadmap(value, area):
+    """Which roadmap a coverage header's `roadmap` names: `None` for the area itself, the child's
+    directory name for `Area/Child`, or raise. A header can only ever describe the area whose
+    status file it sits in, or a directory directly below it."""
+    if value == area:
+        return None
+    head, sep, child = value.partition("/") if isinstance(value, str) else ("", "", "")
+    if not sep or head != area:
+        raise FormatError(
+            f"{COVERAGE_MARKER} header is for {value!r}, expected {area} or {area}/<sub-roadmap>"
+        )
+    _require_area(child, "sub-roadmap")
+    return child
+
+
+def require_coverage(obj, area, to_sha, child=None):
     """A `tauceti-coverage:v1` payload, validated whole, or raise. The one schema, used by the
     worker on the model's block and by the gate on a pull request's file.
 
-    Closed, like the other headers: the same roadmap and library commit as the status header beside
-    it, a `readme_sha` (SHA-256 of the README assessed), and every layer once with a legal state.
-    Duplicate ids are refused here, before anything keys a dictionary by id. Returned in canonical
-    form, ready to serialise.
+    Closed, like the other headers: the roadmap it names (the area of the status header beside it,
+    or `Area/Child` for sub-roadmap `child`), the same library commit, a `readme_sha` (SHA-256 of
+    the README assessed), and every layer once with a legal state. Duplicate ids are refused here,
+    before anything keys a dictionary by id. Returned in canonical form, ready to serialise.
     """
     if not isinstance(obj, dict):
         raise FormatError(f"{COVERAGE_MARKER} header must be a JSON object")
     _require_keys(obj, COVERAGE_KEYS, COVERAGE_MARKER)
-    if _require_area(obj.get("roadmap"), "roadmap") != area:
-        raise FormatError(f"{COVERAGE_MARKER} header is for {obj['roadmap']}, expected {area}")
+    roadmap = area if child is None else sub_roadmap_id(area, child)
+    if obj.get("roadmap") != roadmap:
+        raise FormatError(f"{COVERAGE_MARKER} header is for {obj.get('roadmap')!r}, expected {roadmap}")
     if _require_sha(obj.get("to_sha"), "to_sha") != to_sha:
         raise FormatError(
             f"{COVERAGE_MARKER} header describes {obj['to_sha'][:7]} but the status header "
@@ -237,7 +262,7 @@ def require_coverage(obj, area, to_sha):
                 )
             clean["remaining"] = remaining
         out.append(clean)
-    return {"roadmap": area, "to_sha": to_sha, "readme_sha": readme_sha, "layers": out}
+    return {"roadmap": roadmap, "to_sha": to_sha, "readme_sha": readme_sha, "layers": out}
 
 
 def coverage_header(coverage):
@@ -255,7 +280,30 @@ def _require_ts(value):
     return value
 
 
-def status_prefix(area, to_sha, ts, coverage=None):
+def _coverage_lines(area, to_sha, coverage, sub_coverage):
+    """The coverage header lines of a status prefix, in their one canonical order: the area's own
+    first, then its sub-roadmaps' in ascending order of name, each at most once."""
+    lines = []
+    if coverage is not None:
+        lines.append(require_coverage(coverage, area, to_sha))
+    subs = list(sub_coverage or ())
+    if len(subs) > MAX_SUB_ROADMAPS:
+        raise FormatError(f"{len(subs)} sub-roadmap coverage headers; the cap is {MAX_SUB_ROADMAPS}")
+    names = []
+    for obj in subs:
+        child = coverage_roadmap(obj.get("roadmap") if isinstance(obj, dict) else None, area)
+        if child is None:
+            raise FormatError(f"a sub-roadmap coverage header must name {area}/<sub-roadmap>")
+        lines.append(require_coverage(obj, area, to_sha, child))
+        names.append(child)
+    if names != sorted(set(names)):
+        raise FormatError(
+            "sub-roadmap coverage headers must be in ascending order of name, each at most once"
+        )
+    return "".join(f"<!--{COVERAGE_MARKER} {coverage_header(c)}-->\n" for c in lines)
+
+
+def status_prefix(area, to_sha, ts, coverage=None, sub_coverage=()):
     """The exact bytes a `STATUS.md` must begin with, given its own header values.
 
     Shared by the renderer and the validator so there is one definition. Checking a PREFIX rather
@@ -265,7 +313,8 @@ def status_prefix(area, to_sha, ts, coverage=None):
 
     `coverage`, when given, is a payload `require_coverage` has accepted; its header follows the
     status header on the next line, so it is part of the canonical prefix too and cannot sit
-    anywhere else in the file.
+    anywhere else in the file. `sub_coverage` lists an umbrella area's sub-roadmap payloads, whose
+    headers follow in ascending order of name, likewise part of the prefix.
     """
     header = json.dumps(
         {"roadmap": _require_area(area, "roadmap"), "to_sha": _require_sha(to_sha, "to_sha"),
@@ -273,9 +322,7 @@ def status_prefix(area, to_sha, ts, coverage=None):
         sort_keys=True,
         separators=(",", ":"),
     )
-    cov = ""
-    if coverage is not None:
-        cov = f"<!--{COVERAGE_MARKER} {coverage_header(require_coverage(coverage, area, to_sha))}-->\n"
+    cov = _coverage_lines(area, to_sha, coverage, sub_coverage)
     return (
         f"<!--{STATUS_MARKER} {header}-->\n"
         f"{cov}"
@@ -286,23 +333,24 @@ def status_prefix(area, to_sha, ts, coverage=None):
     )
 
 
-def render_status(area, to_sha, ts, body, coverage=None):
+def render_status(area, to_sha, ts, body, coverage=None, sub_coverage=()):
     """A whole `STATUS.md`. `body` is the model's prose, without any heading of its own.
 
     The prose is deliberately preceded by a standing note that the file may be out of date: it is
     updated asynchronously from the PRs it describes, so a reader must never take it as
     authoritative about the current tip.
     """
-    return f"{status_prefix(area, to_sha, ts, coverage)}{body.strip()}\n"
+    return f"{status_prefix(area, to_sha, ts, coverage, sub_coverage)}{body.strip()}\n"
 
 
 def parse_status(text):
     """The headers of a `STATUS.md`. Raises unless there is exactly one status header.
 
-    The result carries `coverage`: the validated coverage payload when the file has one, else None.
-    A coverage header that does not fit the status header beside it (another roadmap, another
-    commit, a malformed layer) fails the whole parse; the gate never merges a file it could not
-    fully account for.
+    The result carries `coverage`: the validated payload of the area's own coverage header when the
+    file has one, else None; and `sub_coverage`: the validated payloads of its sub-roadmaps'
+    headers, in file order. A coverage header that does not fit the status header beside it
+    (another roadmap, another commit, a malformed layer) fails the whole parse; the gate never
+    merges a file it could not fully account for. Their order is the prefix check's business.
     """
     headers = parse_headers(text, STATUS_MARKER)
     if len(headers) != 1:
@@ -314,12 +362,20 @@ def parse_status(text):
         "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
         "ts": _require_ts(h.get("ts")),
         "coverage": None,
+        "sub_coverage": [],
     }
-    covs = parse_headers(text, COVERAGE_MARKER)
-    if len(covs) > 1:
-        raise FormatError(f"expected at most one {COVERAGE_MARKER} header, found {len(covs)}")
-    if covs:
-        out["coverage"] = require_coverage(covs[0], out["roadmap"], out["to_sha"])
+    for obj in parse_headers(text, COVERAGE_MARKER):
+        child = coverage_roadmap(obj.get("roadmap"), out["roadmap"])
+        if child is None:
+            if out["coverage"] is not None:
+                raise FormatError(f"more than one {COVERAGE_MARKER} header for {out['roadmap']}")
+            out["coverage"] = require_coverage(obj, out["roadmap"], out["to_sha"])
+        else:
+            out["sub_coverage"].append(require_coverage(obj, out["roadmap"], out["to_sha"], child))
+    if len(out["sub_coverage"]) > MAX_SUB_ROADMAPS:
+        raise FormatError(
+            f"{len(out['sub_coverage'])} sub-roadmap coverage headers; the cap is {MAX_SUB_ROADMAPS}"
+        )
     return out
 
 
@@ -422,6 +478,17 @@ def check_append_only(old_text, new_text):
     return new_text[len(old_text):]
 
 
+def strip_headers(text, marker, count):
+    """Remove exactly `count` well-formed `marker` headers from `text`, or raise; `strip_one_header`
+    for the coverage headers, of which a status file may have several."""
+    spans = [m.span() for m in _HEADER_RE.finditer(text) if m.group(1) == marker]
+    if len(spans) != count:
+        raise FormatError(f"expected exactly {count} {marker} header(s), found {len(spans)}")
+    for start, end in reversed(spans):
+        text = text[:start] + text[end:]
+    return text
+
+
 def strip_one_header(text, marker):
     """Remove exactly ONE well-formed `marker` header from `text`, or raise.
 
@@ -450,16 +517,16 @@ def check_no_reserved_markers(body):
         raise FormatError(f"prose contains a reserved marker at offset {m.start()}: {m.group(0)!r}")
 
 
-def check_status_shape(text, area, to_sha, ts, coverage=None):
+def check_status_shape(text, area, to_sha, ts, coverage=None, sub_coverage=()):
     """`STATUS.md` must begin with EXACTLY the canonical prefix for its own header values.
 
     A prefix comparison, not a set of substring searches. The looser version could be satisfied with
     the heading and the disclaimer buried anywhere in the file -- inside a fenced code block, say --
     so a document that rendered as no report at all still passed. Returns the body that follows.
-    The coverage header, when the file has one, is part of that prefix: it sits on the line after
-    the status header and nowhere else.
+    The coverage headers, when the file has them, are part of that prefix: they sit on the lines
+    after the status header, in canonical order, and nowhere else.
     """
-    expected = status_prefix(area, to_sha, ts, coverage)
+    expected = status_prefix(area, to_sha, ts, coverage, sub_coverage)
     if not text.startswith(expected):
         # Say which part diverges; the whole prefix is too long to quote usefully.
         for label, probe in (
@@ -619,15 +686,17 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
 
     # Shape before content: both files must carry their canonical framing, so a generation cannot
     # drop the heading or the disclaimer and still parse. Each returns the body that follows it.
-    status_body = check_status_shape(new_status, area, status["to_sha"], status["ts"], status["coverage"])
+    status_body = check_status_shape(
+        new_status, area, status["to_sha"], status["ts"], status["coverage"], status["sub_coverage"]
+    )
     section_body = check_section_shape(added, area, section["from_sha"], section["to_sha"])
 
-    # Remove the legitimate headers from each (the status header, and the coverage header when the
-    # shape check just proved one sits in the prefix), then scan what is left with no exemptions.
+    # Remove the legitimate headers from each (the status header, and the coverage headers the
+    # shape check just proved sit in the prefix), then scan what is left with no exemptions.
     check_no_reserved_markers(strip_one_header(added, PROGRESS_MARKER))
     status_rest = strip_one_header(new_status, STATUS_MARKER)
-    if status["coverage"] is not None:
-        status_rest = strip_one_header(status_rest, COVERAGE_MARKER)
+    n_cov = (status["coverage"] is not None) + len(status["sub_coverage"])
+    status_rest = strip_headers(status_rest, COVERAGE_MARKER, n_cov)
     check_no_reserved_markers(status_rest)
 
     if old_status is not None:

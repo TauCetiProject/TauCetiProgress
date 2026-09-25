@@ -1,0 +1,38 @@
+{
+  "_comment": "The wire contract for an umbrella area: the exact coverage header lines plan+apply emit, one per sub-roadmap, from README.md, the sub-roadmap READMEs and status-body.md. Checked by hand against TauCeti's scripts/roadmap_progress.py at `consumer_revision`: read_roadmaps gave RootSystems and SchurWeyl their states from these markers, refused SchurWeyl's after its README was edited, and the umbrella row stayed no-layers. The consumer before that revision ignores these lines. Regenerate only when the wire format changes, and record the consumer revision checked.",
+  "roadmap": "RepContract",
+  "from_sha": "a1b2c3d000000000000000000000000000000000",
+  "to_sha": "b9c8d7e000000000000000000000000000000000",
+  "readme_sha": "924b7906ccfaa6c0a0b27ce0a7d4e503a38552705adac4810e3b338c60d8ee63",
+  "sub_roadmaps": {
+    "RepContract/RootSystems": {
+      "readme_sha": "583af9dd9460a7b2240e2975a3619580eca2d41c452d52c94aa694399ac8683e",
+      "layer_ids": [
+        "Layer 0",
+        "Layer 1",
+        "Layer 2"
+      ],
+      "layer_lines": [
+        3,
+        7,
+        11
+      ]
+    },
+    "RepContract/SchurWeyl": {
+      "readme_sha": "2852110be6d3d41482ed2415bae00811f9ca05f5d54f2498b3e78babf1ea8b07",
+      "layer_ids": [
+        "Lane A",
+        "Lane B"
+      ],
+      "layer_lines": [
+        3,
+        7
+      ]
+    }
+  },
+  "header_lines": [
+    "<!--tauceti-coverage:v1 {\"layers\":[{\"id\":\"Layer 0\",\"state\":\"done\"},{\"id\":\"Layer 1\",\"remaining\":\"every root is an integral combination of simple roots of one sign\",\"state\":\"partial\"},{\"id\":\"Layer 2\",\"state\":\"untouched\"}],\"readme_sha\":\"583af9dd9460a7b2240e2975a3619580eca2d41c452d52c94aa694399ac8683e\",\"roadmap\":\"RepContract/RootSystems\",\"to_sha\":\"b9c8d7e000000000000000000000000000000000\"}-->",
+    "<!--tauceti-coverage:v1 {\"layers\":[{\"id\":\"Lane A\",\"state\":\"done\"},{\"id\":\"Lane B\",\"state\":\"untouched\"}],\"readme_sha\":\"2852110be6d3d41482ed2415bae00811f9ca05f5d54f2498b3e78babf1ea8b07\",\"roadmap\":\"RepContract/SchurWeyl\",\"to_sha\":\"b9c8d7e000000000000000000000000000000000\"}-->"
+  ],
+  "consumer_revision": "8809a661ea05d8768926773f167d1b1d56b61e43"
+}

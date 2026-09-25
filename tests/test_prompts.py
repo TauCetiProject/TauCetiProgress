@@ -107,6 +107,10 @@ def test_the_progress_prompt_asks_for_the_coverage_block_in_the_checked_shape():
         assert f"`{state}`" in text, state
     assert "at most 200" in text and files.REMAINING_RE.pattern.endswith("{1,200}\\Z")
     assert "`layers` list" in text and "__PLAN_FILE__" in text
+    # An umbrella's plan lists sub-roadmaps; the prompt says where their READMEs are and what shape
+    # the block takes for them.
+    assert "`sub_roadmaps`" in text and "`readme`" in text and "JSON object" in text
+    assert '"__ROADMAP__/SchurWeyl": [' in text
 
 
 def test_the_standalone_status_prompt_is_prose_only_and_says_so():

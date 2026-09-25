@@ -151,6 +151,53 @@ def test_the_rendered_status_round_trips_the_coverage():
     assert lines[2] == "# Status: Widgets"
 
 
+
+# ----- an umbrella area: one assessment per sub-roadmap -----------------------------------------
+
+H2 = "1" * 64
+SUBS = [
+    {"roadmap": "Rep/Spin", "readme": "TauCetiRoadmap/Rep/Spin/README.md", "readme_sha": H2,
+     "layers": [{"id": "Layer 0", "title": "Layer 0: a", "line": 3}, {"id": "Layer 1", "title": "Layer 1: b", "line": 4}]},
+    {"roadmap": "Rep/Roots", "readme": "TauCetiRoadmap/Rep/Roots/README.md", "readme_sha": H,
+     "layers": [{"id": "Lane A", "title": "Lane A: c", "line": 3}]},
+]
+SPIN = [{"id": "Layer 1", "state": "untouched"}, {"id": "Layer 0", "state": "done"}]
+ROOTS = [{"id": "Lane A", "state": "partial", "remaining": "the Weyl group"}]
+
+
+def test_coverage_block_binds_each_sub_roadmap_to_its_own_readme():
+    own, subs = layers.coverage_block("Rep", A, H, [], SUBS, {"Rep/Spin": SPIN, "Rep/Roots": ROOTS})
+    assert own is None
+    # Ascending order of name, each in its README's order and under its own README hash.
+    assert subs == [
+        {"roadmap": "Rep/Roots", "to_sha": A, "readme_sha": H, "layers": ROOTS},
+        {"roadmap": "Rep/Spin", "to_sha": A, "readme_sha": H2, "layers": list(reversed(SPIN))},
+    ], subs
+    # An umbrella with layers of its own answers for them under its own id as well.
+    lay = layers.headings(README)
+    own, subs = layers.coverage_block("Rep", A, H, lay, SUBS, {"Rep": ENTRIES, "Rep/Spin": SPIN, "Rep/Roots": ROOTS})
+    assert own == {"roadmap": "Rep", "to_sha": A, "readme_sha": H, "layers": ENTRIES} and len(subs) == 2
+    # Without sub-roadmaps the block is the plain array, as before.
+    assert layers.coverage_block("Widgets", A, H, lay, [], ENTRIES) == (layers.coverage("Widgets", A, H, lay, ENTRIES), [])
+
+
+def test_coverage_block_refuses_a_block_that_does_not_fit_the_umbrella():
+    lay = layers.headings(README)
+    both = {"Rep/Spin": SPIN, "Rep/Roots": ROOTS}
+    cases = [
+        ("an array for an umbrella", ([], SUBS, SPIN), "keyed by roadmap id"),
+        ("an object for a plain area", (lay, [], {"Rep": ENTRIES}), "must be a JSON array"),
+        ("a sub-roadmap left out", ([], SUBS, {"Rep/Spin": SPIN}), "says nothing about roadmap(s) ['Rep/Roots']"),
+        ("an unlisted roadmap", ([], SUBS, dict(both, **{"Rep/Other": ROOTS})), "does not list: ['Rep/Other']"),
+        ("the area's own layers left out", (lay, SUBS, both), "says nothing about roadmap(s) ['Rep']"),
+        ("own layers the area lacks", ([], SUBS, dict(both, Rep=ENTRIES)), "does not list: ['Rep']"),
+        ("a child's layer left out", ([], SUBS, dict(both, **{"Rep/Spin": SPIN[:1]})), "Rep/Spin: the coverage block says nothing"),
+        ("another child's layer", ([], SUBS, dict(both, **{"Rep/Roots": SPIN})), "Rep/Roots: the coverage block names"),
+        ("a child's malformed entry", ([], SUBS, dict(both, **{"Rep/Roots": [{"id": "Lane A"}]})), "expected one of"),
+    ]
+    for label, (own, subs, block), needle in cases:
+        raises(lambda: layers.coverage_block("Rep", A, H, own, subs, block), needle, label)
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

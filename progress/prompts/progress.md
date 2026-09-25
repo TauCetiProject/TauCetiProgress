@@ -12,7 +12,9 @@ files. Do not run git, do not open a pull request, do not edit anything under `_
 2. `__PLAN_FILE__` — the window: which roadmap, which commit range, which pull requests.
 3. `__ROADMAP_DIR__/TauCetiRoadmap/__ROADMAP__/README.md` — the human-written roadmap. This defines
    what "done" means and gives you the project's own names for its layers or lanes. (If that path does
-   not exist, look under `__ROADMAP_DIR__/Completed/__ROADMAP__/README.md`.)
+   not exist, look under `__ROADMAP_DIR__/Completed/__ROADMAP__/README.md`.) If `__PLAN_FILE__` lists
+   `sub_roadmaps`, this README is an index and each sub-roadmap has its own README, at the `readme`
+   path given for it under `__ROADMAP_DIR__`: read those too, since they define the layers you assess.
 4. The existing `STATUS.md` and `PROGRESS.md` in that same directory, if they are there, so you know
    what was already true before this window and can match the established register.
 
@@ -104,10 +106,10 @@ not. Do not catalogue every declaration, repeat the README's exposition, turn ev
 into a heading, or narrate the development process.
 
 **Then, after the prose, one fenced block giving your verdict on each layer.** `__PLAN_FILE__` has
-a `layers` list, the README's own layer headings with an `id` each (`Layer 3`, `Lane G`, `L0A`).
-If that list is empty, write no block. Otherwise end the file with exactly this: a fence named
-`coverage` holding a JSON array with one object per id in the plan's order, every id once and no
-others:
+a `layers` list, the README's own layer headings with an `id` each (`Layer 3`, `Lane G`, `L0A`),
+and a `sub_roadmaps` list. If both are empty, write no block. If only `layers` has entries, end the
+file with exactly this: a fence named `coverage` holding a JSON array with one object per id in the
+plan's order, every id once and no others:
 
 ```coverage
 [
@@ -118,14 +120,34 @@ others:
 ]
 ```
 
+If `sub_roadmaps` has entries, the area is an umbrella and the block is instead a JSON object. Its
+keys are the `roadmap` id of every sub-roadmap in the list (`__ROADMAP__/SchurWeyl`), plus
+`__ROADMAP__` itself when `layers` is not empty. Each value is the array above for that roadmap's
+own `layers`, judged against its own README. Every listed roadmap appears once, and no others:
+
+```coverage
+{
+  "__ROADMAP__/RootSystems": [
+    {"id": "Layer 0", "state": "done"},
+    {"id": "Layer 1", "state": "partial", "remaining": "the classification of irreducible root systems"}
+  ],
+  "__ROADMAP__/SchurWeyl": [
+    {"id": "Layer 0", "state": "untouched"}
+  ]
+}
+```
+
+An umbrella's prose cannot discuss every layer of every sub-roadmap, and should not try: group
+them in "Roadmap coverage" as for any roadmap, and let the block carry the per-layer detail.
+
 `state` is one of `done`, `partial`, `untouched`, `unassessed`, and must agree with what your
 "Roadmap coverage" paragraph says about that layer: `done` when the layer's milestones are all
 proved, `partial` when some are, `untouched` when nothing has landed, `unassessed` when the supplied
 material does not let you say. `remaining` is optional: one line, at most 200 characters, no angle
 brackets, naming what remains for the next contributor; omit the key rather than leave it empty.
 No other keys. A script turns this block into a machine-readable header and removes it from the
-prose; the report is refused if the block is missing, is not valid JSON, names a layer the plan
-does not list, or leaves one out. When you cannot judge a layer, say `unassessed`; do not leave the
+prose; the report is refused if the block is missing, is not valid JSON, names a layer or roadmap
+the plan does not list, or leaves one out. When you cannot judge a layer, say `unassessed`; do not leave the
 block out.
 
 Do not write a top-level `#` heading in either file; the scripts add the headings and the machine

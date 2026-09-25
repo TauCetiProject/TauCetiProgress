@@ -27,7 +27,8 @@ _BULLET_RE = re.compile(rf"^- \*\*({_LAYER_LEAD}[^*]*?)\*\*", re.M)
 _ID_RE = re.compile(rf"^({_LAYER_LEAD}[^:—–,(]*?)\s*(?:[:—–,(]|$)")
 
 # The block the model appends to its status prose: a named fence, so plain code in the prose is
-# never mistaken for it, holding a JSON array of `{"id", "state", "remaining"?}` objects.
+# never mistaken for it, holding a JSON array of `{"id", "state", "remaining"?}` objects -- or, for
+# an umbrella area, an object mapping each assessed roadmap's id to such an array.
 BLOCK_OPEN_RE = re.compile(r"^```coverage[ \t]*$", re.M)
 BLOCK_CLOSE_RE = re.compile(r"^```[ \t]*$", re.M)
 
@@ -87,11 +88,11 @@ def split_block(body):
     # `None` is how this function says "no block", so a block holding JSON `null` must not decode
     # to it: the caller would take a present, malformed block for an absent one and drop it.
     if entries is None:
-        raise files.FormatError("the ```coverage block holds JSON null, not a list of layers")
+        raise files.FormatError("the ```coverage block holds JSON null, not an assessment")
     return body[:start.start()].rstrip() + "\n", entries
 
 
-def coverage(area, to_sha, readme_hash, layers, entries):
+def coverage(area, to_sha, readme_hash, layers, entries, child=None):
     """The validated `tauceti-coverage:v1` payload for a report, or raise.
 
     The model supplied only `entries`; the roadmap, commit and README hash come from the plan, and
@@ -99,19 +100,58 @@ def coverage(area, to_sha, readme_hash, layers, entries):
     because it has no README, is checked here: every layer the plan lists appears exactly once and
     nothing else does. Entries are returned in the README's order, whatever order the model wrote.
     """
+    roadmap = area if child is None else files.sub_roadmap_id(area, child)
     validated = files.require_coverage(
-        {"roadmap": area, "to_sha": to_sha, "readme_sha": readme_hash, "layers": entries}, area, to_sha
+        {"roadmap": roadmap, "to_sha": to_sha, "readme_sha": readme_hash, "layers": entries},
+        area, to_sha, child,
     )
+    where = "" if child is None else f"{roadmap}: "
     ids = [layer["id"] for layer in layers]
     by_id = {entry["id"]: entry for entry in validated["layers"]}  # ids are unique: validated above
     unknown = [i for i in by_id if i not in ids]
     missing = [i for i in ids if i not in by_id]
     if unknown:
         raise files.FormatError(
-            f"the coverage block names layer(s) the README does not have: {unknown}; "
+            f"{where}the coverage block names layer(s) the README does not have: {unknown}; "
             f"the README's layer ids are {ids}"
         )
     if missing:
-        raise files.FormatError(f"the coverage block says nothing about layer(s) {missing}")
+        raise files.FormatError(f"{where}the coverage block says nothing about layer(s) {missing}")
     validated["layers"] = [by_id[i] for i in ids]
     return validated
+
+
+def coverage_block(area, to_sha, readme_hash, layers, sub_roadmaps, block):
+    """`(coverage, sub_coverage)` for a report: the area's own validated payload (or None when its
+    README has no layers) and one per sub-roadmap, in ascending order of name. Raises unless the
+    block assesses exactly what the plan lists.
+
+    An area without sub-roadmaps answers with an array, one entry per layer. An umbrella area
+    answers with an object keyed by roadmap id (`Area` for its own layers, if it has any, and
+    `Area/Child` for each sub-roadmap), each value such an array; every listed roadmap must appear
+    and nothing else may.
+    """
+    if not sub_roadmaps:
+        if not isinstance(block, list):
+            raise files.FormatError(
+                f"the ```coverage block must be a JSON array of layers; {area} has no sub-roadmaps"
+            )
+        return coverage(area, to_sha, readme_hash, layers, block), []
+    expected = ([area] if layers else []) + [sub["roadmap"] for sub in sub_roadmaps]
+    if not isinstance(block, dict):
+        raise files.FormatError(
+            f"{area} has sub-roadmaps, so the ```coverage block must be a JSON object keyed by "
+            f"roadmap id: {expected}"
+        )
+    unknown = [key for key in block if key not in expected]
+    missing = [key for key in expected if key not in block]
+    if unknown:
+        raise files.FormatError(f"the coverage block names roadmap(s) the plan does not list: {unknown}")
+    if missing:
+        raise files.FormatError(f"the coverage block says nothing about roadmap(s) {missing}")
+    own = coverage(area, to_sha, readme_hash, layers, block[area]) if layers else None
+    subs = []
+    for sub in sorted(sub_roadmaps, key=lambda sub: sub["roadmap"]):
+        child = files.coverage_roadmap(sub["roadmap"], area)
+        subs.append(coverage(area, to_sha, sub["readme_sha"], sub["layers"], block[sub["roadmap"]], child))
+    return own, subs

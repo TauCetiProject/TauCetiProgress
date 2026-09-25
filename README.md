@@ -84,23 +84,22 @@ It is the report's verdict on each layer of the roadmap, in a form a script can 
 says the same things, but nothing can aggregate prose across forty roadmaps. The consumer is the
 TauCeti site's Progress page (`scripts/roadmap_progress.py` in the TauCeti repository).
 
-**Wire schema.** `roadmap` and `to_sha` equal the status header's; `readme_sha` is the SHA-256 of
-the README the layers were read from; `layers` is a non-empty list (at most 64) of
-`{"id", "state", "remaining"?}` with `id` a short label (`Layer 3`, `Lane G`, `L0A`), `state` one
-of `done`, `partial`, `untouched`, `unassessed` (the material said nothing), and `remaining` an
-optional one-line note of at most 200 characters with no angle brackets. No other keys anywhere.
-Keys are sorted and the JSON is compact; `files.require_coverage` is the one definition, and both
-the worker and the gate run it.
+**Wire schema.** `roadmap` is the status header's area, or `Area/Child` for a sub-roadmap (below);
+`to_sha` equals the status header's; `readme_sha` is the SHA-256 of the README the layers were read
+from; `layers` is a non-empty list (at most 64) of `{"id", "state", "remaining"?}` with `id` a short
+label (`Layer 3`, `Lane G`, `L0A`), `state` one of `done`, `partial`, `untouched`, `unassessed` (the
+material said nothing), and `remaining` an optional one-line note of at most 200 characters with no
+angle brackets. No other keys anywhere. Keys are sorted and the JSON is compact;
+`files.require_coverage` is the one definition, and both the worker and the gate run it.
 
-**Trust boundary.** The model supplies only the assessments, as a JSON array inside a fenced
+**Trust boundary.** The model supplies only the assessments, as JSON inside a fenced
 ```` ```coverage ```` block at the end of its status prose. Code supplies everything else: `plan`
 records the README's layer headings (`Layer` / `Lane` / `Part` / `Stage`, or `L0A`-style labels)
 and `readme_sha` in the plan; `apply` removes the block, validates the payload against the schema,
 checks it names every listed layer exactly once and nothing else, and writes the header; the gate
-treats the header as part of the canonical prefix (the line after the status header, nowhere
-else) and re-validates it. The gate proves the header's shape, never its truth, and cannot check
-`readme_sha` (it never checks out the roadmap repository): the header is a claim, not a
-certificate.
+treats the headers as part of the canonical prefix (the lines after the status header, nowhere else)
+and re-validates them. The gate proves the header's shape, never its truth, and cannot check
+`readme_sha` (it never checks out the roadmap repository): the header is a claim, not a certificate.
 
 **Missing block.** A README with no layer headings gives a plan with no layers and a report with no
 header. When the plan lists layers, the worker refuses a body with no block, just as it refuses a
@@ -115,10 +114,17 @@ ids alone do not, since a layer's requirements can change under an unchanged hea
 refuses a header whose hash does not match the README it reads and shows those layers as
 unassessed with that reason.
 
-**Scope.** This version covers the selected labelled area's own README and nothing below it. An
-umbrella area whose README is an index of sub-roadmaps (RepresentationTheory) has no layer
-headings, so its reports carry no header and the children are not assessed by this pipeline; a
-sub-roadmap assessment needs a carrier of its own, agreed with the gate and the consumer together.
+**Umbrella areas.** An area whose directories include sub-roadmaps (RepresentationTheory's twelve)
+is one labelled area with one report, so that report is the only account of its children. A
+sub-roadmap is a directory directly below the area with a `README.md` and a `Suggested.lean`, the
+consumer's rule. `plan` lists each one with layer headings under `sub_roadmaps`, with its
+`Area/Child` id, its README path and its own `readme_sha`; the model reads those READMEs and answers
+with a JSON object keyed by roadmap id instead of an array; and `apply` writes one coverage header
+per sub-roadmap, each bound to its own README, after the area's own header (if its README has
+layers) and in ascending order of name. The gate holds each to the same schema, requires
+`Area/Child` with an alphanumeric child directly below the status file's own area, caps them at 32,
+and treats all of them as part of the canonical prefix. A consumer that does not know sub-roadmap
+headers ignores them: their `roadmap` never equals a row's own name.
 
 **Rollout.** Merge here, then bump the two pins in TauCetiRoadmap's `progress-*.yml` workflows and
 the worker's `PROGRESS_REF` to the same SHA, together: the generator and the gate must run one
@@ -126,19 +132,12 @@ version. Reports written before the bump simply have no header.
 
 **Leaving the hand transcriptions.** Today the site reads layer states from a hand-transcribed
 file in the TauCeti repository (`scripts/roadmap_coverage.json`), each entry bound to the exact
-report it was read from. Nothing is backfilled:
-
-- *Top-level areas.* An area's transcription stays valid until its next report. After the bump
-  that report carries a header (the worker refuses one without it when there are layers), the
-  site reads the header instead, and the transcription is retired. Existing reports are not
-  regenerated to add headers; each area moves over on its normal cadence, and its entry can then
-  be deleted from the transcription file.
-- *Umbrella sub-roadmaps.* The twelve RepresentationTheory children stay hand-maintained. Their
-  entries are bound to the umbrella's report, so all twelve retire together when the umbrella's next
-  report lands, and the site shows them as retired, keeping the old reading and its commit, until
-  someone re-transcribes them against the new report. Taking them off hand transcription is
-  follow-up work: each child needs a carrier of its own (a roadmap identity, a README hash, an id
-  namespace), agreed with the gate and the consumer, which this version does not provide.
+report it was read from. Nothing is backfilled: an area's transcription stays valid until its next
+report, which after the bump carries the headers (the worker refuses one without them when there
+are layers), and the site then reads those instead and the transcription is retired. That holds
+for the RepresentationTheory children too, all at once, at the umbrella's next report, provided
+the site reads sub-roadmap headers by then. Each entry can be deleted from the transcription file
+once its roadmap's report carries a header.
 
 ## Trust boundary
 
