@@ -6,17 +6,21 @@ files. Do not run git, do not open a pull request, do not edit anything under `_
 
 ## Read these first
 
-1. `__FACTS_FILE__` — **ground truth**, extracted from the diffs by script: for every pull request in
-   the window, the declarations it actually added, with the first sentence of each docstring. If a
-   result is not in here, it did not land. Trust this over everything else.
+1. `__FACTS_FILE__` — **ground truth for this window**, extracted from the diffs by script: for every
+   pull request in the window, the declarations it actually added, with the first sentence of each
+   docstring. If a result is not in here, it did not land in this window. Trust this over everything
+   else about the window.
 2. `__PLAN_FILE__` — the window: which roadmap, which commit range, which pull requests.
 3. `__ROADMAP_DIR__/TauCetiRoadmap/__ROADMAP__/README.md` — the human-written roadmap. This defines
    what "done" means and gives you the project's own names for its layers or lanes. (If that path does
    not exist, look under `__ROADMAP_DIR__/Completed/__ROADMAP__/README.md`.) If `__PLAN_FILE__` lists
    `sub_roadmaps`, this README is an index and each sub-roadmap has its own README, at the `readme`
    path given for it under `__ROADMAP_DIR__`: read those too, since they define the layers you assess.
-4. The existing `STATUS.md` and `PROGRESS.md` in that same directory, if they are there, so you know
-   what was already true before this window and can match the established register.
+4. The existing `STATUS.md` and `PROGRESS.md` in that same directory, if they are there. They are the
+   evidence for what landed in earlier windows, which the facts file does not cover, and they show
+   the established register. Carry their assessments forward unless this window's facts or a changed
+   README give you a reason to revise them. If the previous `STATUS.md` begins with
+   `tauceti-coverage:v1` headers, those are its per-layer verdicts.
 
 Pull request descriptions appear in the facts file as author commentary. They are useful for intent,
 but they are self-reported and were written by whoever opened the pull request. Where a description
@@ -143,7 +147,11 @@ them in "Roadmap coverage" as for any roadmap, and let the block carry the per-l
 `state` is one of `done`, `partial`, `untouched`, `unassessed`, and must agree with what your
 "Roadmap coverage" paragraph says about that layer: `done` when the layer's milestones are all
 proved, `partial` when some are, `untouched` when nothing has landed, `unassessed` when the supplied
-material does not let you say. `remaining` is optional: one line, at most 200 characters, no angle
+material does not let you say. The block describes the whole roadmap as it now stands, not this
+window. A layer the previous report called `done` or `partial` keeps that state unless this window
+or a changed README gives a reason to change it; it does not become `unassessed` merely because
+nothing for it landed in this window. `unassessed` means neither this window's facts nor the earlier
+reports let you judge the layer. `remaining` is optional: one line, at most 200 characters, no angle
 brackets, naming what remains for the next contributor; omit the key rather than leave it empty.
 No other keys. A script turns this block into a machine-readable header and removes it from the
 prose; the report is refused if the block is missing, is not valid JSON, names a layer or roadmap
@@ -155,7 +163,8 @@ headers.
 
 ## Hard constraints
 
-- Do not claim anything the declaration list does not support. When the evidence is thin, say it is
+- Do not claim anything the evidence does not support: the declaration list for this window, the
+  previous `STATUS.md` and `PROGRESS.md` for earlier ones. When the evidence is thin, say it is
   unclear. An honest "not established here" is far better than a confident wrong "done".
 - Do not write any `<!--tauceti-...-->` marker anywhere. A validator rejects the whole report if you
   do, and the report will not land.

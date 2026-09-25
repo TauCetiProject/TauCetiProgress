@@ -113,6 +113,20 @@ def test_the_progress_prompt_asks_for_the_coverage_block_in_the_checked_shape():
     assert '"__ROADMAP__/SchurWeyl": [' in text
 
 
+def test_the_progress_prompt_carries_earlier_assessments_forward():
+    """The facts file covers one window; the block covers the whole roadmap. Read naively, "if a
+    result is not in here, it did not land" would turn every layer finished in an earlier window
+    `unassessed` on the Progress page. The prompt must scope the facts file to the window and say
+    that earlier verdicts stand unless there is a reason to revise them."""
+    text = " ".join((cli.PROMPT_DIR / "progress.md").read_text().split())
+    assert "ground truth for this window" in text
+    assert "it did not land in this window" in text and "If a result is not in here, it did not land. " not in text
+    assert "evidence for what landed in earlier windows" in text
+    assert "Carry their assessments forward unless" in text
+    assert "not this window" in text and "does not become `unassessed` merely because nothing for it landed" in text
+    assert "Do not claim anything the declaration list does not support." not in text
+
+
 def test_the_standalone_status_prompt_is_prose_only_and_says_so():
     """`prompt status` gets `__CONTEXT__` and no plan, so no layer list to assess against."""
     text = (cli.PROMPT_DIR / "status.md").read_text()

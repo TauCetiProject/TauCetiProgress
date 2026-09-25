@@ -103,12 +103,14 @@ LAYER_STATES = ("done", "partial", "untouched", "unassessed")
 # Bounds on the coverage header. A roadmap has a dozen or two layers; a header with hundreds is
 # not one, and a `remaining` note is one line, not a second report. Both fields are interpolated
 # into an HTML comment, so neither may contain `<` or `>` (a `-->` inside the JSON would close the
-# comment and turn the rest of the header into visible text) nor control characters.
+# comment and turn the rest of the header into visible text) nor control characters. Nor lone
+# surrogates: JSON can spell one (`"\ud800"`), but the header is written unescaped, and a string
+# holding one cannot be encoded as UTF-8 at all.
 MAX_LAYERS = 64
 # An umbrella area (RepresentationTheory has twelve) carries one coverage header per sub-roadmap.
 MAX_SUB_ROADMAPS = 32
 LAYER_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 .\-]{0,39}\Z")
-REMAINING_RE = re.compile(r"\A[^<>\x00-\x1f\x7f]{1,200}\Z")
+REMAINING_RE = re.compile(r"\A[^<>\x00-\x1f\x7f\ud800-\udfff]{1,200}\Z")
 _HEX64_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
@@ -258,7 +260,7 @@ def require_coverage(obj, area, to_sha, child=None):
             if not isinstance(remaining, str) or not REMAINING_RE.match(remaining):
                 raise FormatError(
                     f"layer {lid!r} has a 'remaining' note that is empty, over 200 characters, or "
-                    f"contains angle brackets or control characters"
+                    f"contains angle brackets, control characters or lone surrogates"
                 )
             clean["remaining"] = remaining
         out.append(clean)

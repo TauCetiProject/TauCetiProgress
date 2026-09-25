@@ -144,6 +144,20 @@ def test_render_update_refuses_a_missing_block_when_the_plan_lists_layers():
     files.validate_update(plan["roadmap"], None, headerless, None, progress, expect_from_sha=plan["from_sha"])
 
 
+def test_render_update_refuses_a_lone_surrogate_as_a_format_error():
+    """JSON can spell a lone surrogate, which no UTF-8 file can hold. It must be refused as a
+    malformed block, not surface later as a UnicodeEncodeError while the files are written."""
+    plan = _plan_with_layers()
+    body = PROSE + '\n\n```coverage\n[{"id": "Layer 0", "state": "done"}, ' \
+                   '{"id": "Layer 1", "state": "partial", "remaining": "a \\ud800 b"}]\n```\n'
+    try:
+        apply_mod.render_update(plan, body, PROSE, None, None)
+    except files.FormatError as exc:
+        assert "lone surrogates" in str(exc), exc
+    else:
+        raise AssertionError("a note holding a lone surrogate must be refused")
+
+
 def test_render_update_without_layers_is_a_plain_report():
     # A README with no layer headings: no block is asked for, none is needed.
     status_text, _, _ = apply_mod.render_update(dict(PLAN), PROSE, PROSE, None, None)

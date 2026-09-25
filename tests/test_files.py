@@ -111,6 +111,7 @@ def test_coverage_header_must_fit_the_status_header_and_the_schema():
         ("an unsafe id", dict(COV, layers=[dict(lane, id="<b>")]), "short label"),
         ("a note that closes the comment", dict(COV, layers=[dict(lane, remaining="x --> y")]), "angle brackets"),
         ("an overlong note", dict(COV, layers=[dict(lane, remaining="x" * 201)]), "200"),
+        ("a lone surrogate in a note", dict(COV, layers=[dict(lane, remaining="a \ud800 b")]), "lone surrogates"),
         ("too many layers", dict(COV, layers=[{"id": f"L{i}", "state": "done"} for i in range(65)]), "cap"),
     ]
     for label, payload, needle in cases:
