@@ -19,7 +19,7 @@ import tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from progress import cli, facts, window  # noqa: E402
-from progress.docs import DocsError, DocsNotFound  # noqa: E402
+from progress.docs import Docs, DocsError, DocsNotFound, INDEX_PATH  # noqa: E402
 from progress.facts import FactsError  # noqa: E402
 
 failures = []
@@ -228,6 +228,64 @@ def test_a_404_from_another_build_refuses_a_partial_report():
             assert "TauCeti/B.lean" in str(exc) and "redeploying" in str(exc), str(exc)
         else:
             raise AssertionError("expected a refusal, not a partial report")
+
+
+def test_an_empty_page_from_another_build_refuses_a_partial_report():
+    """An HTTP 200 page with no declarations can still name the newer build in its navigation.
+    A contributing cached page must not let the window advance past that newer page."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        third = commit(tmp, "feat: B (#103)",
+                       {"TauCeti/B.lean": "theorem later : True := trivial\n"})
+        base = "https://docs.example/docs"
+        gh_link = (f"https://github.com/TauCetiProject/TauCeti/blob/{third}/"
+                   "TauCeti/A.lean#L2-L3")
+        def b_nav(sha):
+            return ('<p class="gh_nav_link"><a href="https://github.com/'
+                    f'TauCetiProject/TauCeti/blob/{sha}/TauCeti/B.lean">source</a></p>')
+        a_page = (f'<div class="decl" id="TauCeti.alpha"><span class="decl_kind">theorem'
+                  f'</span><div class="gh_link"><a href="{gh_link}">source</a></div></div>')
+        pages = {
+            INDEX_PATH: json.dumps({"declarations": {
+                "TauCeti.alpha": {"docLink": "./TauCeti/A.html#TauCeti.alpha"}}}),
+            "TauCeti/A.html": a_page,
+            "TauCeti/B.html": b_nav(third),
+        }
+        docs = Docs(base=base, cache_dir=pathlib.Path(tmp) / "cache",
+                    opener=lambda url: pages[url.removeprefix(base + "/")])
+        assert docs.source_commit() == third  # caches the probe page from this build
+        pages["TauCeti/B.html"] = b_nav("b" * 40)
+        try:
+            facts.collect(tmp, root, third, docs=docs)
+        except FactsError as exc:
+            assert "TauCeti/B.lean" in str(exc) and "redeploying" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not a partial report")
+
+
+def test_a_genuinely_empty_module_does_not_block_another_declaration():
+    """An imports-only module has a nav source link even though it has no declarations."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        third = commit(tmp, "feat: imports (#103)",
+                       {"TauCeti/B.lean": "import TauCeti.A\n"})
+        a_link = (f"https://github.com/TauCetiProject/TauCeti/blob/{third}/"
+                  "TauCeti/A.lean#L2-L3")
+        b_link = (f"https://github.com/TauCetiProject/TauCeti/blob/{third}/"
+                  "TauCeti/B.lean")
+        base = "https://docs.example/docs"
+        pages = {
+            INDEX_PATH: json.dumps({"declarations": {
+                "TauCeti.alpha": {"docLink": "./TauCeti/A.html#TauCeti.alpha"}}}),
+            "TauCeti/A.html": (f'<div class="decl" id="TauCeti.alpha">'
+                                   f'<div class="gh_link"><a href="{a_link}">source</a></div></div>'),
+            "TauCeti/B.html": (f'<p class="gh_nav_link"><a href="{b_link}">source</a></p>'),
+        }
+        docs = Docs(base=base, cache_dir=pathlib.Path(tmp) / "cache",
+                    opener=lambda url: pages[url.removeprefix(base + "/")])
+        got = facts.collect(tmp, root, third, docs=docs)
+        assert [d["name"] for d in got["declarations"]] == ["TauCeti.alpha"]
+        assert got["counts"]["files"] == 2
 
 
 def test_a_page_that_cannot_be_read_refuses_the_window():

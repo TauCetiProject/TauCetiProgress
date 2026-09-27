@@ -59,6 +59,12 @@ _DECL_RE = re.compile(r'<div class="decl" id="([^"]+)">')
 _GH_LINK_RE = re.compile(
     r'<div class="gh_link"><a href="https://github\.com/[^/]+/[^/]+/blob/([0-9a-f]{40})/([^"#]+)#L(\d+)-L(\d+)"'
 )
+# doc-gen4 puts a source link in every module page's navigation, including pages with no
+# declarations. Those pages still need a build identity: otherwise a newer, empty HTTP 200 page
+# could be mistaken for an empty page from the build selected by source_commit().
+_NAV_LINK_RE = re.compile(
+    r'<p class="gh_nav_link"><a href="https://github\.com/[^/]+/[^/]+/blob/([0-9a-f]{40})/[^"#]+">'
+)
 _KIND_RE = re.compile(r'<span class="decl_kind">([a-z ]+)</span>')
 
 
@@ -191,13 +197,17 @@ class Docs:
 
     @staticmethod
     def _page_commit(html):
-        """The build commit a module page's `gh_link`s name, or None if it has no source links.
+        """The build commit named by a module page's source links, if any.
 
-        doc-gen4 writes the commit the BUILD ran on, the same one on every link of every page, which
-        is why one link is enough to identify a page's generation.
+        doc-gen4 writes a source link in the navigation even when the page has no declarations.
+        Declaration links and the navigation must name the same build when both are present.
         """
-        m = _GH_LINK_RE.search(html)
-        return m.group(1) if m else None
+        nav = _NAV_LINK_RE.search(html)
+        decl = _GH_LINK_RE.search(html)
+        if nav and decl and nav.group(1) != decl.group(1):
+            raise DocsError("a module page has source links from different builds")
+        link = nav or decl
+        return link.group(1) if link else None
 
     def declarations(self, module_page):
         """Every declaration documented on a module page.
@@ -217,10 +227,18 @@ class Docs:
         html = self._get(module_page)
         if self._source_commit is not None:
             seen = self._page_commit(html)
-            if seen is not None and seen != self._source_commit:
+            if seen != self._source_commit:
                 html = self._get(module_page, refetch=True)
                 seen = self._page_commit(html)
-                if seen is not None and seen != self._source_commit:
+                if seen is None:
+                    # A successful response can be an empty module page from a newer build. With
+                    # no source link it cannot be tied to the build chosen by source_commit(), so
+                    # accepting it would let a nonempty but incomplete report advance the cursor.
+                    raise DocsError(
+                        f"{module_page} has no source link to verify its build against "
+                        f"{self._source_commit[:7]}; refusing an incoherent documentation window"
+                    )
+                if seen != self._source_commit:
                     raise DocsError(
                         f"{module_page} was built from {seen[:7]}, not {self._source_commit[:7]}; "
                         f"the site is redeploying and this run cannot describe one build"

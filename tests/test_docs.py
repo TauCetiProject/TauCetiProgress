@@ -102,6 +102,35 @@ def test_a_page_with_no_declarations_yields_nothing():
     assert d.declarations("empty.html") == {}
 
 
+def test_a_page_without_source_links_cannot_be_verified_against_a_chosen_build():
+    """An empty HTTP 200 page might be from a newer deploy, even when the probe is cached."""
+    fetched = []
+    d = make({"empty.html": "<html><body>nothing here</body></html>"}, fetched=fetched)
+    d._source_commit = "a" * 40
+    try:
+        d.declarations("empty.html")
+    except DocsError as exc:
+        assert "no source link" in str(exc), str(exc)
+    else:
+        raise AssertionError("an unidentifiable page must be refused")
+    assert fetched == ["empty.html", "empty.html"], fetched
+
+
+def test_an_empty_page_with_a_matching_navigation_source_is_accepted():
+    sha = "a" * 40
+    nav = (f'<p class="gh_nav_link"><a href="https://github.com/TauCetiProject/TauCeti/'
+           f'blob/{sha}/TauCeti/Empty.lean">source</a></p>')
+    d = make({"empty.html": f"<html><body>{nav}</body></html>"})
+    d._source_commit = sha
+    assert d.declarations("empty.html") == {}
+
+
+def test_a_real_declaration_free_module_navigation_identifies_its_build():
+    """Captured from TauCeti's generated AmbientIsotopy/Defs.html page."""
+    html = (FIXTURES / "empty-module-nav.html").read_text()
+    assert Docs._page_commit(html) == "ec768b70f56ff6503cd76fa8fcc7f62d3e613c48"
+
+
 def test_markup_that_stops_matching_is_visible():
     """A page whose decl blocks carry no source link still lists the declarations, without a
     position -- so the caller cannot decide they are new, rather than guessing that they are."""
