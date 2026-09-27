@@ -46,8 +46,11 @@ ENV = {
 def commit(tmp, subject, files):
     for rel, text in files.items():
         p = pathlib.Path(tmp) / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text)
+        if text is None:
+            p.unlink()
+        else:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
     subprocess.run(["git", "-C", tmp, "add", "-A"], check=True, capture_output=True, env=ENV)
     subprocess.run(["git", "-C", tmp, "commit", "-q", "-m", subject],
                    check=True, capture_output=True, env=ENV)
@@ -196,19 +199,35 @@ def test_a_declaration_with_no_docstring_reports_none():
         assert got["declarations"][0]["doc"] == ""
 
 
-def test_an_undocumented_module_contributes_nothing():
-    """A file added after the documentation was built has no page, so nothing in it can be linked --
-    and claiming it landed with a dead link would be worse than silence. The rest of the window is
-    still reported."""
+def test_a_removed_module_can_have_no_published_page():
+    """A file touched in the window but removed before the documented commit has no page.
+    The rest of the window is still reported."""
     with tempfile.TemporaryDirectory() as tmp:
         root, first, second = repo_with_two_prs(tmp)
-        third = commit(tmp, "feat: unpublished (#103)",
+        third = commit(tmp, "feat: add B (#103)",
                        {"TauCeti/B.lean": "theorem later : True := trivial\n"})
-        docs = ReadingDocs({PAGE: {"TauCeti.alpha": ("theorem", "TauCeti/A.lean", 2, 3)}}, third)
-        got = facts.collect(tmp, root, third, docs=docs)
+        fourth = commit(tmp, "remove B (#104)", {"TauCeti/B.lean": None})
+        docs = ReadingDocs({PAGE: {"TauCeti.alpha": ("theorem", "TauCeti/A.lean", 2, 3)}}, fourth)
+        got = facts.collect(tmp, root, fourth, docs=docs)
         names = {d["name"] for d in got["declarations"]}
         assert names == {"TauCeti.alpha"}, sorted(names)
         assert got["counts"]["files"] == 2, got["counts"]
+
+
+def test_a_404_from_another_build_refuses_a_partial_report():
+    """One cached page may contribute declarations before an uncached page returns 404 from a
+    newer build. A nonempty partial report must not advance past that missing module."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        third = commit(tmp, "feat: B (#103)",
+                       {"TauCeti/B.lean": "theorem later : True := trivial\n"})
+        docs = ReadingDocs(docs_for(second)._pages, third)
+        try:
+            facts.collect(tmp, root, third, docs=docs)
+        except FactsError as exc:
+            assert "TauCeti/B.lean" in str(exc) and "redeploying" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not a partial report")
 
 
 def test_a_page_that_cannot_be_read_refuses_the_window():
@@ -232,10 +251,10 @@ def test_a_window_with_no_attributable_declarations_is_refused():
     with tempfile.TemporaryDirectory() as tmp:
         root, first, second = repo_with_two_prs(tmp)
         try:
-            facts.collect(tmp, root, second, docs=ReadingDocs({}, second))
+            facts.collect(tmp, root, second, docs=ReadingDocs({PAGE: {}}, second))
         except FactsError as exc:
             assert "2 pull request(s)" in str(exc), str(exc)
-            assert "1 with no published page" in str(exc), str(exc)
+            assert "0 with no published page" in str(exc), str(exc)
         else:
             raise AssertionError("expected a refusal, not an empty window")
 
@@ -256,18 +275,19 @@ def test_revised_declarations_are_marked_not_new():
         assert got2["declarations"][0]["new"] is False, "only the body line is from this window"
 
 
-def test_documentation_behind_the_window_end_anchors_to_the_documented_commit():
-    """The docs deploy independently of the branch that nominates them. Anchoring to the branch tip
-    would produce dead links for anything newer, so the documented commit wins and is reported."""
+def test_documentation_behind_the_planned_window_refuses_to_advance():
+    """A different docs build between plan and facts must not advance the planned cursor past
+    pull requests whose declarations the extractor did not inspect."""
     with tempfile.TemporaryDirectory() as tmp:
         root, first, second = repo_with_two_prs(tmp)
         third = commit(tmp, "feat: later (#103)", {"TauCeti/B.lean": "theorem later : True := trivial\n"})
-        # The documentation is still at `second`.
-        got = facts.collect(tmp, root, third, docs=docs_for(second))
-        assert got["docs_sha"] == second
-        assert got["to_sha"] == third
-        names = {d["name"] for d in got["declarations"]}
-        assert names == {"TauCeti.alpha", "TauCeti.beta"}, sorted(names)
+        try:
+            facts.collect(tmp, root, third, docs=docs_for(second))
+        except FactsError as exc:
+            assert second[:7] in str(exc) and third[:7] in str(exc), str(exc)
+            assert "replan" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not a report that skips #103")
 
 
 def test_documentation_from_a_foreign_history_is_refused():

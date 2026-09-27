@@ -69,10 +69,8 @@ class DocsError(RuntimeError):
 class DocsNotFound(DocsError):
     """The site answered, and the page does not exist (HTTP 404).
 
-    The one benign failure to read a page: a module added after the documentation was built, or one
-    the documentation never imports, has no page. Every other `DocsError` -- a timeout, a server
-    error, a page from another build -- means the documentation could not be read, which is not the
-    same as it having nothing to say.
+    `facts.collect` checks this against the chosen source commit before deciding whether the
+    missing page is benign. A 404 from another build is not evidence that the module is absent.
     """
 
 

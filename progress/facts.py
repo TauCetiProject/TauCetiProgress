@@ -125,9 +125,9 @@ def docstring_in(text, start_line, end_line):
 def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     """The factual spine of a window.
 
-    `to_sha` is the window's end as the plan computed it; the documentation may have been built from
-    an earlier commit, in which case that earlier commit is what everything is anchored to, so every
-    link resolves. The effective end is reported as `docs_sha`.
+    `to_sha` is the documented window end chosen by the plan. The documentation must still describe
+    that commit when facts are collected: accepting an older build would advance the report's cursor
+    past pull requests whose declarations were never inspected.
     """
     from .docs import Docs, DocsError, DocsNotFound
 
@@ -138,16 +138,10 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
         raise FactsError(f"could not determine the documented commit: {exc}") from exc
 
     if docs_sha != to_sha:
-        if not window.is_ancestor(repo_dir, docs_sha, to_sha):
-            raise FactsError(
-                f"the documentation was built from {docs_sha[:7]}, which is not an ancestor of the "
-                f"window end {to_sha[:7]}; the two describe different histories"
-            )
-        if not window.is_ancestor(repo_dir, from_sha, docs_sha):
-            raise FactsError(
-                f"the documentation was built from {docs_sha[:7]}, which precedes the window start "
-                f"{from_sha[:7]}; there is nothing documented to report yet"
-            )
+        raise FactsError(
+            f"the documentation changed from planned commit {to_sha[:7]} to {docs_sha[:7]} "
+            "before facts were collected; replan the window"
+        )
 
     numbers = (window.window_prs(repo_dir, from_sha, docs_sha)
                if pr_numbers is None else list(pr_numbers))
@@ -178,9 +172,16 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
             continue
         try:
             documented = docs.declarations(page)
-        except DocsNotFound:
-            # No published page: added after the documentation was built, or never imported. Nothing
-            # there can be linked, and saying nothing is the honest outcome.
+        except DocsNotFound as exc:
+            # The docs build imports every TauCeti module. A 404 for a file still present at its
+            # source commit therefore came from a different build (or a broken deploy), even if
+            # another cached page has already contributed declarations. Only a file removed or
+            # renamed before that commit can lack a page without making this window incoherent.
+            if window.git(["ls-tree", "--name-only", docs_sha, "--", path], repo_dir).strip():
+                raise FactsError(
+                    f"the documentation has no page for {path}, which exists at {docs_sha[:7]}; "
+                    "the site may be redeploying"
+                ) from exc
             unpublished += 1
             continue
         except DocsError as exc:
