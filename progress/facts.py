@@ -129,7 +129,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     an earlier commit, in which case that earlier commit is what everything is anchored to, so every
     link resolves. The effective end is reported as `docs_sha`.
     """
-    from .docs import Docs, DocsError
+    from .docs import Docs, DocsError, DocsNotFound
 
     docs = docs or Docs()
     try:
@@ -171,16 +171,24 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
 
     flat = {}
     per_pr = {}
+    unpublished = 0
     for path in files:
         page = module_page_for_file(path)
         if not page:
             continue
         try:
             documented = docs.declarations(page)
-        except DocsError:
+        except DocsNotFound:
             # No published page: added after the documentation was built, or never imported. Nothing
             # there can be linked, and saying nothing is the honest outcome.
+            unpublished += 1
             continue
+        except DocsError as exc:
+            # Anything else means the documentation could not be READ, which is not the same as it
+            # having nothing to say. This used to be skipped like a missing page, so a run that
+            # straddled a deploy -- every page after it refused as "from another build" -- reported
+            # a 72-pull-request window as having added no declarations at all.
+            raise FactsError(f"could not read the documentation for {path}: {exc}") from exc
         if not documented:
             continue
         try:
@@ -227,6 +235,18 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     # Documented declarations first: one is more likely to be a result worth naming than an
     # undocumented helper. A presentation order, not a judgement.
     ordered = sorted(flat.values(), key=lambda d: (0 if d["doc"] else 1, d["name"]))
+
+    # The backstop, whatever the cause. A window with merged pull requests and no declarations at
+    # all is almost always an extraction that failed, and a report written from it tells the log and
+    # Zulip that nothing happened. Refusing costs little: the cursor does not move, so the next
+    # report covers these pull requests along with whatever follows them. The case it gets wrong, a
+    # window whose pull requests genuinely changed no declaration, waits until one that does lands.
+    if numbers and not ordered:
+        raise FactsError(
+            f"no declaration could be attributed to any of the window's {len(numbers)} pull "
+            f"request(s) ({len(pr_of_commit)} merge commit(s) found, {len(files)} Lean file(s) "
+            f"changed, {unpublished} with no published page); refusing to report the window as empty"
+        )
     return {
         "from_sha": from_sha,
         "to_sha": to_sha,

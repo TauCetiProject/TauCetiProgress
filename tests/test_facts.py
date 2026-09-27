@@ -19,6 +19,7 @@ import tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from progress import cli, facts, window  # noqa: E402
+from progress.docs import DocsError, DocsNotFound  # noqa: E402
 from progress.facts import FactsError  # noqa: E402
 
 failures = []
@@ -77,6 +78,27 @@ class FakeDocs:
                 "commit": self._commit, "url": f"{self.base}/{page}#{name}",
             }
         return out
+
+
+class ReadingDocs(FakeDocs):
+    """A `FakeDocs` that fails the way the real reader does.
+
+    A page the site does not have raises `DocsNotFound`, as a 404 from the real transport does, and a
+    page named in `unreadable` raises the refusal `Docs.declarations` gives for a page from another
+    build while the site redeploys.
+    """
+
+    def __init__(self, pages, source_commit, unreadable=()):
+        super().__init__(pages, source_commit)
+        self._unreadable = set(unreadable)
+
+    def declarations(self, page):
+        if page in self._unreadable:
+            raise DocsError(f"{page} was built from bbbbbbb, not aaaaaaa; the site is redeploying "
+                            f"and this run cannot describe one build")
+        if page not in self._pages:
+            raise DocsNotFound(f"{self.base}/{page} does not exist (HTTP 404)")
+        return super().declarations(page)
 
 
 ALPHA = """namespace TauCeti
@@ -176,13 +198,46 @@ def test_a_declaration_with_no_docstring_reports_none():
 
 def test_an_undocumented_module_contributes_nothing():
     """A file added after the documentation was built has no page, so nothing in it can be linked --
-    and claiming it landed with a dead link would be worse than silence."""
+    and claiming it landed with a dead link would be worse than silence. The rest of the window is
+    still reported."""
     with tempfile.TemporaryDirectory() as tmp:
         root, first, second = repo_with_two_prs(tmp)
-        empty = FakeDocs({}, second)
-        got = facts.collect(tmp, root, second, docs=empty)
-        assert got["declarations"] == []
-        assert got["counts"]["declarations"] == 0
+        third = commit(tmp, "feat: unpublished (#103)",
+                       {"TauCeti/B.lean": "theorem later : True := trivial\n"})
+        docs = ReadingDocs({PAGE: {"TauCeti.alpha": ("theorem", "TauCeti/A.lean", 2, 3)}}, third)
+        got = facts.collect(tmp, root, third, docs=docs)
+        names = {d["name"] for d in got["declarations"]}
+        assert names == {"TauCeti.alpha"}, sorted(names)
+        assert got["counts"]["files"] == 2, got["counts"]
+
+
+def test_a_page_that_cannot_be_read_refuses_the_window():
+    """Regression: a run that straddled a deploy had every later page refused as "from another
+    build", `collect` skipped each one as though it were unpublished, and a 72-pull-request window
+    was reported as having added no declarations. An unreadable page is not an empty one."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        docs = ReadingDocs(docs_for(second)._pages, second, unreadable={PAGE})
+        try:
+            facts.collect(tmp, root, second, docs=docs)
+        except FactsError as exc:
+            assert "TauCeti/A.lean" in str(exc) and "redeploying" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not a window with the page left out")
+
+
+def test_a_window_with_no_attributable_declarations_is_refused():
+    """The backstop: whatever loses them, a window whose pull requests yield no declarations at all
+    must not reach a writing model, which would announce that nothing happened."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        try:
+            facts.collect(tmp, root, second, docs=ReadingDocs({}, second))
+        except FactsError as exc:
+            assert "2 pull request(s)" in str(exc), str(exc)
+            assert "1 with no published page" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not an empty window")
 
 
 def test_revised_declarations_are_marked_not_new():
@@ -255,6 +310,27 @@ def test_cli_facts_passes_the_plan_filter():
         got = json.loads(out_file.read_text())
         names = {d["name"] for d in got["declarations"]}
         assert names == {"TauCeti.alpha"}, f"filter dropped: got {sorted(names)}"
+
+
+def test_cli_facts_reports_a_refusal_as_an_error():
+    """A refusal has to stop the round before a model is started: exit 1 with the reason, and no
+    facts file left for anything to read."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        plan = {"roadmap": "Algebra", "from_sha": root, "to_sha": second, "prs": [101, 102]}
+        plan_file = pathlib.Path(tmp) / "plan.json"
+        out_file = pathlib.Path(tmp) / "facts.json"
+        plan_file.write_text(json.dumps(plan))
+        import progress.docs as docs_mod
+        real = docs_mod.Docs
+        docs_mod.Docs = lambda *a, **k: ReadingDocs({}, second)
+        try:
+            rc = cli.main(["facts", "--plan", str(plan_file), "--code-dir", tmp,
+                           "--out", str(out_file)])
+        finally:
+            docs_mod.Docs = real
+        assert rc == 1, rc
+        assert not out_file.exists(), "a refused window must leave no facts file behind"
 
 
 for _name, _fn in sorted(globals().items()):

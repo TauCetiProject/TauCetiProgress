@@ -15,7 +15,7 @@ import time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from progress import docs as docs_mod  # noqa: E402
-from progress.docs import Docs, DocsError  # noqa: E402
+from progress.docs import Docs, DocsError, DocsNotFound  # noqa: E402
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 failures = []
@@ -42,7 +42,7 @@ def make(pages, cache=None, ttl=None, fetched=None):
         if fetched is not None:
             fetched.append(rel)
         if rel not in pages:
-            raise DocsError(f"no such page: {rel}")
+            raise DocsNotFound(f"no such page: {rel}")
         return pages[rel]
     return Docs(base="https://example.test/docs", cache_dir=cache or "/nonexistent",
                 opener=opener, ttl=ttl)
@@ -223,6 +223,47 @@ def test_a_page_from_another_build_is_refetched():
         assert d.source_commit() == NEW, "the probe is fetched fresh here, so it names the new build"
         got = d.declarations("other.html")
         assert got["A.b"]["commit"] == NEW, got["A.b"]["commit"]
+
+
+def test_only_a_404_means_the_page_is_absent():
+    """`facts` skips a page the site does not have and refuses on any other failure, so the
+    transport has to tell the two apart: a 403, 429 or 5xx says nothing about the page."""
+    import io
+    import urllib.error
+    import urllib.request
+
+    def answering(code):
+        def urlopen(url, timeout=None):
+            raise urllib.error.HTTPError(url, code, "status", {}, io.BytesIO(b""))
+        return urlopen
+
+    def unreachable(url, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    def read(opener):
+        urllib.request.urlopen = opener
+        Docs(base="https://example.test/docs", cache_dir="/nonexistent", ttl=0)._get("p.html")
+
+    real = urllib.request.urlopen
+    try:
+        try:
+            read(answering(404))
+        except DocsNotFound:
+            pass
+        else:
+            raise AssertionError("a 404 must raise DocsNotFound")
+        for label, opener in (("403", answering(403)), ("429", answering(429)),
+                              ("503", answering(503)), ("unreachable", unreachable)):
+            try:
+                read(opener)
+            except DocsNotFound:
+                raise AssertionError(f"{label} is not a missing page") from None
+            except DocsError:
+                pass
+            else:
+                raise AssertionError(f"{label} must raise DocsError")
+    finally:
+        urllib.request.urlopen = real
 
 
 def test_a_site_redeploying_under_a_run_is_refused():

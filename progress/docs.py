@@ -66,6 +66,16 @@ class DocsError(RuntimeError):
     """The documentation could not be read, or does not look like doc-gen4 output."""
 
 
+class DocsNotFound(DocsError):
+    """The site answered, and the page does not exist (HTTP 404).
+
+    The one benign failure to read a page: a module added after the documentation was built, or one
+    the documentation never imports, has no page. Every other `DocsError` -- a timeout, a server
+    error, a page from another build -- means the documentation could not be read, which is not the
+    same as it having nothing to say.
+    """
+
+
 class Docs:
     """A cached reader for one published documentation site."""
 
@@ -86,6 +96,12 @@ class Docs:
         try:
             with urllib.request.urlopen(url, timeout=60) as resp:
                 return resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            # `HTTPError` is a `URLError`, so it has to be caught first. Only a 404 says the page is
+            # absent; a 403, 429 or 5xx says nothing about the page and everything about the request.
+            if exc.code == 404:
+                raise DocsNotFound(f"{url} does not exist (HTTP 404)") from exc
+            raise DocsError(f"fetching {url} failed: {exc}") from exc
         except urllib.error.URLError as exc:
             raise DocsError(f"fetching {url} failed: {exc}") from exc
 

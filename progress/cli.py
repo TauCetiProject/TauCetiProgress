@@ -91,7 +91,12 @@ def cmd_facts(args):
     p = _load_plan(args.plan)
     # The plan's PR list is the area filter. Without it `collect` would walk every merged PR in the
     # commit range, so a report on one roadmap would be grounded in every roadmap's work.
-    result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"])
+    try:
+        result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"])
+    except facts.FactsError as exc:
+        # A real error, never "nothing to do": no writing model may be started without the facts.
+        print(f"facts: {exc}", file=sys.stderr)
+        return 1
     out = json.dumps(result, indent=2, sort_keys=True)
     if args.out:
         pathlib.Path(args.out).write_text(out + "\n", encoding="utf-8")
