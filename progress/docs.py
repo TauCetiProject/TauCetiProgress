@@ -59,11 +59,25 @@ _DECL_RE = re.compile(r'<div class="decl" id="([^"]+)">')
 _GH_LINK_RE = re.compile(
     r'<div class="gh_link"><a href="https://github\.com/[^/]+/[^/]+/blob/([0-9a-f]{40})/([^"#]+)#L(\d+)-L(\d+)"'
 )
+# doc-gen4 puts a source link in every module page's navigation, including pages with no
+# declarations. Those pages still need a build identity: otherwise a newer, empty HTTP 200 page
+# could be mistaken for an empty page from the build selected by source_commit().
+_NAV_LINK_RE = re.compile(
+    r'<p class="gh_nav_link"><a href="https://github\.com/[^/]+/[^/]+/blob/([0-9a-f]{40})/[^"#]+">'
+)
 _KIND_RE = re.compile(r'<span class="decl_kind">([a-z ]+)</span>')
 
 
 class DocsError(RuntimeError):
     """The documentation could not be read, or does not look like doc-gen4 output."""
+
+
+class DocsNotFound(DocsError):
+    """The site answered, and the page does not exist (HTTP 404).
+
+    `facts.collect` checks this against the chosen source commit before deciding whether the
+    missing page is benign. A 404 from another build is not evidence that the module is absent.
+    """
 
 
 class Docs:
@@ -86,6 +100,12 @@ class Docs:
         try:
             with urllib.request.urlopen(url, timeout=60) as resp:
                 return resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            # `HTTPError` is a `URLError`, so it has to be caught first. Only a 404 says the page is
+            # absent; a 403, 429 or 5xx says nothing about the page and everything about the request.
+            if exc.code == 404:
+                raise DocsNotFound(f"{url} does not exist (HTTP 404)") from exc
+            raise DocsError(f"fetching {url} failed: {exc}") from exc
         except urllib.error.URLError as exc:
             raise DocsError(f"fetching {url} failed: {exc}") from exc
 
@@ -177,13 +197,17 @@ class Docs:
 
     @staticmethod
     def _page_commit(html):
-        """The build commit a module page's `gh_link`s name, or None if it has no source links.
+        """The build commit named by a module page's source links, if any.
 
-        doc-gen4 writes the commit the BUILD ran on, the same one on every link of every page, which
-        is why one link is enough to identify a page's generation.
+        doc-gen4 writes a source link in the navigation even when the page has no declarations.
+        Declaration links and the navigation must name the same build when both are present.
         """
-        m = _GH_LINK_RE.search(html)
-        return m.group(1) if m else None
+        nav = _NAV_LINK_RE.search(html)
+        decl = _GH_LINK_RE.search(html)
+        if nav and decl and nav.group(1) != decl.group(1):
+            raise DocsError("a module page has source links from different builds")
+        link = nav or decl
+        return link.group(1) if link else None
 
     def declarations(self, module_page):
         """Every declaration documented on a module page.
@@ -203,10 +227,18 @@ class Docs:
         html = self._get(module_page)
         if self._source_commit is not None:
             seen = self._page_commit(html)
-            if seen is not None and seen != self._source_commit:
+            if seen != self._source_commit:
                 html = self._get(module_page, refetch=True)
                 seen = self._page_commit(html)
-                if seen is not None and seen != self._source_commit:
+                if seen is None:
+                    # A successful response can be an empty module page from a newer build. With
+                    # no source link it cannot be tied to the build chosen by source_commit(), so
+                    # accepting it would let a nonempty but incomplete report advance the cursor.
+                    raise DocsError(
+                        f"{module_page} has no source link to verify its build against "
+                        f"{self._source_commit[:7]}; refusing an incoherent documentation window"
+                    )
+                if seen != self._source_commit:
                     raise DocsError(
                         f"{module_page} was built from {seen[:7]}, not {self._source_commit[:7]}; "
                         f"the site is redeploying and this run cannot describe one build"

@@ -15,7 +15,7 @@ import time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from progress import docs as docs_mod  # noqa: E402
-from progress.docs import Docs, DocsError  # noqa: E402
+from progress.docs import Docs, DocsError, DocsNotFound  # noqa: E402
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 failures = []
@@ -42,7 +42,7 @@ def make(pages, cache=None, ttl=None, fetched=None):
         if fetched is not None:
             fetched.append(rel)
         if rel not in pages:
-            raise DocsError(f"no such page: {rel}")
+            raise DocsNotFound(f"no such page: {rel}")
         return pages[rel]
     return Docs(base="https://example.test/docs", cache_dir=cache or "/nonexistent",
                 opener=opener, ttl=ttl)
@@ -100,6 +100,35 @@ def test_a_malformed_index_is_refused():
 def test_a_page_with_no_declarations_yields_nothing():
     d = make({"empty.html": "<html><body>nothing here</body></html>"})
     assert d.declarations("empty.html") == {}
+
+
+def test_a_page_without_source_links_cannot_be_verified_against_a_chosen_build():
+    """An empty HTTP 200 page might be from a newer deploy, even when the probe is cached."""
+    fetched = []
+    d = make({"empty.html": "<html><body>nothing here</body></html>"}, fetched=fetched)
+    d._source_commit = "a" * 40
+    try:
+        d.declarations("empty.html")
+    except DocsError as exc:
+        assert "no source link" in str(exc), str(exc)
+    else:
+        raise AssertionError("an unidentifiable page must be refused")
+    assert fetched == ["empty.html", "empty.html"], fetched
+
+
+def test_an_empty_page_with_a_matching_navigation_source_is_accepted():
+    sha = "a" * 40
+    nav = (f'<p class="gh_nav_link"><a href="https://github.com/TauCetiProject/TauCeti/'
+           f'blob/{sha}/TauCeti/Empty.lean">source</a></p>')
+    d = make({"empty.html": f"<html><body>{nav}</body></html>"})
+    d._source_commit = sha
+    assert d.declarations("empty.html") == {}
+
+
+def test_a_real_declaration_free_module_navigation_identifies_its_build():
+    """Captured from TauCeti's generated AmbientIsotopy/Defs.html page."""
+    html = (FIXTURES / "empty-module-nav.html").read_text()
+    assert Docs._page_commit(html) == "ec768b70f56ff6503cd76fa8fcc7f62d3e613c48"
 
 
 def test_markup_that_stops_matching_is_visible():
@@ -223,6 +252,47 @@ def test_a_page_from_another_build_is_refetched():
         assert d.source_commit() == NEW, "the probe is fetched fresh here, so it names the new build"
         got = d.declarations("other.html")
         assert got["A.b"]["commit"] == NEW, got["A.b"]["commit"]
+
+
+def test_only_a_404_means_the_page_is_absent():
+    """`facts` skips a page the site does not have and refuses on any other failure, so the
+    transport has to tell the two apart: a 403, 429 or 5xx says nothing about the page."""
+    import io
+    import urllib.error
+    import urllib.request
+
+    def answering(code):
+        def urlopen(url, timeout=None):
+            raise urllib.error.HTTPError(url, code, "status", {}, io.BytesIO(b""))
+        return urlopen
+
+    def unreachable(url, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    def read(opener):
+        urllib.request.urlopen = opener
+        Docs(base="https://example.test/docs", cache_dir="/nonexistent", ttl=0)._get("p.html")
+
+    real = urllib.request.urlopen
+    try:
+        try:
+            read(answering(404))
+        except DocsNotFound:
+            pass
+        else:
+            raise AssertionError("a 404 must raise DocsNotFound")
+        for label, opener in (("403", answering(403)), ("429", answering(429)),
+                              ("503", answering(503)), ("unreachable", unreachable)):
+            try:
+                read(opener)
+            except DocsNotFound:
+                raise AssertionError(f"{label} is not a missing page") from None
+            except DocsError:
+                pass
+            else:
+                raise AssertionError(f"{label} must raise DocsError")
+    finally:
+        urllib.request.urlopen = real
 
 
 def test_a_site_redeploying_under_a_run_is_refused():

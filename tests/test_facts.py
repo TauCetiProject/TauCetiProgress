@@ -19,6 +19,7 @@ import tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from progress import cli, facts, window  # noqa: E402
+from progress.docs import Docs, DocsError, DocsNotFound, INDEX_PATH  # noqa: E402
 from progress.facts import FactsError  # noqa: E402
 
 failures = []
@@ -45,8 +46,11 @@ ENV = {
 def commit(tmp, subject, files):
     for rel, text in files.items():
         p = pathlib.Path(tmp) / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text)
+        if text is None:
+            p.unlink()
+        else:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
     subprocess.run(["git", "-C", tmp, "add", "-A"], check=True, capture_output=True, env=ENV)
     subprocess.run(["git", "-C", tmp, "commit", "-q", "-m", subject],
                    check=True, capture_output=True, env=ENV)
@@ -77,6 +81,27 @@ class FakeDocs:
                 "commit": self._commit, "url": f"{self.base}/{page}#{name}",
             }
         return out
+
+
+class ReadingDocs(FakeDocs):
+    """A `FakeDocs` that fails the way the real reader does.
+
+    A page the site does not have raises `DocsNotFound`, as a 404 from the real transport does, and a
+    page named in `unreadable` raises the refusal `Docs.declarations` gives for a page from another
+    build while the site redeploys.
+    """
+
+    def __init__(self, pages, source_commit, unreadable=()):
+        super().__init__(pages, source_commit)
+        self._unreadable = set(unreadable)
+
+    def declarations(self, page):
+        if page in self._unreadable:
+            raise DocsError(f"{page} was built from bbbbbbb, not aaaaaaa; the site is redeploying "
+                            f"and this run cannot describe one build")
+        if page not in self._pages:
+            raise DocsNotFound(f"{self.base}/{page} does not exist (HTTP 404)")
+        return super().declarations(page)
 
 
 ALPHA = """namespace TauCeti
@@ -174,15 +199,122 @@ def test_a_declaration_with_no_docstring_reports_none():
         assert got["declarations"][0]["doc"] == ""
 
 
-def test_an_undocumented_module_contributes_nothing():
-    """A file added after the documentation was built has no page, so nothing in it can be linked --
-    and claiming it landed with a dead link would be worse than silence."""
+def test_a_removed_module_can_have_no_published_page():
+    """A file touched in the window but removed before the documented commit has no page.
+    The rest of the window is still reported."""
     with tempfile.TemporaryDirectory() as tmp:
         root, first, second = repo_with_two_prs(tmp)
-        empty = FakeDocs({}, second)
-        got = facts.collect(tmp, root, second, docs=empty)
-        assert got["declarations"] == []
-        assert got["counts"]["declarations"] == 0
+        third = commit(tmp, "feat: add B (#103)",
+                       {"TauCeti/B.lean": "theorem later : True := trivial\n"})
+        fourth = commit(tmp, "remove B (#104)", {"TauCeti/B.lean": None})
+        docs = ReadingDocs({PAGE: {"TauCeti.alpha": ("theorem", "TauCeti/A.lean", 2, 3)}}, fourth)
+        got = facts.collect(tmp, root, fourth, docs=docs)
+        names = {d["name"] for d in got["declarations"]}
+        assert names == {"TauCeti.alpha"}, sorted(names)
+        assert got["counts"]["files"] == 2, got["counts"]
+
+
+def test_a_404_from_another_build_refuses_a_partial_report():
+    """One cached page may contribute declarations before an uncached page returns 404 from a
+    newer build. A nonempty partial report must not advance past that missing module."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        third = commit(tmp, "feat: B (#103)",
+                       {"TauCeti/B.lean": "theorem later : True := trivial\n"})
+        docs = ReadingDocs(docs_for(second)._pages, third)
+        try:
+            facts.collect(tmp, root, third, docs=docs)
+        except FactsError as exc:
+            assert "TauCeti/B.lean" in str(exc) and "redeploying" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not a partial report")
+
+
+def test_an_empty_page_from_another_build_refuses_a_partial_report():
+    """An HTTP 200 page with no declarations can still name the newer build in its navigation.
+    A contributing cached page must not let the window advance past that newer page."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        third = commit(tmp, "feat: B (#103)",
+                       {"TauCeti/B.lean": "theorem later : True := trivial\n"})
+        base = "https://docs.example/docs"
+        gh_link = (f"https://github.com/TauCetiProject/TauCeti/blob/{third}/"
+                   "TauCeti/A.lean#L2-L3")
+        def b_nav(sha):
+            return ('<p class="gh_nav_link"><a href="https://github.com/'
+                    f'TauCetiProject/TauCeti/blob/{sha}/TauCeti/B.lean">source</a></p>')
+        a_page = (f'<div class="decl" id="TauCeti.alpha"><span class="decl_kind">theorem'
+                  f'</span><div class="gh_link"><a href="{gh_link}">source</a></div></div>')
+        pages = {
+            INDEX_PATH: json.dumps({"declarations": {
+                "TauCeti.alpha": {"docLink": "./TauCeti/A.html#TauCeti.alpha"}}}),
+            "TauCeti/A.html": a_page,
+            "TauCeti/B.html": b_nav(third),
+        }
+        docs = Docs(base=base, cache_dir=pathlib.Path(tmp) / "cache",
+                    opener=lambda url: pages[url.removeprefix(base + "/")])
+        assert docs.source_commit() == third  # caches the probe page from this build
+        pages["TauCeti/B.html"] = b_nav("b" * 40)
+        try:
+            facts.collect(tmp, root, third, docs=docs)
+        except FactsError as exc:
+            assert "TauCeti/B.lean" in str(exc) and "redeploying" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not a partial report")
+
+
+def test_a_genuinely_empty_module_does_not_block_another_declaration():
+    """An imports-only module has a nav source link even though it has no declarations."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        third = commit(tmp, "feat: imports (#103)",
+                       {"TauCeti/B.lean": "import TauCeti.A\n"})
+        a_link = (f"https://github.com/TauCetiProject/TauCeti/blob/{third}/"
+                  "TauCeti/A.lean#L2-L3")
+        b_link = (f"https://github.com/TauCetiProject/TauCeti/blob/{third}/"
+                  "TauCeti/B.lean")
+        base = "https://docs.example/docs"
+        pages = {
+            INDEX_PATH: json.dumps({"declarations": {
+                "TauCeti.alpha": {"docLink": "./TauCeti/A.html#TauCeti.alpha"}}}),
+            "TauCeti/A.html": (f'<div class="decl" id="TauCeti.alpha">'
+                                   f'<div class="gh_link"><a href="{a_link}">source</a></div></div>'),
+            "TauCeti/B.html": (f'<p class="gh_nav_link"><a href="{b_link}">source</a></p>'),
+        }
+        docs = Docs(base=base, cache_dir=pathlib.Path(tmp) / "cache",
+                    opener=lambda url: pages[url.removeprefix(base + "/")])
+        got = facts.collect(tmp, root, third, docs=docs)
+        assert [d["name"] for d in got["declarations"]] == ["TauCeti.alpha"]
+        assert got["counts"]["files"] == 2
+
+
+def test_a_page_that_cannot_be_read_refuses_the_window():
+    """Regression: a run that straddled a deploy had every later page refused as "from another
+    build", `collect` skipped each one as though it were unpublished, and a 72-pull-request window
+    was reported as having added no declarations. An unreadable page is not an empty one."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        docs = ReadingDocs(docs_for(second)._pages, second, unreadable={PAGE})
+        try:
+            facts.collect(tmp, root, second, docs=docs)
+        except FactsError as exc:
+            assert "TauCeti/A.lean" in str(exc) and "redeploying" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not a window with the page left out")
+
+
+def test_a_window_with_no_attributable_declarations_is_refused():
+    """The backstop: whatever loses them, a window whose pull requests yield no declarations at all
+    must not reach a writing model, which would announce that nothing happened."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        try:
+            facts.collect(tmp, root, second, docs=ReadingDocs({PAGE: {}}, second))
+        except FactsError as exc:
+            assert "2 pull request(s)" in str(exc), str(exc)
+            assert "0 with no published page" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not an empty window")
 
 
 def test_revised_declarations_are_marked_not_new():
@@ -201,18 +333,19 @@ def test_revised_declarations_are_marked_not_new():
         assert got2["declarations"][0]["new"] is False, "only the body line is from this window"
 
 
-def test_documentation_behind_the_window_end_anchors_to_the_documented_commit():
-    """The docs deploy independently of the branch that nominates them. Anchoring to the branch tip
-    would produce dead links for anything newer, so the documented commit wins and is reported."""
+def test_documentation_behind_the_planned_window_refuses_to_advance():
+    """A different docs build between plan and facts must not advance the planned cursor past
+    pull requests whose declarations the extractor did not inspect."""
     with tempfile.TemporaryDirectory() as tmp:
         root, first, second = repo_with_two_prs(tmp)
         third = commit(tmp, "feat: later (#103)", {"TauCeti/B.lean": "theorem later : True := trivial\n"})
-        # The documentation is still at `second`.
-        got = facts.collect(tmp, root, third, docs=docs_for(second))
-        assert got["docs_sha"] == second
-        assert got["to_sha"] == third
-        names = {d["name"] for d in got["declarations"]}
-        assert names == {"TauCeti.alpha", "TauCeti.beta"}, sorted(names)
+        try:
+            facts.collect(tmp, root, third, docs=docs_for(second))
+        except FactsError as exc:
+            assert second[:7] in str(exc) and third[:7] in str(exc), str(exc)
+            assert "replan" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected a refusal, not a report that skips #103")
 
 
 def test_documentation_from_a_foreign_history_is_refused():
@@ -255,6 +388,27 @@ def test_cli_facts_passes_the_plan_filter():
         got = json.loads(out_file.read_text())
         names = {d["name"] for d in got["declarations"]}
         assert names == {"TauCeti.alpha"}, f"filter dropped: got {sorted(names)}"
+
+
+def test_cli_facts_reports_a_refusal_as_an_error():
+    """A refusal has to stop the round before a model is started: exit 1 with the reason, and no
+    facts file left for anything to read."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        plan = {"roadmap": "Algebra", "from_sha": root, "to_sha": second, "prs": [101, 102]}
+        plan_file = pathlib.Path(tmp) / "plan.json"
+        out_file = pathlib.Path(tmp) / "facts.json"
+        plan_file.write_text(json.dumps(plan))
+        import progress.docs as docs_mod
+        real = docs_mod.Docs
+        docs_mod.Docs = lambda *a, **k: ReadingDocs({}, second)
+        try:
+            rc = cli.main(["facts", "--plan", str(plan_file), "--code-dir", tmp,
+                           "--out", str(out_file)])
+        finally:
+            docs_mod.Docs = real
+        assert rc == 1, rc
+        assert not out_file.exists(), "a refused window must leave no facts file behind"
 
 
 for _name, _fn in sorted(globals().items()):

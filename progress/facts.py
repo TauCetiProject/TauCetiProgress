@@ -125,11 +125,11 @@ def docstring_in(text, start_line, end_line):
 def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     """The factual spine of a window.
 
-    `to_sha` is the window's end as the plan computed it; the documentation may have been built from
-    an earlier commit, in which case that earlier commit is what everything is anchored to, so every
-    link resolves. The effective end is reported as `docs_sha`.
+    `to_sha` is the documented window end chosen by the plan. The documentation must still describe
+    that commit when facts are collected: accepting an older build would advance the report's cursor
+    past pull requests whose declarations were never inspected.
     """
-    from .docs import Docs, DocsError
+    from .docs import Docs, DocsError, DocsNotFound
 
     docs = docs or Docs()
     try:
@@ -138,16 +138,10 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
         raise FactsError(f"could not determine the documented commit: {exc}") from exc
 
     if docs_sha != to_sha:
-        if not window.is_ancestor(repo_dir, docs_sha, to_sha):
-            raise FactsError(
-                f"the documentation was built from {docs_sha[:7]}, which is not an ancestor of the "
-                f"window end {to_sha[:7]}; the two describe different histories"
-            )
-        if not window.is_ancestor(repo_dir, from_sha, docs_sha):
-            raise FactsError(
-                f"the documentation was built from {docs_sha[:7]}, which precedes the window start "
-                f"{from_sha[:7]}; there is nothing documented to report yet"
-            )
+        raise FactsError(
+            f"the documentation changed from planned commit {to_sha[:7]} to {docs_sha[:7]} "
+            "before facts were collected; replan the window"
+        )
 
     numbers = (window.window_prs(repo_dir, from_sha, docs_sha)
                if pr_numbers is None else list(pr_numbers))
@@ -171,16 +165,31 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
 
     flat = {}
     per_pr = {}
+    unpublished = 0
     for path in files:
         page = module_page_for_file(path)
         if not page:
             continue
         try:
             documented = docs.declarations(page)
-        except DocsError:
-            # No published page: added after the documentation was built, or never imported. Nothing
-            # there can be linked, and saying nothing is the honest outcome.
+        except DocsNotFound as exc:
+            # The docs build imports every TauCeti module. A 404 for a file still present at its
+            # source commit therefore came from a different build (or a broken deploy), even if
+            # another cached page has already contributed declarations. Only a file removed or
+            # renamed before that commit can lack a page without making this window incoherent.
+            if window.git(["ls-tree", "--name-only", docs_sha, "--", path], repo_dir).strip():
+                raise FactsError(
+                    f"the documentation has no page for {path}, which exists at {docs_sha[:7]}; "
+                    "the site may be redeploying"
+                ) from exc
+            unpublished += 1
             continue
+        except DocsError as exc:
+            # Anything else means the documentation could not be READ, which is not the same as it
+            # having nothing to say. This used to be skipped like a missing page, so a run that
+            # straddled a deploy -- every page after it refused as "from another build" -- reported
+            # a 72-pull-request window as having added no declarations at all.
+            raise FactsError(f"could not read the documentation for {path}: {exc}") from exc
         if not documented:
             continue
         try:
@@ -227,6 +236,18 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     # Documented declarations first: one is more likely to be a result worth naming than an
     # undocumented helper. A presentation order, not a judgement.
     ordered = sorted(flat.values(), key=lambda d: (0 if d["doc"] else 1, d["name"]))
+
+    # The backstop, whatever the cause. A window with merged pull requests and no declarations at
+    # all is almost always an extraction that failed, and a report written from it tells the log and
+    # Zulip that nothing happened. Refusing costs little: the cursor does not move, so the next
+    # report covers these pull requests along with whatever follows them. The case it gets wrong, a
+    # window whose pull requests genuinely changed no declaration, waits until one that does lands.
+    if numbers and not ordered:
+        raise FactsError(
+            f"no declaration could be attributed to any of the window's {len(numbers)} pull "
+            f"request(s) ({len(pr_of_commit)} merge commit(s) found, {len(files)} Lean file(s) "
+            f"changed, {unpublished} with no published page); refusing to report the window as empty"
+        )
     return {
         "from_sha": from_sha,
         "to_sha": to_sha,
