@@ -430,6 +430,27 @@ def test_missing_bootstrap_history_in_a_shallow_checkout_still_fails():
             gh_mod.gh = orig_gh
 
 
+def test_a_visible_later_merge_cannot_hide_shallow_bootstrap_history():
+    from progress import gh as gh_mod
+    with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as root:
+        shas = make_repo(source, ["init", "first (#3)", "unrelated", "second (#4)"])
+        shallow = pathlib.Path(root) / "shallow"
+        subprocess.run(["git", "clone", "-q", "--depth=2", pathlib.Path(source).as_uri(), str(shallow)],
+                       check=True, capture_output=True)
+        assert not window.has_commit(shallow, shas[1])
+        assert window.earliest_merged(shallow, [3, 4], ref="main")[0] == 4
+        orig_gh = gh_mod.gh
+        calls = []
+        gh_mod.gh = lambda args, **_: calls.append(args) or shas[1] + "\n"
+        try:
+            raises(window.GitError,
+                   lambda: plan.bootstrap_from_sha(shallow, "New", [3, 4], ref="main"),
+                   "full-history checkout is required")
+            assert calls == [], calls
+        finally:
+            gh_mod.gh = orig_gh
+
+
 def test_an_area_newer_than_the_documented_build_is_skipped_not_fatal():
     """The outage this prevents: a roadmap whose first pull request merged after the last
     documentation deploy bootstraps to a cursor ahead of `to_sha`. `window_prs` refuses on that,

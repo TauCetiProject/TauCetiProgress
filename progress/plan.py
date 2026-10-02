@@ -223,6 +223,10 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     numbers = list(area_prs)
     if not numbers:
         return None
+    # A shallow history can contain a later labelled merge while omitting the first one. Refuse
+    # before choosing a cursor or treating an unfetched earlier merge as documentation lag.
+    if window.git(["rev-parse", "--is-shallow-repository"], repo_dir).strip() == "true":
+        raise window.GitError(f"a full-history checkout is required to bootstrap an area ({area})")
     # The earliest to MERGE, not the lowest-numbered. Numbers are assigned when a pull request is
     # opened, and pull requests do not merge in the order they were opened; starting from the lowest
     # number would put the cursor after any labelled pull request that opened later but merged
@@ -238,18 +242,12 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
             f"cannot be determined from commit subjects"
         )
     found = window.earliest_merged(repo_dir, numbers, ref=ref)
-    earliest, merge = found if found else (min(numbers), None)
-    if merge is None:
+    if found is None:
         # GitHub's label query follows merges before docgen necessarily reaches them. In a complete
         # checkout, unaccounted_prs already ruled out an unrecognised merge in this history. Defer
         # this area until one of its merges reaches ref; do not invent or advance a cursor.
-        if window.git(["rev-parse", "--is-shallow-repository"], repo_dir).strip() == "true":
-            raise window.GitError(
-                f"could not locate the merge commit for {area}'s earliest PR #{earliest} in {ref}; "
-                f"a full-history checkout is required to bootstrap an area"
-            )
         return None
-    return window.first_parent_before(repo_dir, merge)
+    return window.first_parent_before(repo_dir, found[1])
 
 
 def _own_login():
