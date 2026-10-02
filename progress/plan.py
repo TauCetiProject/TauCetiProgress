@@ -215,7 +215,7 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
 
 
 def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
-    """A `from_sha` for an area that has never been reported, or None if it has no merged PRs.
+    """A `from_sha` for an unreported area, or None if no labelled merge is in `ref` yet.
 
     The window is half-open, so the cursor must be the *parent* of the area's earliest labelled
     merge; using the merge itself would drop that first PR from every area's first report.
@@ -240,12 +240,15 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     found = window.earliest_merged(repo_dir, numbers, ref=ref)
     earliest, merge = found if found else (min(numbers), None)
     if merge is None:
-        # The PR is labelled but its merge is not on the mainline we can see (a shallow checkout,
-        # or a PR merged into another branch). Refuse rather than guess a cursor.
-        raise window.GitError(
-            f"could not locate the merge commit for {area}'s earliest PR #{earliest} in {ref}; "
-            f"a full-history checkout is required to bootstrap an area"
-        )
+        # GitHub's label query follows merges before docgen necessarily reaches them. In a complete
+        # checkout, unaccounted_prs already ruled out an unrecognised merge in this history. Defer
+        # this area until one of its merges reaches ref; do not invent or advance a cursor.
+        if window.git(["rev-parse", "--is-shallow-repository"], repo_dir).strip() == "true":
+            raise window.GitError(
+                f"could not locate the merge commit for {area}'s earliest PR #{earliest} in {ref}; "
+                f"a full-history checkout is required to bootstrap an area"
+            )
+        return None
     return window.first_parent_before(repo_dir, merge)
 
 
@@ -395,7 +398,7 @@ def build_plan(
             from_sha = bootstrap_from_sha(code_dir, area, area_prs, ref=ref)
             bootstrapped = True
             if from_sha is None:
-                skipped.append(f"{area}: no merged PRs yet")
+                skipped.append(f"{area}: no labelled merges in {ref} yet; waiting for documentation")
                 continue
         if from_sha == to_sha:
             skipped.append(f"{area}: already at {to_sha[:7]}")

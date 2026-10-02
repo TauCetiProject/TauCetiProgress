@@ -360,20 +360,74 @@ def make_roadmap(root, areas):
             (d / "PROGRESS.md").write_text(progress_text, encoding="utf-8")
 
 
-def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, **kw):
+def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge_shas=None, **kw):
     """`build_plan` with the network stubbed: a fixed documented build and fixed area labels."""
     from progress import gh as gh_mod, plan as plan_mod
     orig_docs, orig_labels = plan_mod.docs_source_commit, gh_mod.merged_prs_for_area
+    orig_login = plan_mod._own_login
+    orig_gh = gh_mod.gh
     plan_mod.docs_source_commit = lambda: docs_sha
+    plan_mod._own_login = lambda: "test-user"
     gh_mod.merged_prs_for_area = lambda area, **_: list(area_prs.get(area, []))
+    if merge_shas is not None:
+        gh_mod.gh = lambda args, **_: merge_shas[int(args[1].rsplit("/", 1)[1])] + "\n"
     try:
         return plan_mod.build_plan(
             roadmap_dir, code_dir,
             commits=[{"commit": {"committedDate": "2026-01-01T00:00:00Z"},
                       "messageHeadline": "progress: X (2026-01-01)"}],
-            open_prs=[], ref="main", min_prs=1, **kw)
+            open_prs=[], ref=ref, min_prs=1, **kw)
     finally:
         plan_mod.docs_source_commit, gh_mod.merged_prs_for_area = orig_docs, orig_labels
+        plan_mod._own_login = orig_login
+        gh_mod.gh = orig_gh
+
+
+def test_a_first_merge_beyond_docgen_does_not_block_other_areas():
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "old: a (#1)", "old: b (#2)", "new: c (#3)"])
+        window.git(["update-ref", "refs/remotes/origin/docgen", shas[2]], code)
+        make_roadmap(roadmap, {"Old": None, "New": None})
+        got = plan_against(code, roadmap, shas[2], {"Old": [1, 2], "New": [3]},
+                           ref="origin/docgen", merge_shas={3: shas[3]})
+        assert got["roadmap"] == "Old", got
+        assert got["prs"] == [2, 1], got
+        assert got["to_sha"] == shas[2], got
+        assert any("New" in s and "waiting for documentation" in s for s in got["skipped"]), got
+
+
+def test_the_first_merge_is_reported_when_docgen_catches_up():
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "first (#3)", "second (#4)"])
+        window.git(["update-ref", "refs/remotes/origin/docgen", shas[0]], code)
+        make_roadmap(roadmap, {"New": None})
+        kwargs = {"ref": "origin/docgen", "merge_shas": {3: shas[1], 4: shas[2]}}
+        raises(plan.NotDue,
+               lambda: plan_against(code, roadmap, shas[0], {"New": [3, 4]}, **kwargs),
+               "waiting for documentation")
+        assert not (pathlib.Path(roadmap) / "TauCetiRoadmap/New/PROGRESS.md").exists()
+        window.git(["update-ref", "refs/remotes/origin/docgen", shas[2]], code)
+        got = plan_against(code, roadmap, shas[2], {"New": [3, 4]}, **kwargs)
+        assert got["roadmap"] == "New", got
+        assert got["from_sha"] == shas[0], got
+        assert got["prs"] == [4, 3], got
+
+
+def test_missing_bootstrap_history_in_a_shallow_checkout_still_fails():
+    from progress import gh as gh_mod
+    with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as root:
+        shas = make_repo(source, ["init", "first (#3)", "unrelated"])
+        shallow = pathlib.Path(root) / "shallow"
+        subprocess.run(["git", "clone", "-q", "--depth=1", pathlib.Path(source).as_uri(), str(shallow)],
+                       check=True, capture_output=True)
+        orig_gh = gh_mod.gh
+        gh_mod.gh = lambda args, **_: shas[1] + "\n"
+        try:
+            raises(window.GitError,
+                   lambda: plan.bootstrap_from_sha(shallow, "New", [3], ref="main"),
+                   "full-history checkout is required")
+        finally:
+            gh_mod.gh = orig_gh
 
 
 def test_an_area_newer_than_the_documented_build_is_skipped_not_fatal():
