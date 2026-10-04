@@ -190,6 +190,24 @@ def test_a_fork_report_must_be_at_the_built_commit():
     assert picked == "", picked
 
 
+def stale(number):
+    """An older report returned by the commit lookup, whose branch contains the built commit but has
+    since moved past it."""
+    return pull(number, head={"ref": "progress/1a2b3c4-5d6e7f8/IntegralLattices", "sha": "c" * 40})
+
+
+def test_a_pull_request_that_moved_past_the_commit_does_not_win():
+    """Chosen, it would be gated on its own head, whose build may still be running, and the fork
+    report CI built here never queued."""
+    picked, _ = run(by_commit=[[stale(590)]], by_head=[[pull(597, owner="ldct")]], owner="ldct")
+    assert picked == "597", picked
+
+
+def test_a_pull_request_that_moved_past_the_commit_is_not_chosen_alone():
+    picked, _ = run(by_commit=[[stale(590)]], by_head=[[]])
+    assert picked == "", picked
+
+
 def test_the_lowest_eligible_number_wins():
     """Repeated runs over the same candidates must agree."""
     picked, _ = run(by_commit=[[pull(612), pull(597)]], by_head=[[pull(605)]])
