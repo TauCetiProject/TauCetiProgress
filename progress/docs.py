@@ -34,7 +34,7 @@ import time
 import urllib.error
 import urllib.request
 
-DOCS_BASE = "https://taucetiproject.github.io/TauCeti/docs"
+DOCS_BASE = "https://taucetiproject.org/docs"
 INDEX_PATH = "declarations/declaration-data.bmp"
 
 # How long a cached page may be reused across runs.
