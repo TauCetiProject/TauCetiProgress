@@ -379,6 +379,7 @@ def main(argv=None):
     expected_bootstrap = None
     old_paths = {}
     current_cursor = None
+    parent = ""
     parents = {gate.PATH_RE.match(p).group(1) for p in by_path}
     if len(parents) > 1:
         # The gate refuses this too, but collecting a baseline would mean choosing one arbitrarily.
@@ -433,6 +434,10 @@ def main(argv=None):
         "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "pr": pr,
         "area": area,
+        # Travels with `area` because the pair identifies a roadmap: the same name can
+        # exist under both parents, and anything acting on "the cursor for this area"
+        # without it can read the other one's file.
+        "parent": parent,
         "head_sha": head_sha,
         "main_sha": main_sha,
         "compare_status": status,
