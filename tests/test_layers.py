@@ -89,6 +89,15 @@ def test_heading_families_have_a_precedence():
     assert layers.headings("# Roadmap\n\nprose only\n") == []
 
 
+def test_a_repeated_id_is_a_later_mention_of_its_layer():
+    text = "### Part A — Hermite\n### Part B — Chebyshev\n## Worked examples\n### Part A\n### Part B — Chebyshev\n"
+    lay = layers.headings(text)
+    assert [(h["id"], h["title"], h["line"]) for h in lay] == [
+        ("Part A", "Part A — Hermite", 1), ("Part B", "Part B — Chebyshev", 2)], lay
+    entries = [{"id": "Part A", "state": "done"}, {"id": "Part B", "state": "partial"}]
+    assert layers.coverage("Widgets", A, H, lay, entries)["layers"] == entries
+
+
 def test_readme_sha_is_the_text_hash():
     assert layers.readme_sha("x") == "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
 
