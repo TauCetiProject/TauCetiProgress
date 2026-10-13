@@ -47,7 +47,6 @@ from progress import files, gate, gh as gh_mod, plan as plan_mod, window  # noqa
 # tracks the newest TauCeti commit with published documentation.
 CODE_REPO = "TauCetiProject/TauCeti"
 CODE_REF = "docgen"
-ROADMAP_LABEL_PREFIX = "roadmap/"
 
 # `compare` returns at most 300 files. More than that cannot be a progress report, and a truncated
 # list could HIDE a path from the gate, so anything approaching the limit is refused outright rather
@@ -205,16 +204,9 @@ def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
     it is the upstream code repository, nothing from the pull request reaches it, and nothing in it is
     executed.
     """
-    proc = subprocess.run(
-        ["gh", "pr", "list", "--repo", repo, "--state", "merged",
-         "--label", f"{ROADMAP_LABEL_PREFIX}{area}", "--limit", "100000", "--json", "number"],
-        capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        return None
     try:
-        labelled = [int(r["number"]) for r in json.loads(proc.stdout)]
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        labelled = gh_mod.closed_prs_for_area(area, repo=repo)
+    except (gh_mod.GhError, KeyError, TypeError, ValueError):
         return None
     if not labelled:
         return None
