@@ -294,15 +294,11 @@ def test_a_labelled_pr_with_no_number_in_its_subject_fails_closed():
         # #10 merged as the numberless commit; resolve it the way the real check does.
         numberless = subprocess.run(["git", "rev-parse", "HEAD~1"], cwd=d,
                                     capture_output=True, text=True).stdout.strip()
-        orig = gh_mod.gh
-        gh_mod.gh = lambda args, **kw: numberless + "\n"
-        try:
-            assert plan_mod.unaccounted_prs(d, [10, 20], ref="main") == [10]
-            raises(window.GitError,
-                   lambda: plan_mod.bootstrap_from_sha(d, "PDE", [10, 20], ref="main"),
-                   "no pull request number")
-        finally:
-            gh_mod.gh = orig
+        candidates = {10: numberless, 20: None}
+        assert plan_mod.unaccounted_prs(d, candidates, ref="main") == [10]
+        raises(window.GitError,
+               lambda: plan_mod.bootstrap_from_sha(d, "PDE", candidates, ref="main"),
+               "no pull request number")
 
 
 def test_a_merge_commit_this_checkout_never_fetched_is_not_fatal():
@@ -320,12 +316,7 @@ def test_a_merge_commit_this_checkout_never_fetched_is_not_fatal():
                            cwd=d, check=True, capture_output=True, env=env)
         assert not window.has_commit(d, "0" * 40)
         assert window.has_commit(d, window.head_sha(d, ref="main"))
-        orig = gh_mod.gh
-        gh_mod.gh = lambda args, **kw: "0" * 40 + "\n"  # GitHub names a commit we have not fetched
-        try:
-            assert plan_mod.unaccounted_prs(d, [5, 99], ref="main") == []
-        finally:
-            gh_mod.gh = orig
+        assert plan_mod.unaccounted_prs(d, {5: None, 99: "0" * 40}, ref="main") == []
 
 
 def test_a_labelled_pr_merged_after_the_tip_is_not_flagged():
@@ -339,12 +330,7 @@ def test_a_labelled_pr_merged_after_the_tip_is_not_flagged():
         for subject in ("root", "feat: ours (#5)"):
             subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", subject],
                            cwd=d, check=True, capture_output=True, env=env)
-        orig = gh_mod.gh
-        gh_mod.gh = lambda args, **kw: "\n"        # no merge commit we can see
-        try:
-            assert plan_mod.unaccounted_prs(d, [5, 99], ref="main") == []
-        finally:
-            gh_mod.gh = orig
+        assert plan_mod.unaccounted_prs(d, {5: None, 99: None}, ref="main") == []
 
 
 # ----- an area ahead of the published documentation --------------------------------------------
@@ -365,12 +351,10 @@ def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge
     from progress import gh as gh_mod, plan as plan_mod
     orig_docs, orig_labels = plan_mod.docs_source_commit, gh_mod.closed_prs_for_area
     orig_login = plan_mod._own_login
-    orig_gh = gh_mod.gh
     plan_mod.docs_source_commit = lambda: docs_sha
     plan_mod._own_login = lambda: "test-user"
-    gh_mod.closed_prs_for_area = lambda area, **_: list(area_prs.get(area, []))
-    if merge_shas is not None:
-        gh_mod.gh = lambda args, **_: merge_shas[int(args[1].rsplit("/", 1)[1])] + "\n"
+    gh_mod.closed_prs_for_area = lambda area, **_: {
+        n: (merge_shas or {}).get(n) for n in area_prs.get(area, [])}
     try:
         return plan_mod.build_plan(
             roadmap_dir, code_dir,
@@ -380,7 +364,6 @@ def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge
     finally:
         plan_mod.docs_source_commit, gh_mod.closed_prs_for_area = orig_docs, orig_labels
         plan_mod._own_login = orig_login
-        gh_mod.gh = orig_gh
 
 
 def test_a_first_merge_beyond_docgen_does_not_block_other_areas():

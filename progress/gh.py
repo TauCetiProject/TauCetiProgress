@@ -2,11 +2,9 @@
 
 Two design points worth stating, because both were defects in an earlier draft:
 
-* **No global PR cap.** `TauCeti/scripts/loc_roadmap_graph.py` fetches merged PRs with
-  `--limit 2000`, which is fine for a chart that only needs recent history. Here a cap would start
-  silently dropping the oldest PRs of a quiet area: at ~36 merges a day the project passes 2000
-  within weeks of writing this. Labels are therefore looked up for an explicit set of PR numbers
-  taken from a commit range, so the query size is bounded by the window, not by project age.
+* **No search cap.** Area labels are read from the paginated repository pull-request connection,
+  not GitHub search, whose 1000-result cap can silently discard the earliest merges needed for
+  bootstrap. Native merge SHAs come back in the same query, avoiding per-PR bootstrap requests.
 
 * **Failures raise.** A GitHub hiccup must never read as "nothing to report" -- that would let a
   transient error advance a cursor past real work. Every caller turns a raise into "cannot decide
@@ -75,36 +73,49 @@ def recent_roadmap_commits(limit=30, repo=ROADMAP_REPO):
 
 
 def closed_prs_for_area(area, repo=CODE_REPO):
-    """Closed PR candidates labelled `roadmap/<area>`, newest number first.
+    """`{number: native_merge_sha_or_None}` for all closed labelled PR candidates.
 
     GitHub-native merges and bors squash merges both close their pull requests, but bors
     fast-forwards the code branch and closes the PR without setting GitHub's merged state.
     Query closed PRs (which includes native merges), then let the first-parent commit history
     decide which actually landed. An editable title or a closure alone is not merge evidence.
 
-    Attribution is done per *area*, not per PR. The obvious alternative -- ask each PR in the
-    window for its labels -- costs one request per PR, and an area's first window covers its whole
-    history, so bootstrapping the project would have meant well over a thousand requests. One
-    request per area (fourteen today) answers the same question, and the result doubles as the
-    bootstrap lookup for an area's earliest PR.
-
-    `--limit` is set far above the project's total deliberately rather than left at the default:
-    the oldest entries are exactly what bootstrap needs, so a cap that silently truncated old
-    history would lose work. (`TauCeti/scripts/loc_roadmap_graph.py` caps at 2000 because a chart
-    only needs recent history; that would be the wrong choice here.)
+    Attribution is per area rather than per PR. Pagination has no project-age cap: the oldest
+    entries are exactly what bootstrap needs. `gh pr list --label` uses search and silently stops
+    at 1000 results even with a larger --limit, so query the repository connection directly.
+    Only native mergedAt makes mergeCommit authoritative; an unmerged PR can have a test merge SHA.
     """
+    owner, name = repo.split("/", 1)
+    query = """query($owner: String!, $name: String!, $label: [String!], $endCursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequests(first: 100, after: $endCursor, labels: $label, states: [CLOSED, MERGED],
+                     orderBy: {field: CREATED_AT, direction: DESC}) {
+          nodes { number mergedAt mergeCommit { oid } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }"""
     out = gh([
-        "pr", "list", "--repo", repo, "--state", "closed",
-        "--label", f"{ROADMAP_LABEL_PREFIX}{area}",
-        "--limit", "100000", "--json", "number",
+        "api", "graphql", "--paginate", "--slurp", "-f", f"query={query}",
+        "-f", f"owner={owner}", "-f", f"name={name}",
+        "-f", f"label[]={ROADMAP_LABEL_PREFIX}{area}",
     ])
     try:
-        rows = json.loads(out)
-    except json.JSONDecodeError as exc:
-        raise GhError(f"could not parse gh pr list output: {exc}") from exc
-    if len(rows) >= 100000:
-        raise GhError("closed PR query reached its 100000-PR limit; refusing truncated area history")
-    return sorted((int(r["number"]) for r in rows), reverse=True)
+        pages = json.loads(out)
+        if not isinstance(pages, list) or not pages:
+            raise GhError("closed PR query returned no response pages")
+        if pages[-1]["data"]["repository"]["pullRequests"]["pageInfo"]["hasNextPage"]:
+            raise GhError("closed PR query stopped before its final page")
+        found = {}
+        for page in pages:
+            for row in page["data"]["repository"]["pullRequests"]["nodes"]:
+                sha = (row.get("mergeCommit") or {}).get("oid") if row["mergedAt"] else None
+                if row["mergedAt"] and not sha:
+                    raise GhError(f"native merge SHA unavailable for PR #{row['number']}")
+                found[int(row["number"])] = sha
+        return found
+    except (ValueError, KeyError, TypeError) as exc:
+        raise GhError(f"could not parse closed PR query output: {exc}") from exc
 
 
 def pr_details(numbers, repo=CODE_REPO):

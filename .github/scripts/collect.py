@@ -47,7 +47,6 @@ from progress import files, gate, gh as gh_mod, plan as plan_mod, window  # noqa
 # tracks the newest TauCeti commit with published documentation.
 CODE_REPO = "TauCetiProject/TauCeti"
 CODE_REF = "docgen"
-ROADMAP_LABEL_PREFIX = "roadmap/"
 
 # `compare` returns at most 300 files. More than that cannot be a progress report, and a truncated
 # list could HIDE a path from the gate, so anything approaching the limit is refused outright rather

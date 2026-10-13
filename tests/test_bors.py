@@ -43,14 +43,17 @@ class BorsTests(unittest.TestCase):
         self.area.mkdir(parents=True)
         (self.area / "README.md").write_text("# PDE\n")
         self.rows = [
-            {"number": 100, "mergedAt": "2026-01-01T00:00:00Z", "state": "MERGED"},
-            {"number": 101, "mergedAt": None, "state": "CLOSED"},
-            {"number": 102, "mergedAt": "2026-01-01T00:00:00Z", "state": "MERGED"},
+            {"number": 100, "mergedAt": "2026-01-01T00:00:00Z",
+             "mergeCommit": {"oid": self.native}},
+            {"number": 101, "mergedAt": None, "mergeCommit": {"oid": self.root}},
+            {"number": 102, "mergedAt": "2026-01-01T00:00:00Z",
+             "mergeCommit": {"oid": self.tip}},
             # Even a misleading title cannot put an unlanded PR into a window.
-            {"number": 103, "mergedAt": None, "state": "CLOSED",
+            {"number": 103, "mergedAt": None, "mergeCommit": {"oid": self.root},
              "title": "[Merged by Bors] - rejected"},
             {"number": 999, "mergedAt": None, "state": "CLOSED"},
         ]
+        self.calls = []
 
     def run_git(self, *args):
         return subprocess.run(["git", *args], check=True, capture_output=True,
@@ -61,19 +64,23 @@ class BorsTests(unittest.TestCase):
         return window.head_sha(self.code, ref="HEAD")
 
     def github(self, args, **kwargs):
-        if args[:2] == ["pr", "list"]:
-            self.assertIn("roadmap/PDE", args)
-            state = args[args.index("--state") + 1]
-            # Reproduce GitHub's omission of bors closures from the merged query.
-            rows = self.rows if state == "closed" else [r for r in self.rows if r["mergedAt"]]
-            return json.dumps(rows)
+        self.calls.append(args)
+        if args[:2] == ["api", "graphql"]:
+            self.assertIn("label[]=roadmap/PDE", args)
+            self.assertIn("--paginate", args)
+            self.assertIn("--slurp", args)
+            query = next(arg for arg in args if arg.startswith("query="))
+            self.assertIn("states: [CLOSED, MERGED]", query)
+            self.assertIn("mergeCommit { oid }", query)
+            # Emulate enough pages to cover the entire candidate set, including >1000 PRs.
+            chunks = [self.rows[i:i + 100] for i in range(0, len(self.rows), 100)] or [[]]
+            return json.dumps([
+                {"data": {"repository": {"pullRequests": {
+                    "nodes": chunk, "pageInfo": {"hasNextPage": i + 1 < len(chunks),
+                                                  "endCursor": str(i)}}}}}
+                for i, chunk in enumerate(chunks)])
         if args[:2] == ["api", "user"]:
             return "operator"
-        if args[0] == "api" and "/pulls/" in args[1]:
-            # For unmerged PRs the API may report a test merge SHA reachable from main.
-            # Only the native-merge guard makes that irrelevant to bootstrap.
-            self.assertEqual(args[-1], 'if .merged then (.merge_commit_sha // "") else "" end')
-            return ""
         self.fail(f"unexpected network request: {args}")
 
     def build(self):
@@ -99,6 +106,41 @@ class BorsTests(unittest.TestCase):
         self.rows = [self.rows[3]]
         with self.assertRaises(plan.NotDue):
             self.build()
+
+    def test_unmerged_reachable_test_merge_sha_is_ignored(self):
+        with patch.object(gh, "gh", side_effect=self.github):
+            candidates = gh.closed_prs_for_area("PDE")
+        self.assertIsNone(candidates[101])
+        self.assertIsNone(candidates[103])
+        self.assertEqual(plan.unaccounted_prs(self.code, candidates, ref="main"), [])
+
+    def test_many_rejected_prs_need_no_per_pr_requests_or_search_cap(self):
+        self.rows += [{"number": n, "mergedAt": None, "mergeCommit": {"oid": self.root}}
+                      for n in range(2000, 3200)]
+        result = self.build()
+        self.assertEqual(result["prs"], [102, 100, 101])
+        self.assertEqual(len(self.calls), 2)  # login plus one paginated bulk invocation
+
+    def test_numberless_native_merge_still_blocks_a_bors_bootstrap(self):
+        numberless = self.commit("native merge without its PR number")
+        self.tip = numberless
+        self.rows.append({"number": 104, "mergedAt": "2026-01-01T00:00:00Z",
+                          "mergeCommit": {"oid": numberless}})
+        with self.assertRaises(window.GitError):
+            self.build()
+
+    def test_missing_native_merge_sha_fails_closed(self):
+        self.rows[0]["mergeCommit"] = None
+        with patch.object(gh, "gh", side_effect=self.github):
+            with self.assertRaises(gh.GhError):
+                gh.closed_prs_for_area("PDE")
+
+    def test_incomplete_pagination_fails_closed(self):
+        response = [{"data": {"repository": {"pullRequests": {
+            "nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "next"}}}}}]
+        with patch.object(gh, "gh", return_value=json.dumps(response)):
+            with self.assertRaises(gh.GhError):
+                gh.closed_prs_for_area("PDE")
 
     def test_gate_and_planner_agree_on_bors_bootstrap(self):
         real_run = subprocess.run

@@ -195,16 +195,16 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
     merge, even one reachable from the code branch. Bors squash merges are recognised by their
     numbered mainline subjects, not GitHub's merged flag or an editable title.
 
-    Anything genuinely present but unrecognised is returned, and the caller refuses rather than
-    guessing a cursor.
+    Any native merge genuinely present but unrecognised is returned, and bootstrap refuses rather
+    than guessing a cursor. Bors squash merges rely on bors's guaranteed numbered commit subjects;
+    GitHub does not provide a trustworthy landed SHA for those closures.
     """
     log = window.git(["log", "--first-parent", "--format=%s", ref], repo_dir)
     seen = {window.pr_number_of_subject(s) for s in log.splitlines()}
     seen.discard(None)
     out = []
     for number in sorted(set(area_prs) - seen):
-        raw = gh.gh(["api", f"repos/{gh.CODE_REPO}/pulls/{int(number)}", "--jq",
-                     'if .merged then (.merge_commit_sha // "") else "" end']).strip()
+        raw = area_prs[number]
         # `has_commit` first: a pull request that merged since the last fetch has a merge commit this
         # checkout has never seen, and asking `merge-base` about it fails rather than answering "no" --
         # which aborted the entire plan, for every area, over one freshly merged pull request. Absent
@@ -234,7 +234,7 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     # shape when this was written.
     # Refuse rather than guess if any labelled pull request is in this history but was not recognised
     # in it: the cursor would then be computed from a later merge and skip it, permanently.
-    unaccounted = unaccounted_prs(repo_dir, numbers, ref=ref)
+    unaccounted = unaccounted_prs(repo_dir, area_prs, ref=ref)
     if unaccounted:
         raise window.GitError(
             f"{area} has labelled pull requests in {ref} whose merge commits carry no pull request "
