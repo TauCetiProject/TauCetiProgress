@@ -363,12 +363,12 @@ def make_roadmap(root, areas):
 def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge_shas=None, **kw):
     """`build_plan` with the network stubbed: a fixed documented build and fixed area labels."""
     from progress import gh as gh_mod, plan as plan_mod
-    orig_docs, orig_labels = plan_mod.docs_source_commit, gh_mod.merged_prs_for_area
+    orig_docs, orig_labels = plan_mod.docs_source_commit, gh_mod.closed_prs_for_area
     orig_login = plan_mod._own_login
     orig_gh = gh_mod.gh
     plan_mod.docs_source_commit = lambda: docs_sha
     plan_mod._own_login = lambda: "test-user"
-    gh_mod.merged_prs_for_area = lambda area, **_: list(area_prs.get(area, []))
+    gh_mod.closed_prs_for_area = lambda area, **_: list(area_prs.get(area, []))
     if merge_shas is not None:
         gh_mod.gh = lambda args, **_: merge_shas[int(args[1].rsplit("/", 1)[1])] + "\n"
     try:
@@ -378,7 +378,7 @@ def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge
                       "messageHeadline": "progress: X (2026-01-01)"}],
             open_prs=[], ref=ref, min_prs=1, **kw)
     finally:
-        plan_mod.docs_source_commit, gh_mod.merged_prs_for_area = orig_docs, orig_labels
+        plan_mod.docs_source_commit, gh_mod.closed_prs_for_area = orig_docs, orig_labels
         plan_mod._own_login = orig_login
         gh_mod.gh = orig_gh
 

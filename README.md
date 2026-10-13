@@ -64,7 +64,10 @@ against `section`, `end`, `open ... in` and `_root_`, and many real declarations
 constructors, `deriving` output) are never written in the source at all. An approximation gets most
 names right, which is the worst outcome available: the wrong ones are indistinguishable from the
 right ones, and a link built from a wrong name is a plausible dead link. PR numbers come from the squash-merge commit
-subjects in that range and are attributed by their `roadmap/<Area>` label.
+subjects in that range and are attributed by their `roadmap/<Area>` label. Label queries include all
+closed PRs: bors squash merges close PRs without setting GitHub's merged flag, while native merges
+also appear in the closed query. Only PR numbers found on the first-parent history enter a report,
+so closing a PR without landing it does not count as progress.
 
 Wall-clock time is used only for display. A cursor made of timestamps would be wrong: a worker
 clock running fast advances it past PRs whose merge times then fall *before* the stored cursor, and

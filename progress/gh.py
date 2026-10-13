@@ -74,8 +74,13 @@ def recent_roadmap_commits(limit=30, repo=ROADMAP_REPO):
     return rows
 
 
-def merged_prs_for_area(area, repo=CODE_REPO):
-    """Every merged PR number labelled `roadmap/<area>`, newest first.
+def closed_prs_for_area(area, repo=CODE_REPO):
+    """Closed PR candidates labelled `roadmap/<area>`, newest number first.
+
+    GitHub-native merges and bors squash merges both close their pull requests, but bors
+    fast-forwards the code branch and closes the PR without setting GitHub's merged state.
+    Query closed PRs (which includes native merges), then let the first-parent commit history
+    decide which actually landed. An editable title or a closure alone is not merge evidence.
 
     Attribution is done per *area*, not per PR. The obvious alternative -- ask each PR in the
     window for its labels -- costs one request per PR, and an area's first window covers its whole
@@ -89,7 +94,7 @@ def merged_prs_for_area(area, repo=CODE_REPO):
     only needs recent history; that would be the wrong choice here.)
     """
     out = gh([
-        "pr", "list", "--repo", repo, "--state", "merged",
+        "pr", "list", "--repo", repo, "--state", "closed",
         "--label", f"{ROADMAP_LABEL_PREFIX}{area}",
         "--limit", "100000", "--json", "number",
     ])
@@ -97,6 +102,8 @@ def merged_prs_for_area(area, repo=CODE_REPO):
         rows = json.loads(out)
     except json.JSONDecodeError as exc:
         raise GhError(f"could not parse gh pr list output: {exc}") from exc
+    if len(rows) >= 100000:
+        raise GhError("closed PR query reached its 100000-PR limit; refusing truncated area history")
     return sorted((int(r["number"]) for r in rows), reverse=True)
 
 

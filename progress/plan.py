@@ -190,10 +190,10 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
     this: they share the omission, which is exactly how three earlier versions of this check passed
     review while being wrong.
 
-    A missing number is usually benign: the pull request merged after the documented tip, so it is
-    not in this history yet. That is distinguished here by asking GitHub for its merge commit and
-    testing whether that commit is actually in `ref`. Only the unrecognised ones are looked up, and
-    for a bootstrap those are the handful merged since the last documentation build.
+    Missing numbers include rejected PRs and merges after the documented tip. Only a GitHub-native
+    merge has a trustworthy API merge commit: an unmerged PR's `merge_commit_sha` can name a test
+    merge, even one reachable from the code branch. Bors squash merges are recognised by their
+    numbered mainline subjects, not GitHub's merged flag or an editable title.
 
     Anything genuinely present but unrecognised is returned, and the caller refuses rather than
     guessing a cursor.
@@ -204,7 +204,7 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
     out = []
     for number in sorted(set(area_prs) - seen):
         raw = gh.gh(["api", f"repos/{gh.CODE_REPO}/pulls/{int(number)}", "--jq",
-                     '.merge_commit_sha // ""']).strip()
+                     'if .merged then (.merge_commit_sha // "") else "" end']).strip()
         # `has_commit` first: a pull request that merged since the last fetch has a merge commit this
         # checkout has never seen, and asking `merge-base` about it fails rather than answering "no" --
         # which aborted the entire plan, for every area, over one freshly merged pull request. Absent
@@ -384,9 +384,9 @@ def build_plan(
             skipped.append(f"{area}: unparseable PROGRESS.md ({exc})")
             continue
 
-        # One label query per area. See gh.merged_prs_for_area for why attribution is per-area
+        # One label query per area. See gh.closed_prs_for_area for why attribution is per-area
         # rather than per-PR.
-        area_prs = gh.merged_prs_for_area(area)
+        area_prs = gh.closed_prs_for_area(area)
         if not area_prs:
             skipped.append(f"{area}: no merged PRs yet")
             continue
