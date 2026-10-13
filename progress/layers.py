@@ -47,7 +47,9 @@ def layer_id(title):
 
 def headings(readme):
     """`[{id, title, line}]` for a README's layer headings, in order, 1-based lines, trailing
-    parentheticals dropped. Empty when the README names its milestones some other way."""
+    parentheticals dropped. Empty when the README names its milestones some other way. A heading
+    whose id has already appeared, such as a bare `### Part A` under the worked examples, is a later
+    mention of that layer, not another one."""
     def scan(rx):
         return [(m.group(1), readme.count("\n", 0, m.start()) + 1) for m in rx.finditer(readme)]
 
@@ -55,9 +57,9 @@ def headings(readme):
     out, seen = [], set()
     for title, line in found:
         title = re.sub(r"\s*\([^()]*\)\s*$", "", title).strip().rstrip(".")
-        if not title or title in seen:
+        if not title or layer_id(title) in seen:
             continue
-        seen.add(title)
+        seen.add(layer_id(title))
         out.append({"id": layer_id(title), "title": title, "line": line})
     return out
 
