@@ -154,12 +154,13 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
     past pull requests whose declarations were never inspected.
     """
     from .docs import Docs, DocsError, DocsGenerationChanged, DocsNotFound
-    from .immutable_docs import ArtifactError, FactsDocs, ReplanRequired
+    from .immutable_docs import ArtifactError, FactsDocs, PagesDocs, ReplanRequired
 
     if documentation is not None:
-        if not isinstance(documentation, dict) or documentation.get("mode") != "immutable":
+        if not isinstance(documentation, dict) or documentation.get("mode") not in ("immutable", "pages"):
             raise ReplanRequired("invalid saved documentation pin; replan the window")
-        docs = FactsDocs(documentation)
+        docs = (PagesDocs(pin=documentation) if documentation["mode"] == "pages"
+                else FactsDocs(documentation))
     docs = docs or Docs()  # saved legacy plans never discover a new source
     immutable = isinstance(docs, FactsDocs)
     if immutable:

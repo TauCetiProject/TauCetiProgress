@@ -85,7 +85,8 @@ class BorsTests(unittest.TestCase):
 
     def build(self):
         with patch.object(gh, "gh", side_effect=self.github), \
-             patch.object(plan, "docs_source_commit", return_value=self.tip):
+             patch("progress.immutable_docs.discover") as discover:
+            discover.return_value.source_commit.return_value = self.tip
             return plan.build_plan(self.roadmap, self.code, commits=[], open_prs=[],
                                    ref="main", min_prs=1)
 

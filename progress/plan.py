@@ -367,13 +367,12 @@ def build_plan(
     # links describe one and the same state.
     from .immutable_docs import ArtifactError, FactsDocs, discover
 
-    if docs is None and (os.environ.get("TAUCETI_FACTS_BASE")
-                         or os.environ.get("TAUCETI_FACTS_MODE")):
+    if docs is None:
         docs = discover()
     from .docs import DocsError, DocsGenerationChanged
 
     try:
-        docs_sha = docs.source_commit() if docs is not None else docs_source_commit()
+        docs_sha = docs.source_commit()
     except (ArtifactError, DocsGenerationChanged):
         raise
     except DocsError:

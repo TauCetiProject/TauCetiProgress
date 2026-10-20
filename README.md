@@ -97,45 +97,51 @@ facts diagnostics (`changed from planned commit …` or `was built from …, not
 redeploying`) during rollout while keeping other errors fatal. Planning continues to report ordinary
 unreadable documentation as not due (75).
 
-## Immutable documentation facts
+## Documentation facts bundles
 
-Set `TAUCETI_FACTS_BASE` to the public artifact root to enable discovery of `v1/current.json`.
-`TAUCETI_DOCS_URL` independently configures the legacy HTML base. With no facts base, an absent
-pointer (HTTP 404), or an explicitly unsupported integer schema version, new plans use the strict
-coherent-generation HTML reader. Explicit-base discovery fallback is logged; other pointer fetch
-errors stop the round. Set `TAUCETI_FACTS_MODE=immutable` after cutover to require immutable facts
-and forbid fallback. `TAUCETI_FACTS_MODE=legacy` explicitly selects that reader for new plans during rollback.
-Malformed v1 pointers and failures after v1 selection refuse the run; they never fall back to HTML.
+New plans fetch `<docs base>/facts.json.gz` once. The base is `TAUCETI_DOCS_URL` (default
+`https://taucetiproject.org/docs`), shared with the legacy HTML reader. The
+[TauCeti producer](https://github.com/TauCetiProject/TauCeti/pull/19012) deploys that single gzip
+file beside `SOURCE_SHA` and the HTML it describes. No pointer, manifest, R2 service, separate
+facts-base setting, or additional source probe is needed. The producer
+[documents the format](https://github.com/TauCetiProject/TauCeti/blob/0424be258106fab1fc976fe35588a95d74a3e563/scripts/docs-facts.md).
 
-An immutable plan's `documentation` object saves the artifact origin, source commit, generation,
-manifest path/hash, and module coverage. Facts reads exactly that pin without consulting the current
-pointer or current HTML. It validates both schemas, SHA-256 hashes, byte lengths, source identity,
-window history, and coverage of every required extant module before applying presentation limits.
-Names, kinds, source ranges, documentation text, and canonical links come from compiler-derived
-facts; attribution still uses Git blame at the pinned source commit. Current HTML may have advanced.
-The generation and source are included in plan/facts JSON and infrastructure diagnostics.
+With the default `TAUCETI_FACTS_MODE=auto`, HTTP 404 or an explicitly unsupported integer schema
+version selects the strict coherent-generation HTML reader for that new plan. This covers trees
+built before the exporter, or deployed without a bundle after an export failure. Other fetch errors,
+corrupt gzip/JSON, invalid provenance, or incomplete required coverage stop the run; they never
+become empty facts. `TAUCETI_FACTS_MODE=legacy` selects HTML explicitly. The existing `immutable`
+mode requires the bundle and forbids discovery fallback; it does not imply remote retention.
 
-Verified immutable bytes are cached indefinitely in `TAUCETI_FACTS_CACHE` (default
-`/tmp/tauceti-facts-cache`), keyed by facts origin, generation, and artifact hash. Cache writes are
-atomic; cached bytes are verified on reuse. A corrupt cache entry is fetched again from the same
-immutable URL. Saved pins can resume from cache when the origin or current pointer is unavailable.
-Infrastructure failures exit 77 and leave report cursors and saved plans untouched. Invalid saved
-source/window identity exits 78 for safe recovery/replanning; local configuration mistakes exit 1. An unavailable
-expired generation requires a safe replan; retain its report artifacts for recovery. Plans saved
-before this feature retain strict legacy behavior and must be replanned to adopt immutable facts.
-Prepared reports continue to publish against their existing source/window identity without a new
-pointer check. Never delete cursors or immutable facts to roll back.
+A bundle plan's `documentation` object saves mode `pages`, the documentation origin, documented
+source commit, compressed-byte SHA-256, generation identity, and module coverage. Gzip integrity,
+schema, compiler-derived names/kinds/ranges, provenance, source/window history and required module
+coverage are validated. Canonical URLs and docstrings come from the bundle; attribution still
+uses Git blame at its exact source commit. Current HTML may have advanced.
 
-Production cutover requires [D0](https://github.com/TauCetiProject/TauCeti/issues/18933) to publish
-one complete accessible generation and pointer compatible with the
-[shared wire fixture](tests/fixtures/facts-v1/README.md). The producer is not yet available. Keep
-legacy mode until that prerequisite is met, then update the Worker's Progress release pin and facts
-base in a companion release PR. The Worker must handle exit 77 as an infrastructure wait and
-exit 78 as retained state requiring recovery/replanning, without retrying the same invalid plan
-or starting a writer. Validate the published hashes and coverage, and prepare/publish an
-existing naturally due report through the normal Worker path. Do not create a synthetic paid round
-or reset a cursor for this acceptance check. The independent bounded replan/retry fix in
-[#25](https://github.com/TauCetiProject/TauCetiProgress/issues/25) can ship separately.
+The site serves only the current bundle. Planning must therefore retain its exact bytes locally
+before saving a plan, using atomic cache writes in `TAUCETI_FACTS_CACHE` (default
+`/tmp/tauceti-facts-cache`), keyed by documentation origin, source and hash. Facts verifies and
+uses that copy, without reading the live site. Discovery always fetches anew; a later deployment
+cannot silently replace a saved pin. Do not delete cached bundles while their reports can resume.
+
+If the local copy is missing or corrupt, facts may fetch the same URL again, accepting it only
+when its hash and source still match. A valid newer bundle returns exit 76 with old/new source
+and hash diagnostics, requesting the #25 bounded mechanical replan of the same unadvanced report
+obligation before any writer starts. Transport/corruption/coverage or cache-retention failures exit
+77 for an infrastructure wait. Invalid saved source/window identity exits 78 for safe recovery;
+configuration mistakes exit 1. No failure changes a report cursor or deletes its artifacts.
+
+Legacy HTML plans retain their guarded reader. Saved manifest plans remain readable using their
+original exact manifest/bundle pin; new plans never discover that protocol. Prepared reports
+continue to publish against their original source/window identity without consulting live facts.
+The [producer fixture](tests/fixtures/pages-facts/README.md) covers the new protocol; the older
+manifest fixture remains only for compatibility tests.
+
+Production cutover requires #19012 to deploy a complete accessible bundle, then a companion Worker
+Progress pin update with bounded exit-76 mechanical retries and exit-77/78 recovery handling. Use
+an existing naturally due report to verify prepare/publish through the normal Worker path. Do not
+create a synthetic paid round, reset a cursor, or delete retained facts for acceptance or rollback.
 
 ## The coverage header
 

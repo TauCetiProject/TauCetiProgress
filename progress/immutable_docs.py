@@ -1,7 +1,7 @@
-"""Version 1 immutable doc-gen facts. No HTML or provider API reads after selection.
+"""Compiler-derived facts, pinned locally across documentation deployments.
 
-The pointer is discovery only. A saved pin contains everything needed to retrieve the same
-manifest and bundle without consulting current.json, including after a later deployment.
+The current producer serves one mutable facts.json.gz. Each plan retains its exact bytes by
+origin/source/hash. The older manifest reader remains available for already-saved plans.
 """
 
 import gzip
@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-from .docs import Docs, DocsError
+from .docs import Docs, DocsError, DocsGenerationChanged
 
 
 class ArtifactError(DocsError):
@@ -142,11 +142,15 @@ class FactsDocs:
         _require(len(unpacked) == self.manifest["uncompressed_bytes"],
                  "facts: uncompressed length mismatch")
         data = _json(unpacked, "facts")
+        self._load_modules(data)
+        self._check_pin(pin)
+
+    def _load_modules(self, data):
         _schema(data, "facts")
         _require(data.get("source_commit") == self.commit, "facts: source commit mismatch")
         self._modules = data.get("modules")
         _require(isinstance(self._modules, dict) and sorted(self._modules) == self.modules,
-                 "facts: module coverage differs from manifest")
+                 "facts: module coverage differs from selected coverage")
         names = set()
         for path, declarations in self._modules.items():
             _require(isinstance(declarations, dict), f"facts: invalid module {path}")
@@ -170,6 +174,8 @@ class FactsDocs:
                          ((start is None and end is None) or
                           (type(start) is int and type(end) is int and 1 <= start <= end)),
                          f"facts: invalid source range for {name}")
+
+    def _check_pin(self, pin):
         if "coverage" in pin:
             _require(pin["coverage"] == self.modules, "pin: module coverage changed")
         if "generation" in pin:
@@ -197,18 +203,22 @@ class FactsDocs:
             raw = self._opener(f"{self.base}/{self.generation}/{name}")
             _require(isinstance(raw, bytes) and hashlib.sha256(raw).hexdigest() == digest,
                      f"{self.generation}/{name}: SHA-256 mismatch")
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
-                try:
-                    with os.fdopen(fd, "wb") as output:
-                        output.write(raw)
-                    os.replace(tmp, path)
-                finally:
-                    pathlib.Path(tmp).unlink(missing_ok=True)
-            except OSError:
-                pass  # read-only caches do not invalidate verified data
+            self._store(path, raw)
         return raw
+
+    @staticmethod
+    def _store(path, raw):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
+            try:
+                with os.fdopen(fd, "wb") as output:
+                    output.write(raw)
+                os.replace(tmp, path)
+            finally:
+                pathlib.Path(tmp).unlink(missing_ok=True)
+        except OSError:
+            pass  # read-only caches do not invalidate verified data
 
     def source_commit(self):
         return self.commit
@@ -229,37 +239,119 @@ class FactsDocs:
                 "coverage": self.modules}
 
 
-def discover(facts_base=None, cache_dir=None, opener=None):
-    """Use legacy until a supported pointer is advertised. Never fall back after selecting v1.
+class UnsupportedFactsSchema(ArtifactError):
+    """An explicitly versioned bundle is newer than this consumer."""
 
-    Only pointer absence (404) or an explicitly unsupported version permit discovery
-    fallback. A supported pointer with broken fields, manifest, or bundle is an infrastructure error.
-    TAUCETI_FACTS_MODE=immutable forbids fallback; legacy is the rollback switch for new plans.
+
+class FactsGenerationChanged(DocsGenerationChanged):
+    """The mutable bundle no longer holds a saved plan's exact bytes; replan mechanically."""
+
+    def __init__(self, pin, source, digest):
+        super().__init__(pin["source_commit"], source, "facts.json.gz")
+        self.expected_sha256 = pin["facts_sha256"]
+        self.observed_sha256 = digest
+        self.args = (f"facts.json.gz changed: expected source={self.expected} "
+                     f"sha256={self.expected_sha256}, observed source={self.observed} "
+                     f"sha256={digest}; saved copy unavailable; replan the unadvanced window",)
+
+
+class PagesDocs(FactsDocs):
+    """One /docs/facts.json.gz response, compatible with TauCeti PR #19012.
+
+    No advertised digest or remote history exists. Gzip CRC/schema validate the initial response;
+    the consumer hashes and retains it. Reloading a plan verifies that hash before using its bytes.
     """
+
+    def __init__(self, base=None, pin=None, cache_dir=None, opener=None, raw=None):
+        if pin is not None:
+            _require(isinstance(pin, dict), "invalid saved facts bundle pin")
+            _schema(pin, "pin")
+            _require(pin.get("mode") == "pages" and _sha(pin.get("source_commit"), 40)
+                     and _sha(pin.get("facts_sha256"), 64), "invalid saved facts bundle identity")
+            _require("coverage" in pin and "generation" in pin, "incomplete saved facts bundle pin")
+            base = pin.get("docs_base")
+        self.base = base
+        parsed = _url(base, "facts_base")
+        _require(parsed.scheme in ("http", "https") and parsed.netloc
+                 and not parsed.query and not parsed.fragment and not parsed.username,
+                 "invalid facts_base")
+        self.base = base.rstrip("/")
+        self._opener = opener or self._fetch
+        root = pathlib.Path(cache_dir or os.environ.get("TAUCETI_FACTS_CACHE")
+                            or "/tmp/tauceti-facts-cache")
+        origin = root / hashlib.sha256(self.base.encode()).hexdigest() / "pages"
+        from_cache = False
+        if pin is not None:
+            path = origin / pin["source_commit"] / pin["facts_sha256"] / "facts.json.gz"
+            try:
+                cached = path.read_bytes()
+            except OSError:
+                cached = None
+            if cached is not None and hashlib.sha256(cached).hexdigest() == pin["facts_sha256"]:
+                raw = cached
+                from_cache = True
+        if raw is None:
+            raw = self._opener(self.base + "/facts.json.gz")
+        _require(isinstance(raw, bytes), "facts.json.gz: expected binary response")
+        digest = hashlib.sha256(raw).hexdigest()
+        try:
+            data = _json(gzip.decompress(raw), "facts.json.gz")
+        except (OSError, EOFError, zlib.error) as exc:
+            raise ArtifactError(f"facts.json.gz: truncated or invalid gzip: {exc}") from exc
+        version = data.get("schema_version")
+        _require(type(version) is int, "facts.json.gz: invalid schema_version")
+        if version != 1:
+            raise UnsupportedFactsSchema(f"facts.json.gz advertises unsupported schema {version}")
+        self.commit = data.get("source_commit")
+        _require(_sha(self.commit, 40), "facts.json.gz: invalid source_commit")
+        provenance = data.get("provenance")
+        _require(isinstance(provenance, dict) and all(isinstance(provenance.get(k), str)
+                 and provenance[k] for k in ("toolchain", "doc_gen")),
+                 "facts.json.gz: missing toolchain/doc-gen provenance")
+        modules = data.get("modules")
+        _require(isinstance(modules, dict) and modules and all(_source_path(p) for p in modules),
+                 "facts.json.gz: invalid module coverage")
+        self.modules = sorted(modules)
+        self.facts_hash = digest
+        self.generation = f"pages/{self.commit}/{digest}"
+        self._load_modules(data)
+        if pin is not None:
+            if digest != pin["facts_sha256"] or self.commit != pin["source_commit"]:
+                raise FactsGenerationChanged(pin, self.commit, digest)
+            self._check_pin(pin)
+        self.cache_dir = origin / self.commit / digest
+        if from_cache:
+            return
+        # Saving a plan must retain the sole copy the publisher no longer guarantees to serve.
+        # A failed cache write is fatal for this protocol (unlike remote immutable generations).
+        path = self.cache_dir / "facts.json.gz"
+        self._store(path, raw)
+        try:
+            retained = path.read_bytes()
+        except OSError as exc:
+            raise ArtifactError(f"cannot retain pinned facts at {path}: {exc}") from exc
+        _require(hashlib.sha256(retained).hexdigest() == digest,
+                 f"cannot retain complete pinned facts at {path}")
+
+    def pin(self):
+        return {"mode": "pages", "schema_version": 1, "docs_base": self.base,
+                "source_commit": self.commit, "generation": self.generation,
+                "facts_sha256": self.facts_hash, "coverage": self.modules}
+
+
+def discover(base=None, cache_dir=None, opener=None):
+    """Discover the single Pages bundle once per plan; never use a stale disk discovery result."""
     mode = os.environ.get("TAUCETI_FACTS_MODE", "auto")
     if mode not in ("auto", "legacy", "immutable"):
         raise ConfigurationError(f"unknown TAUCETI_FACTS_MODE: {mode}")
-    base = facts_base or os.environ.get("TAUCETI_FACTS_BASE")
-    if mode == "immutable" and not base:
-        raise ConfigurationError("TAUCETI_FACTS_MODE=immutable requires TAUCETI_FACTS_BASE")
-    if mode == "legacy" or not base:
-        return Docs()
-
-    def fallback(reason):
-        if mode == "immutable":
-            raise ArtifactError(f"{reason}; immutable facts are required")
-        print(f"documentation: {reason}; using strict legacy reader", file=sys.stderr)
-        return Docs()
-
-    fetch = opener or FactsDocs._fetch
+    legacy = Docs()
+    if mode == "legacy":
+        return legacy
+    base = base or legacy.base
     try:
-        raw = fetch(base.rstrip("/") + "/v1/current.json")
-    except ArtifactNotFound:
-        return fallback("current.json is absent (HTTP 404)")
-    pointer = _json(raw, "current.json")
-    _require(type(pointer.get("schema_version")) is int, "current.json: invalid schema_version")
-    if pointer["schema_version"] != 1:
-        return fallback(f"current.json advertises unsupported schema {pointer['schema_version']}")
-    _schema(pointer, "current.json")
-    return FactsDocs({**pointer, "mode": "immutable", "facts_base": base},
-                     cache_dir=cache_dir, opener=opener)
+        return PagesDocs(base=base, cache_dir=cache_dir, opener=opener)
+    except (ArtifactNotFound, UnsupportedFactsSchema) as exc:
+        if mode == "immutable":
+            raise
+        print(f"documentation: {exc}; using strict legacy reader", file=sys.stderr)
+        return legacy
