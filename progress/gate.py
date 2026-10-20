@@ -96,7 +96,7 @@ def _refuse(reason):
 
 
 class Pending(Refused):
-    """The pull request cannot be merged YET: its `build` has not finished.
+    """The pull request cannot be merged YET: its `build` is running and has not finished.
 
     A subclass of `Refused` on purpose, so that anything which only asks "may this merge?" treats it
     as a refusal. Only `main` tells the two apart, to decide whether a human needs to hear about it.
@@ -380,8 +380,12 @@ def check_build(check_runs, head_sha, required="build", app_id=GITHUB_ACTIONS_AP
       used to win because the first match returned.
     """
     matching = [r for r in check_runs if (r.get("name") or "") == required]
+    # Absent is a refusal, not pending. Pending is only safe to stay quiet about when a run exists,
+    # because then its completion re-runs this gate. A build that never started -- a `[skip ci]`
+    # head, or a first-time fork contributor's CI awaiting a maintainer's approval -- has no
+    # completion coming, and a human has to act.
     if not matching:
-        raise Pending(f"{required} has not reported on {head_sha[:7]}")
+        _refuse(f"{required} has not reported on {head_sha[:7]}")
     # An unfinished run is remembered rather than raised at once, so a contradicting entry that has
     # already failed, or carries bad provenance, is still refused outright.
     unfinished = None

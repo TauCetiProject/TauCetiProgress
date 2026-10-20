@@ -717,8 +717,16 @@ def test_refuses_a_completed_build_without_a_conclusion():
     refuses(lambda: call(checks=checks), "concluded None")
 
 
-def test_waits_for_a_build_that_has_not_reported():
-    waits(lambda: call(checks=[]), "has not reported")
+def test_refuses_a_build_that_has_not_reported():
+    """No run means no completion event to re-run the gate (a `[skip ci]` head, or a fork's CI
+    awaiting approval), so staying quiet would leave the report silently stranded."""
+    exc = refuses(lambda: call(checks=[]), "has not reported")
+    try:
+        call(checks=[])
+    except Pending:
+        raise AssertionError(f"an absent build was reported as pending: {exc}") from None
+    except Refused:
+        pass
 
 
 def test_refuses_a_failing_build_listed_after_a_success():
