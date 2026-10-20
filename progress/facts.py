@@ -64,11 +64,10 @@ def changed_lean_files(repo_dir, commits):
     files = set()
     for commit in commits:
         out = window.git(
-            ["diff", "--name-only", "--diff-filter=AMR", f"{commit}^", commit, "--", LEAN_PREFIX],
+            ["diff", "--name-only", "-z", "--diff-filter=AMR", f"{commit}^", commit, "--", LEAN_PREFIX],
             repo_dir,
         )
-        files.update(p for p in (line.strip() for line in out.splitlines())
-                     if p.endswith(LEAN_SUFFIX))
+        files.update(p for p in out.split("\0") if p.endswith(LEAN_SUFFIX))
     return sorted(files)
 
 
@@ -138,11 +137,12 @@ def pr_commits(repo_dir, from_sha, to_sha, numbers):
     return result
 
 
-def required_modules(repo_dir, from_sha, to_sha, numbers):
+def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None):
     """Touched modules still present at the documented commit, including empty modules."""
-    touched = changed_lean_files(repo_dir, pr_commits(repo_dir, from_sha, to_sha, numbers))
-    present = set(window.git(["ls-tree", "-r", "--name-only", to_sha, "--", LEAN_PREFIX],
-                             repo_dir).splitlines())
+    if touched is None:
+        touched = changed_lean_files(repo_dir, pr_commits(repo_dir, from_sha, to_sha, numbers))
+    present = set(window.git(["ls-tree", "-r", "-z", "--name-only", to_sha, "--", LEAN_PREFIX],
+                             repo_dir).split("\0"))
     return [path for path in touched if path in present]
 
 
@@ -154,18 +154,18 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
     past pull requests whose declarations were never inspected.
     """
     from .docs import Docs, DocsError, DocsGenerationChanged, DocsNotFound
-    from .immutable_docs import ArtifactError, FactsDocs
+    from .immutable_docs import ArtifactError, FactsDocs, ReplanRequired
 
     if documentation is not None:
         if not isinstance(documentation, dict) or documentation.get("mode") != "immutable":
-            raise ArtifactError("invalid saved documentation pin; replan the window")
+            raise ReplanRequired("invalid saved documentation pin; replan the window")
         docs = FactsDocs(documentation)
     docs = docs or Docs()  # saved legacy plans never discover a new source
     immutable = isinstance(docs, FactsDocs)
     if immutable:
         if not window.has_commit(repo_dir, to_sha) or not window.has_commit(repo_dir, from_sha) \
                 or not window.is_ancestor(repo_dir, from_sha, to_sha):
-            raise ArtifactError("pinned facts source/window history mismatch; replan the window")
+            raise ReplanRequired("pinned facts source/window history mismatch; replan the window")
     try:
         docs_sha = docs.source_commit()
     except (DocsGenerationChanged, ArtifactError):
@@ -175,7 +175,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
 
     if docs_sha != to_sha:
         if immutable:
-            raise ArtifactError(f"pinned source {docs_sha} differs from plan {to_sha}; replan")
+            raise ReplanRequired(f"pinned source {docs_sha} differs from plan {to_sha}; replan")
         raise DocsGenerationChanged(to_sha, docs_sha)
 
     numbers = (window.window_prs(repo_dir, from_sha, docs_sha)
@@ -185,7 +185,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
 
     files = changed_lean_files(repo_dir, pr_of_commit)
     if immutable:
-        required = set(required_modules(repo_dir, from_sha, docs_sha, numbers))
+        required = set(required_modules(repo_dir, from_sha, docs_sha, numbers, touched=files))
         docs.require_coverage(required)  # before presentation limits; no partial coverage accepted
     truncated_modules = 0
     if len(files) > MAX_MODULES:

@@ -32,4 +32,8 @@ The fixture deliberately includes a normal declaration, a compiler-generated ins
 ordinary source range, and an empty module. `tests/test_immutable_docs.py` derives deployment and
 failure scenarios from this fixture, including a removed module at a later source commit. The
 fixture commit (`aaaa…`) is synthetic: integration tests replace it with a real local Git commit.
-No test contacts GitHub or the deployed documentation service.
+No test contacts GitHub or the deployed documentation service. The documented source commit must
+be reachable from the configured reporting ref (`origin/docgen` by default); D0 must publish the
+real documented source and coordinate that ref before switching the pointer. Canonical URLs must
+name the module HTML page and declaration fragment; consumers retain the URLs from facts even
+when the live documentation base has changed.

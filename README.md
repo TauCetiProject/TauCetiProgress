@@ -100,9 +100,11 @@ unreadable documentation as not due (75).
 ## Immutable documentation facts
 
 Set `TAUCETI_FACTS_BASE` to the public artifact root to enable discovery of `v1/current.json`.
-`TAUCETI_DOCS_URL` independently configures the legacy HTML base. With no facts base, an unavailable
-pointer, or an unsupported advertised version, new plans use the strict coherent-generation HTML
-reader. `TAUCETI_FACTS_MODE=legacy` explicitly selects that reader for new plans during rollback.
+`TAUCETI_DOCS_URL` independently configures the legacy HTML base. With no facts base, an absent
+pointer (HTTP 404), or an explicitly unsupported integer schema version, new plans use the strict
+coherent-generation HTML reader. Explicit-base discovery fallback is logged; other pointer fetch
+errors stop the round. Set `TAUCETI_FACTS_MODE=immutable` after cutover to require immutable facts
+and forbid fallback. `TAUCETI_FACTS_MODE=legacy` explicitly selects that reader for new plans during rollback.
 Malformed v1 pointers and failures after v1 selection refuse the run; they never fall back to HTML.
 
 An immutable plan's `documentation` object saves the artifact origin, source commit, generation,
@@ -117,7 +119,8 @@ Verified immutable bytes are cached indefinitely in `TAUCETI_FACTS_CACHE` (defau
 `/tmp/tauceti-facts-cache`), keyed by facts origin, generation, and artifact hash. Cache writes are
 atomic; cached bytes are verified on reuse. A corrupt cache entry is fetched again from the same
 immutable URL. Saved pins can resume from cache when the origin or current pointer is unavailable.
-Infrastructure failures exit 77 and leave report cursors and saved plans untouched. An unavailable
+Infrastructure failures exit 77 and leave report cursors and saved plans untouched. Invalid saved
+source/window identity exits 78 for safe recovery/replanning; local configuration mistakes exit 1. An unavailable
 expired generation requires a safe replan; retain its report artifacts for recovery. Plans saved
 before this feature retain strict legacy behavior and must be replanned to adopt immutable facts.
 Prepared reports continue to publish against their existing source/window identity without a new
@@ -127,7 +130,9 @@ Production cutover requires [D0](https://github.com/TauCetiProject/TauCeti/issue
 one complete accessible generation and pointer compatible with the
 [shared wire fixture](tests/fixtures/facts-v1/README.md). The producer is not yet available. Keep
 legacy mode until that prerequisite is met, then update the Worker's Progress release pin and facts
-base in a companion release PR. Validate the published hashes and coverage, and prepare/publish an
+base in a companion release PR. The Worker must handle exit 77 as an infrastructure wait and
+exit 78 as retained state requiring recovery/replanning, without retrying the same invalid plan
+or starting a writer. Validate the published hashes and coverage, and prepare/publish an
 existing naturally due report through the normal Worker path. Do not create a synthetic paid round
 or reset a cursor for this acceptance check. The independent bounded replan/retry fix in
 [#25](https://github.com/TauCetiProject/TauCetiProgress/issues/25) can ship separately.

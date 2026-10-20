@@ -10,7 +10,8 @@ Subcommands, in the order a round uses them:
     announce  post a new section to Zulip (idempotent)
 
 Exit codes follow the worker's convention: 0 did something, 75 (`EX_NOPROGRESS`) nothing to do,
-76 documentation generation changed (retry only plan/facts), 1 a real error.
+76 documentation generation changed (retry only plan/facts), 1 a real error,
+77 an infrastructure wait, 78 retained state requiring recovery/replanning.
 The distinction matters because a round must fall through to other work on 75 but
 must not silently treat an error as "nothing to do" -- that would let a transient GitHub failure
 advance a cursor past real work.
@@ -95,11 +96,11 @@ def cmd_plan(args):
 def cmd_facts(args):
     from . import facts
     from .docs import DocsGenerationChanged
-    from .immutable_docs import ArtifactError
+    from .immutable_docs import ReplanRequired
 
     p = _load_plan(args.plan)
     if "documentation" in p and p["documentation"] is None:
-        raise ArtifactError("saved documentation pin is null; replan the window")
+        raise ReplanRequired("saved documentation pin is null; replan the window")
     # The plan's PR list is the area filter. Without it `collect` would walk every merged PR in the
     # commit range, so a report on one roadmap would be grounded in every roadmap's work.
     try:
@@ -240,12 +241,18 @@ def main(argv=None):
         args.min_prs = plan_mod.MIN_PRS
     if getattr(args, "ref", None) is None:
         args.ref = plan_mod.CODE_REF
-    from .immutable_docs import ArtifactError
+    from .immutable_docs import ArtifactError, ConfigurationError, ReplanRequired
 
     try:
         return args.fn(args)
+    except ReplanRequired as exc:
+        print(f"{args.cmd}: saved plan requires recovery: {exc}", file=sys.stderr)
+        return 78
+    except ConfigurationError as exc:
+        print(f"{args.cmd}: {exc}", file=sys.stderr)
+        return 1
     except ArtifactError as exc:
-        print(f"{args.cmd}: immutable documentation unavailable: {exc}", file=sys.stderr)
+        print(f"{args.cmd}: facts preparation unavailable: {exc}", file=sys.stderr)
         return 77  # retriable infrastructure wait; never EX_NOPROGRESS
     except KeyboardInterrupt:
         return 130

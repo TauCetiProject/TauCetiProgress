@@ -9,12 +9,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from progress import cli, facts, gh, plan, window
+from progress import apply, cli, facts, gh, plan, window
 from progress.docs import Docs
-from progress.immutable_docs import ArtifactError, FactsDocs, discover
+from progress.immutable_docs import ArtifactError, ArtifactNotFound, ConfigurationError, FactsDocs, discover
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures/facts-v1"
 BASE = "https://facts.example/progress"
@@ -66,7 +67,7 @@ class ImmutableDocsTests(unittest.TestCase):
         try:
             return self.objects[rel]
         except KeyError:
-            raise ArtifactError("object unavailable: " + rel)
+            raise ArtifactNotFound("object unavailable: " + rel)
 
     def reader(self):
         return discover(BASE, cache_dir=self.cache, opener=self.fetch)
@@ -75,7 +76,10 @@ class ImmutableDocsTests(unittest.TestCase):
         return FactsDocs(pin, cache_dir=self.cache, opener=self.fetch)
 
     def test_shared_wire_fixture(self):
-        self.assertEqual(generation(), self.objects)
+        # Gzip compression/header bytes may differ between Python/zlib versions. Verify the
+        # checked-in wire bytes directly rather than requiring byte-identical recompression.
+        raw = next(value for path, value in self.objects.items() if path.endswith(".gz"))
+        self.assertEqual(gzip.decompress(raw), (FIXTURE / "facts.json").read_bytes())
         reader = self.reader()
         self.assertEqual(reader.source_commit(), "a" * 40)
         self.assertEqual(reader.declarations("TauCeti/Empty.html"), {})
@@ -128,13 +132,35 @@ class ImmutableDocsTests(unittest.TestCase):
                       opener=lambda url: (_ for _ in ()).throw(ArtifactError("other origin unavailable")))
 
     def test_unsupported_or_unavailable_pointer_uses_legacy(self):
-        for raw in (b'{"schema_version":2}', b'{}'):
+        for raw in (b'{"schema_version":2}',):
             self.objects["v1/current.json"] = raw
             self.assertIsInstance(self.reader(), Docs)
         with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "legacy"}):
             self.requests.clear()
             self.assertIsInstance(self.reader(), Docs)
             self.assertEqual(self.requests, [])
+
+    def test_pointer_http_errors_are_distinct_from_absence(self):
+        for status in (403, 429, 500):
+            with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
+                    BASE, status, "unavailable", None, None)):
+                with self.assertRaises(ArtifactError):
+                    discover(BASE)
+        with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
+                BASE, 404, "not found", None, None)):
+            self.assertIsInstance(discover(BASE), Docs)
+            with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "immutable"}):
+                with self.assertRaisesRegex(ArtifactError, "immutable facts are required"):
+                    discover(BASE)
+
+    def test_strict_mode_and_invalid_configuration(self):
+        with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "immutable"}):
+            self.objects["v1/current.json"] = b'{"schema_version":2}'
+            with self.assertRaisesRegex(ArtifactError, "immutable facts are required"):
+                self.reader()
+        with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "typo"}):
+            with self.assertRaises(ConfigurationError):
+                self.reader()
 
     def test_supported_pointer_failures_never_fall_back(self):
         pointer = json.loads(self.objects["v1/current.json"])
@@ -148,11 +174,19 @@ class ImmutableDocsTests(unittest.TestCase):
         self.objects["v1/current.json"] = b"{truncated"
         with self.assertRaisesRegex(ArtifactError, "JSON"):
             self.reader()
+        for raw in (b'{}', b'{"schema_version":"1"}', b'{"schema_version":true}'):
+            self.objects["v1/current.json"] = raw
+            with self.assertRaisesRegex(ArtifactError, "schema_version"):
+                self.reader()
+        self.objects["v1/current.json"] = b'{"schema_version":1,"schema_version":2}'
+        with self.assertRaisesRegex(ArtifactError, "duplicate JSON key"):
+            self.reader()
 
     def test_manifest_schema_source_lengths_hash_and_coverage(self):
         for edit in ({"schema_version": 2}, {"source_commit": "b" * 40},
                      {"compressed_bytes": 1}, {"uncompressed_bytes": 1},
-                     {"facts_sha256": "0" * 64}, {"modules": []}, {"provenance": {}}):
+                     {"facts_sha256": "0" * 64}, {"modules": []}, {"provenance": {}},
+                     {"generation": "v1/generations/other"}):
             with self.subTest(edit=edit):
                 self.objects = generation(manifest_changes=edit)
                 with self.assertRaises(ArtifactError):
@@ -170,6 +204,11 @@ class ImmutableDocsTests(unittest.TestCase):
         self.objects = generation(data)
         with self.assertRaisesRegex(ArtifactError, "source range"):
             self.reader()
+        del data["modules"]["TauCeti/A.lean"]["TauCeti.alpha"]["start"]
+        del data["modules"]["TauCeti/A.lean"]["TauCeti.alpha"]["end"]
+        self.objects = generation(data)
+        with self.assertRaisesRegex(ArtifactError, "source range"):
+            self.reader()
 
     def test_truncated_bundle_with_matching_hash_is_refused(self):
         self.objects = generation(bundle=gzip.compress(b'{"modules":{}}', mtime=0)[:-5])
@@ -183,6 +222,29 @@ class ImmutableDocsTests(unittest.TestCase):
         with self.assertRaisesRegex(ArtifactError, "source commit mismatch"):
             self.reader()
 
+    def test_declaration_schema_and_duplicate_names(self):
+        for edit in ({"file": "TauCeti/Other.lean"}, {"url": "http://["},
+                     {"url": "https://taucetiproject.org/docs/TauCeti/A.html#wrong"},
+                     {"url": "https://taucetiproject.org/docs/Other.html#TauCeti.alpha"}):
+            with self.subTest(edit=edit):
+                data = json.loads((FIXTURE / "facts.json").read_bytes())
+                data["modules"]["TauCeti/A.lean"]["TauCeti.alpha"].update(edit)
+                self.objects = generation(data)
+                with self.assertRaises(ArtifactError):
+                    self.reader()
+        data = json.loads((FIXTURE / "facts.json").read_bytes())
+        info = data["modules"]["TauCeti/A.lean"]["TauCeti.alpha"]
+        data["modules"]["TauCeti/Empty.lean"]["TauCeti.alpha"] = info
+        self.objects = generation(data)
+        with self.assertRaisesRegex(ArtifactError, "duplicate declaration"):
+            self.reader()
+        raw = encoded(json.loads((FIXTURE / "facts.json").read_bytes()))
+        raw = raw.replace(b'"kind":"theorem"', b'"kind":"theorem","kind":"def"')
+        self.objects = generation(bundle=gzip.compress(raw, mtime=0),
+                                  manifest_changes={"uncompressed_bytes": len(raw)})
+        with self.assertRaisesRegex(ArtifactError, "duplicate JSON key"):
+            self.reader()
+
     def test_corrupt_bundle_is_refused_and_corrupt_cache_is_repaired(self):
         reader = self.reader()
         cache_file = next(self.cache.rglob("*-facts.json.gz"))
@@ -192,6 +254,15 @@ class ImmutableDocsTests(unittest.TestCase):
         self.objects[next(k for k in self.objects if k.endswith(".gz"))] = b"bad hash"
         with self.assertRaisesRegex(ArtifactError, "SHA-256"):
             self.pinned(reader.pin())
+
+    def test_manifest_cache_and_saved_coverage_are_verified(self):
+        reader = self.reader()
+        next(self.cache.rglob("*-manifest.json")).write_bytes(b"corrupt manifest")
+        self.assertEqual(self.pinned(reader.pin()).pin(), reader.pin())
+        pin = reader.pin()
+        pin["coverage"] = []
+        with self.assertRaisesRegex(ArtifactError, "coverage changed"):
+            self.pinned(pin)
 
     def repo(self):
         self.code = self.root / "code"
@@ -252,7 +323,7 @@ class ImmutableDocsTests(unittest.TestCase):
         plan_file.write_text(json.dumps({"from_sha": self.first, "to_sha": self.head, "prs": [101],
                                          "documentation": None}))
         with patch("progress.docs.Docs", side_effect=AssertionError("must not use legacy")):
-            self.assertEqual(cli.main(["facts", "--plan", str(plan_file), "--code-dir", str(self.code)]), 77)
+            self.assertEqual(cli.main(["facts", "--plan", str(plan_file), "--code-dir", str(self.code)]), 78)
 
     def test_missing_required_module_refuses_plan_and_facts_without_writing(self):
         data = self.repo()
@@ -292,15 +363,52 @@ class ImmutableDocsTests(unittest.TestCase):
         result = facts.collect(self.code, self.first, self.head, docs=self.reader())
         self.assertEqual([d["name"] for d in result["declarations"]], ["TauCeti.alpha"])
 
-    def test_legacy_saved_plan_does_not_discover_a_new_source(self):
+    def test_non_ascii_module_paths_match_git_coverage(self):
         self.repo()
+        self.head = self.commit("feat: unicode module (#102)", {"TauCeti/É space.lean": "import TauCeti.A\n"})
+        self.assertEqual(facts.required_modules(self.code, self.first, self.head, [102]),
+                         ["TauCeti/É space.lean"])
+
+    def test_legacy_saved_plan_does_not_discover_a_new_source(self):
+        data = self.repo()
         legacy = Docs()
         with patch("progress.docs.Docs", return_value=legacy), \
              patch.object(legacy, "source_commit", return_value=self.head), \
-             patch.object(legacy, "declarations", return_value={}), \
+             patch.object(legacy, "declarations", side_effect=lambda page:
+                          data["modules"][page.removesuffix(".html") + ".lean"]), \
              patch("progress.immutable_docs.discover", side_effect=AssertionError("must use legacy")):
-            with self.assertRaises(facts.FactsError):
-                facts.collect(self.code, self.first, self.head, pr_numbers=[101])
+            result = facts.collect(self.code, self.first, self.head, pr_numbers=[101])
+        self.assertEqual([d["name"] for d in result["declarations"]], ["TauCeti.alpha"])
+        self.assertNotIn("documentation", result)
+
+    def test_prepared_immutable_report_resumes_after_pointer_changes(self):
+        self.repo()
+        p = self.build_plan(self.reader())
+        roadmap = self.root / "roadmap"
+        for args in (["init", "-q", "-b", "main"], ["config", "user.email", "t@e"],
+                     ["config", "user.name", "T"], ["add", "."], ["commit", "-qm", "base"],
+                     ["update-ref", "refs/remotes/origin/main", "HEAD"]):
+            window.git(args, roadmap)
+        status, section = self.root / "status", self.root / "section"
+        prose = "Alpha's theorem now supplies the required statement for the algebra roadmap. " * 4
+        status.write_text(prose)
+        section.write_text(prose)
+        with patch.object(apply, "existing_pr", return_value=None), \
+             patch.object(apply, "own_pr", return_value=None):
+            self.assertEqual(apply.run(p, status, section, roadmap, dry_run=True), 0)
+            prepared = window.head_sha(roadmap, "HEAD")
+            data = json.loads((FIXTURE / "facts.json").read_bytes())
+            data["source_commit"] = "b" * 40
+            self.objects = generation(data)
+            with patch.object(FactsDocs, "_fetch", side_effect=AssertionError("must reuse report")), \
+                 patch.object(apply, "render_update", side_effect=AssertionError("must reuse prose")), \
+                 patch.object(apply, "push_target", return_value=("fork", "tester")), \
+                 patch.object(apply, "remote_branch_exists", return_value=True), \
+                 patch.object(apply, "sweep", return_value=0), \
+                 patch.object(gh, "gh", return_value="https://github.com/org/roadmap/pull/1") as publish:
+                self.assertEqual(apply.run(p, status, section, roadmap), 0)
+                publish.assert_called_once()
+            self.assertEqual(window.head_sha(roadmap, "HEAD"), prepared)
 
 
 if __name__ == "__main__":
