@@ -42,10 +42,7 @@ jobs:
       - name: Decide which pull request to consider
         id: pick
         env:
-          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
-          REPO: ${{ github.repository }}
-          OWNER: ${{ github.repository_owner }}
           # Through env, never interpolated into the script: attacker-controlled.
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
