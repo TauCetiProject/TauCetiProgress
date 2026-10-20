@@ -160,3 +160,33 @@ with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROG
     write = next(i for i, call in enumerate(calls) if call[:2] == ["repo", "fork"])
     assert first_read < write and sum(call[:2] == ["api", "graphql"] for call in calls) == 3
     assert not list(pathlib.Path(tmp).glob("*.json"))
+
+# A local failure on a permitted retry does not erase the earlier ambiguous send.
+with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROGRESS_OUTBOX": tmp}):
+    sends = []
+    def failing_retry(argv, **kwargs):
+        if argv[1:3] == ["api", "user"]:
+            return subprocess.CompletedProcess(argv, 0, "author", "")
+        sends.append(argv)
+        if len(sends) == 1:
+            return subprocess.CompletedProcess(argv, 1, "", "lost response")
+        raise OSError("native executable unavailable")
+    with patch.object(gh.subprocess, "run", side_effect=failing_retry):
+        try:
+            gh.gh(args, reconcile=lambda: None)
+        except gh.GhError:
+            pass
+        retained = next(pathlib.Path(tmp).glob("*.json"))
+        value = json.loads(retained.read_text())
+        value["absent_since"] = value["created"] - 301
+        retained.write_text(json.dumps(value))
+        try:
+            gh.gh(args, reconcile=lambda: False)
+        except OSError:
+            pass
+        assert json.loads(retained.read_text())["attempts"] == 1
+        try:
+            gh.gh(args, reconcile=lambda: None)
+        except gh.GhError:
+            pass
+        assert len(sends) == 2, "earlier uncertain send still requires reconciliation"

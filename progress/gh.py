@@ -104,7 +104,8 @@ def gh(args, retries=3, reconcile=None, context=None):
                 if outcome is False and "absent_since" not in value:
                     value["absent_since"] = time.time()
                     _save_intent(path, value)
-                if (not value.get("not_sent") and (outcome is not False or time.time() - value["absent_since"] < 300
+                known_unsent = value.get("not_sent") and value["attempts"] == 0
+                if (not known_unsent and (outcome is not False or time.time() - value["absent_since"] < 300
                         or value["attempts"] >= 2) or value["argv"] != args):
                     raise GhError("publication retained; uncertain outcome must reconcile before replay")
             else:
