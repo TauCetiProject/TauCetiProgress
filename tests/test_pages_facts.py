@@ -11,13 +11,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from progress import apply, cli, facts, gh, plan, window
-from progress.docs import Docs, DocsGenerationChanged
-from progress.immutable_docs import (ArtifactError, ArtifactNotFound, ConfigurationError,
-                                     FactsDocs, PagesDocs, FactsReplanRequired, ReplanRequired, discover)
+from progress import apply, cli, docs, facts, gh, plan, window
+from progress.docs import (ArtifactError, ArtifactNotFound, ConfigurationError, Docs, DocsGenerationChanged,
+                           FactsReplanRequired, ReplanRequired, UnsupportedFactsSchema, discover)
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures/pages-facts"
 BASE = "https://taucetiproject.org/docs"
@@ -45,9 +45,10 @@ class PagesFactsTests(unittest.TestCase):
         self.requests = []
         self.error = None
         self.addCleanup(patch.stopall)
-        patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "auto", "TAUCETI_FACTS_CACHE": str(self.cache)}).start()
+        patch.dict(os.environ, {"TAUCETI_FACTS_CACHE": str(self.cache)}).start()
         patch.object(gh, "gh", side_effect=AssertionError("unexpected GitHub API call")).start()
-        patch.object(FactsDocs, "_fetch", side_effect=self.fetch).start()
+        self.real_fetch = Docs._fetch
+        patch.object(Docs, "_fetch", side_effect=self.fetch).start()
         patch.object(facts, "LEAN_PREFIX", "Demo/").start()
 
     def fetch(self, url):
@@ -61,7 +62,7 @@ class PagesFactsTests(unittest.TestCase):
         return discover(base=BASE, cache_dir=self.cache)
 
     def restore(self, pin):
-        return PagesDocs(pin=pin, cache_dir=self.cache)
+        return Docs(pin=pin, cache_dir=self.cache)
 
     def test_real_producer_fixture_is_one_response_and_preserves_generated_facts(self):
         reader = self.reader()
@@ -80,21 +81,21 @@ class PagesFactsTests(unittest.TestCase):
         # No manifest, pointer, HTML, SOURCE_SHA, or provider request is needed.
         self.assertEqual(len(self.requests), 1)
 
-    def test_discovery_uses_the_configured_docs_base_and_ignores_obsolete_r2_setting(self):
-        with patch("progress.immutable_docs.Docs", return_value=Docs(base=BASE)), \
-             patch.dict(os.environ, {"TAUCETI_FACTS_BASE": "https://obsolete.example/r2"}):
-            self.assertIsInstance(discover(cache_dir=self.cache), PagesDocs)
+    def test_discovery_uses_the_configured_docs_base(self):
+        with patch.object(docs, "DOCS_BASE", BASE):
+            self.assertEqual(discover(cache_dir=self.cache).base, BASE)
         self.assertEqual(self.requests, [BASE + "/facts.json.gz"])
+        with self.assertRaises(ConfigurationError):
+            discover(base="ftp://docs.example", cache_dir=self.cache)
 
-    def test_later_deploy_does_not_replace_cached_plan_even_in_legacy_mode(self):
+    def test_later_deploy_does_not_replace_cached_plan(self):
         old = self.reader()
         self.data["source_commit"] = "b" * 40
         self.raw = pack(self.data)
         self.assertEqual(self.reader().source_commit(), "b" * 40)
         self.error = ArtifactError("offline")
         self.requests.clear()
-        with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "legacy"}):
-            restored = self.restore(old.pin())
+        restored = self.restore(old.pin())
         self.assertEqual(restored.pin(), old.pin())
         self.assertEqual(restored.declarations("Demo/A.html"), old.declarations("Demo/A.html"))
         self.assertEqual(self.requests, [])
@@ -117,28 +118,72 @@ class PagesFactsTests(unittest.TestCase):
     def test_cache_is_separated_by_origin(self):
         pin = self.reader().pin()
         pin["docs_base"] = "https://other.example/docs"
-        with patch.object(FactsDocs, "_fetch", side_effect=ArtifactError("other origin offline")):
+        with patch.object(Docs, "_fetch", side_effect=ArtifactError("other origin offline")):
             with self.assertRaisesRegex(ArtifactError, "other origin offline"):
                 self.restore(pin)
 
-    def test_only_discovery_404_and_unsupported_schema_allow_legacy(self):
+    def test_a_missing_or_newer_bundle_has_no_facts_to_offer(self):
         self.error = ArtifactNotFound("HTTP 404")
-        self.assertIsInstance(self.reader(), Docs)
-        with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "immutable"}):
-            with self.assertRaises(ArtifactNotFound):
-                self.reader()
+        with self.assertRaises(ArtifactNotFound):
+            self.reader()
         self.error = None
         self.data["schema_version"] = 2
         self.raw = pack(self.data)
-        self.assertIsInstance(self.reader(), Docs)
-        with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "immutable"}):
-            with self.assertRaises(ArtifactError):
-                self.reader()
-        with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "typo"}):
-            with self.assertRaises(ConfigurationError):
-                self.reader()
+        with self.assertRaises(UnsupportedFactsSchema):
+            self.reader()
 
-    def test_transport_failures_and_selected_pin_404_never_switch_to_html(self):
+    def test_declaration_schema_and_duplicate_names(self):
+        alpha = self.data["modules"]["Demo/A.lean"]["Demo.alpha"]
+        for edit in ({"file": "Demo/Other.lean"}, {"url": "http://["}, {"url": BASE + "/Demo/A.html#wrong"},
+                     {"url": BASE + "/Other.html#Demo.alpha"}, {"kind": ""}, {"doc": None},
+                     {"start": 3, "end": 2}, {"start": None}, {"start": "1"}):
+            with self.subTest(edit=edit):
+                data = copy.deepcopy(self.data)
+                data["modules"]["Demo/A.lean"]["Demo.alpha"].update(edit)
+                self.raw = pack(data)
+                with self.assertRaises(ArtifactError):
+                    self.reader()
+        # Missing range fields are malformed; explicitly null ones mean doc-gen4 has no range.
+        data = copy.deepcopy(self.data)
+        for key in ("start", "end"):
+            del data["modules"]["Demo/A.lean"]["Demo.alpha"][key]
+        self.raw = pack(data)
+        with self.assertRaisesRegex(ArtifactError, "invalid source range"):
+            self.reader()
+        data["modules"]["Demo/A.lean"]["Demo.alpha"].update(start=None, end=None)
+        self.raw = pack(data)
+        self.assertIsNone(self.reader().declarations("Demo/A.html")["Demo.alpha"]["start"])
+        data = copy.deepcopy(self.data)
+        data["modules"]["Demo/Empty.lean"]["Demo.alpha"] = alpha
+        self.raw = pack(data)
+        with self.assertRaisesRegex(ArtifactError, "duplicate declaration"):
+            self.reader()
+        # doc-gen emits literal name fragments, including percent characters in quoted names.
+        data = copy.deepcopy(self.data)
+        name = "Demo.«literal%FF»"
+        data["modules"]["Demo/A.lean"][name] = {**alpha, "url": BASE + "/Demo/A.html#" + name}
+        self.raw = pack(data)
+        self.assertIn(name, self.reader().declarations("Demo/A.html"))
+
+    def test_only_a_404_means_the_bundle_is_absent(self):
+        """The transport decides 76 (replan) versus 77 (wait) for a lost pin, so classify exactly."""
+        def raising(error):
+            def urlopen(*args, **kwargs):
+                raise error
+            return urlopen
+
+        url = BASE + "/facts.json.gz"
+        cases = [(urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO()), ArtifactNotFound)]
+        cases += [(urllib.error.HTTPError(url, code, "x", {}, io.BytesIO()), ArtifactError)
+                  for code in (403, 429, 500, 503)]
+        cases += [(urllib.error.URLError("connection refused"), ArtifactError), (TimeoutError("slow"), ArtifactError)]
+        for error, expected in cases:
+            with self.subTest(error=repr(error)), patch("urllib.request.urlopen", side_effect=raising(error)):
+                with self.assertRaises(expected) as caught:
+                    self.real_fetch(url)
+                self.assertIs(type(caught.exception), expected)
+
+    def test_transport_failures_wait_and_a_lost_pin_replans(self):
         pin = self.reader().pin()
         (self.restore(pin).cache_dir / "facts.json.gz").unlink()
         for error in (ArtifactError("HTTP 503"), ArtifactError("timeout"), ArtifactNotFound("HTTP 404")):
@@ -149,7 +194,7 @@ class PagesFactsTests(unittest.TestCase):
         with self.assertRaisesRegex(ArtifactError, "503"):
             self.reader()
 
-    def test_truncated_corrupt_or_invalid_bundle_is_not_legacy_or_empty(self):
+    def test_truncated_corrupt_or_invalid_bundle_is_never_empty(self):
         good = self.raw
         for raw in (good[:-8], good[:-1] + bytes([good[-1] ^ 1]), b"<html>not gzip</html>"):
             self.raw = raw
@@ -167,7 +212,7 @@ class PagesFactsTests(unittest.TestCase):
             self.reader()
 
     def test_emitted_pin_requires_a_durable_local_copy(self):
-        with patch.object(FactsDocs, "_store", return_value=None):
+        with patch.object(docs, "store", return_value=False):
             with self.assertRaisesRegex(ArtifactError, "cannot retain pinned facts"):
                 self.reader().pin()
 
@@ -279,26 +324,53 @@ class PagesFactsTests(unittest.TestCase):
         sibling = target.parent / previous_pin["bundle_file"]
         self.assertEqual(hashlib.sha256(sibling.read_bytes()).hexdigest(), previous_pin["facts_sha256"])
 
-    def test_cli_default_404_uses_legacy_and_503_is_an_infrastructure_wait(self):
+    def test_cli_plan_without_a_bundle_is_an_infrastructure_wait(self):
         self.init_repo()
-        target = self.root / "legacy-plan.json"
-        legacy = Docs(base=BASE)
-        self.error = ArtifactNotFound("HTTP 404")
-        with patch("progress.immutable_docs.Docs", return_value=legacy), \
-             patch("progress.docs.Docs", return_value=legacy), \
-             patch.object(legacy, "source_commit", return_value=self.head), \
-             patch.object(legacy, "declarations", side_effect=lambda page:
-                          self.data["modules"][page.removesuffix(".html") + ".lean"]):
-            self.assertEqual(self.cli_plan(target), 0)
-            self.assertNotIn("documentation", json.loads(target.read_text()))
-            output = self.root / "legacy-facts.json"
-            self.assertEqual(cli.main(["facts", "--plan", str(target), "--code-dir", str(self.code),
-                                       "--out", str(output)]), 0)
-            self.assertEqual(len(json.loads(output.read_text())["declarations"]), 16)
-            self.error = ArtifactError("HTTP 503")
-            unavailable = self.root / "unavailable-plan.json"
-            self.assertEqual(self.cli_plan(unavailable), 77)
-            self.assertFalse(unavailable.exists())
+        for error in (ArtifactNotFound("HTTP 404"), ArtifactError("HTTP 503")):
+            with self.subTest(error=str(error)):
+                self.error = error
+                target = self.root / "unavailable-plan.json"
+                self.assertEqual(self.cli_plan(target), 77)
+                self.assertFalse(target.exists())
+
+    def test_a_plan_without_a_pin_is_replanned(self):
+        self.init_repo()
+        for pin in ({}, {"documentation": None}):
+            with self.subTest(pin=pin):
+                plan_file = self.root / "plan.json"
+                plan_file.write_text(json.dumps({"from_sha": self.first, "to_sha": self.head,
+                                                 "prs": [101], **pin}))
+                self.assertEqual(cli.main(["facts", "--plan", str(plan_file), "--code-dir",
+                                           str(self.code)]), 78)
+        with self.assertRaises(ReplanRequired):
+            facts.collect(self.code, self.first, self.head, pr_numbers=[101])
+
+    def test_source_history_and_pin_plan_mismatch(self):
+        self.init_repo()
+        with self.assertRaisesRegex(ReplanRequired, "source/window history"):
+            facts.collect(self.code, "0" * 40, self.head, docs=self.reader())
+        with self.assertRaisesRegex(ReplanRequired, "differs from plan"):
+            facts.collect(self.code, self.first, self.first, docs=self.reader())
+        self.data["source_commit"] = "c" * 40
+        self.raw = pack(self.data)
+        with self.assertRaisesRegex(ArtifactError, "not in main history"):
+            self.build_plan({101: self.head})
+
+    def test_removed_module_does_not_require_coverage(self):
+        self.init_repo()
+        self.commit("feat: temporary (#102)", {"Demo/Gone.lean": "theorem gone : True := trivial\n"})
+        window.git(["rm", "-q", "Demo/Gone.lean"], self.code)
+        window.git(["commit", "-qm", "remove Gone (#103)"], self.code)
+        self.head = window.head_sha(self.code, "HEAD")
+        self.data["source_commit"] = self.head
+        self.raw = pack(self.data)
+        result = facts.collect(self.code, self.first, self.head, docs=self.reader())
+        self.assertEqual(len(result["declarations"]), 16)
+
+    def test_non_ascii_module_paths_match_git_coverage(self):
+        self.init_repo()
+        head = self.commit("feat: unicode module (#102)", {"Demo/É space.lean": "import Demo.A\n"})
+        self.assertEqual(facts.required_modules(self.code, self.head, head, [102]), ["Demo/É space.lean"])
 
     def test_lost_pinned_copy_replans_on_404_or_complete_changed_schema(self):
         self.init_repo()

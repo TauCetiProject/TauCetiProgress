@@ -54,10 +54,9 @@ the tip. That is the right trade for a document whose whole purpose is to be rea
 records the exact commit, so nothing is misdated.
 
 Links are not computed by this project at all, and neither are declaration names. Both are read from
-compiler-derived documentation facts, or from the guarded declaration index and module pages on
-older deployments. Those facts carry the exact name, kind, source file and line range; canonical
-links come from the producer's documentation output. `git blame` over those line ranges is what decides whether a declaration belongs to the
-window.
+compiler-derived documentation facts, which carry the exact name, kind, canonical link, docstring,
+source file and line range. `git blame` over those line ranges is what decides whether a declaration
+belongs to the window.
 
 There is deliberately no Lean parser here. Qualifying a name correctly means resolving `namespace`
 against `section`, `end`, `open ... in` and `_root_`, and many real declarations (projections,
@@ -75,45 +74,38 @@ those PRs are never reported at all.
 
 ## Documentation generation retries
 
-`plan` and `facts` exit **76** (`EX_DOCS_GENERATION_CHANGED`) when source links positively
-identify different documentation builds. Python callers receive `progress.docs.DocsGenerationChanged`
-with full `expected` and `observed` commit IDs and an optional `page`. The stderr diagnostic starts
-with `<stage>: documentation-generation-changed:` and includes both commits. Neither command writes
-its output artifact on this result. Existing artifacts are preserved; consumers must check the exit
-code before using them.
+`plan` and `facts` exit **76** (`EX_DOCS_GENERATION_CHANGED`) when the documentation positively
+changed under a plan: the live bundle no longer holds the exact bytes a plan pinned and no verified
+local copy remains. Python callers receive `progress.docs.DocsGenerationChanged` with full
+`expected` and `observed` commit IDs. The stderr diagnostic starts with
+`<stage>: documentation-generation-changed:` (or `facts-replan-required:` when the pinned copy is
+gone and the live bundle cannot replace it) and includes both commits when known. Neither command
+writes its output artifact on this result. Existing artifacts are preserved; consumers must check
+the exit code before using them.
 
-Consumers should retry **plan and facts together**, at most twice after the initial attempt, with
-a new isolated `TAUCETI_DOCS_CACHE` directory shared by the two stages of each attempt. Start no
-writing model until both succeed. Persistent churn is an infrastructure wait for the same unadvanced
-report obligation, without spending a repair attempt or report cadence window. Never retry paid prose
-because facts changed. Keep prepared publication artifacts and the published cursor intact.
+Consumers should retry **plan and facts together**, at most twice after the initial attempt. Start
+no writing model until both succeed. Persistent churn is an infrastructure wait for the same
+unadvanced report obligation, without spending a repair attempt or report cadence window. Never
+retry paid prose because facts changed. Keep prepared publication artifacts and the published cursor
+intact.
 
-Other failures retain their existing behavior: a missing extant module, unverifiable or internally
-conflicting source links,
-fetch failure, or invalid factual window is not this retry signal. Missing deleted modules remain
-allowed. The exact planned commit, history, declaration and publication guards still apply. Older
-releases report facts generation changes as ordinary errors, so consumers may recognize the older
-facts diagnostics (`changed from planned commit …` or `was built from …, not …; the site is
-redeploying`) during rollout while keeping other errors fatal. Planning continues to report ordinary
-unreadable documentation as not due (75).
+Other failures are not this retry signal: unavailable documentation (including a site serving no
+bundle) is an infrastructure wait (77), and an invalid factual window is an error (1). Missing
+deleted modules remain allowed. The exact planned commit, history, declaration and publication
+guards still apply.
 
 ## Documentation facts bundles
 
-New plans fetch `<docs base>/facts.json.gz` once. The base is `TAUCETI_DOCS_URL` (default
-`https://taucetiproject.org/docs`), shared with the legacy HTML reader. The
+Each plan fetches `<docs base>/facts.json.gz` once. The base is `TAUCETI_DOCS_URL` (default
+`https://taucetiproject.org/docs`). The
 [TauCeti producer](https://github.com/TauCetiProject/TauCeti/pull/19012) deploys that single gzip
-file beside `SOURCE_SHA` and the HTML it describes. No pointer, manifest, R2 service, separate
-facts-base setting, or additional source probe is needed. The producer
+file beside `SOURCE_SHA` and the HTML it describes, and
 [documents the format](https://github.com/TauCetiProject/TauCeti/blob/0424be258106fab1fc976fe35588a95d74a3e563/scripts/docs-facts.md).
+The bundle is the only source of documentation facts. A site without one (HTTP 404), a bundle with
+an unsupported schema, a fetch error, corrupt gzip/JSON, invalid provenance, or incomplete required
+coverage stops the run as an infrastructure wait (77); none ever becomes empty facts.
 
-With the default `TAUCETI_FACTS_MODE=auto`, HTTP 404 or an explicitly unsupported integer schema
-version selects the strict coherent-generation HTML reader for that new plan. This covers trees
-built before the exporter, or deployed without a bundle after an export failure. Other fetch errors,
-corrupt gzip/JSON, invalid provenance, or incomplete required coverage stop the run; they never
-become empty facts. `TAUCETI_FACTS_MODE=legacy` selects HTML explicitly. The existing `immutable`
-mode requires the bundle and forbids discovery fallback; it does not imply remote retention.
-
-A bundle plan's `documentation` object saves mode `pages`, the documentation origin, documented
+A plan's `documentation` object saves the documentation origin, documented
 source commit, compressed-byte SHA-256, generation identity, and module coverage. Gzip integrity,
 schema, compiler-derived names/kinds/ranges, provenance, source/window history and required module
 coverage are validated. Canonical URLs and docstrings come from the bundle; attribution still
@@ -128,35 +120,27 @@ then the shared cache, without reading the live site when a valid copy is availa
 
 The shared cache uses `TAUCETI_FACTS_CACHE` when set; otherwise it uses
 `$XDG_STATE_HOME/tauceti-progress/facts` or `~/.local/state/tauceti-progress/facts`. Preserve this
-state across mechanical attempts; only the mutable HTML cache needs per-attempt isolation.
-Discovery fetches anew, and plans that end not due do not retain bundles. Shared entries can be
+state across mechanical attempts. Discovery fetches anew, and plans that end not due do not retain bundles. Shared entries can be
 reclaimed after confirming that every retained plan referring to them has its own verified sibling;
 keep each report's plan and bundle together for its lifetime. No automatic cleanup deletes pins.
-The obsolete `TAUCETI_FACTS_BASE` setting is ignored with a diagnostic.
 
 If both local copies are missing or corrupt, facts may fetch the same URL again, accepting it only
 when its hash and source still match. A complete changed bundle, unsupported live schema or HTTP
 404 requests exit 76: the #25 bounded mechanical retry makes a fresh plan for the same unadvanced
-obligation before any writer starts. The fresh plan applies the normal strict discovery policy;
-this is never fallback inside the failed plan. Old/new source and hash diagnostics are included
+obligation before any writer starts. Old/new source and hash diagnostics are included
 when available. Transport errors, truncated/corrupt transfers, new-generation coverage errors or
 retention failures exit 77 for an infrastructure wait. Invalid saved pin/history, contradictory
-coverage or impossible pinned ranges exit 78 for safe recovery; configuration mistakes exit 1.
-No failure changes a report cursor or deletes its artifacts.
+coverage, impossible pinned ranges, or a plan with no documentation pin exit 78 for safe recovery;
+configuration mistakes exit 1. No failure changes a report cursor or deletes its artifacts.
 
-Legacy HTML plans retain their guarded reader. Saved manifest plans remain readable using their
-original exact manifest/bundle pin; new plans never discover that protocol. Prepared reports
-continue to publish against their original source/window identity without consulting live facts.
-The [producer fixture](tests/fixtures/pages-facts/README.md) covers the new protocol; the older
-manifest fixture remains only for compatibility tests.
+Prepared reports publish against their original source/window identity without consulting live
+facts. The [producer fixture](tests/fixtures/pages-facts/README.md) is the producer's real output.
 
-Production cutover requires #19012 to deploy a complete accessible bundle, then a companion Worker
-Progress pin update with bounded exit-76 mechanical retries (including `facts-replan-required`),
-exit-77/78 recovery handling, and retention of `bundle_file` siblings with plans. Until that release,
-keep the existing Worker pin. Verify the endpoint returns a real HTTP 404 on pre-export deployments.
-Use
-an existing naturally due report to verify prepare/publish through the normal Worker path. Do not
-create a synthetic paid round, reset a cursor, or delete retained facts for acceptance or rollback.
+Production use requires the deployed site to serve the bundle, and a Worker Progress pin with
+bounded exit-76 mechanical retries (including `facts-replan-required`), exit-77/78 recovery
+handling, and retention of `bundle_file` siblings with plans. Until the bundle is served, plans wait
+(77). Use an existing naturally due report to verify prepare/publish through the normal Worker path.
+Do not create a synthetic paid round, reset a cursor, or delete retained facts for acceptance.
 
 ## The coverage header
 
