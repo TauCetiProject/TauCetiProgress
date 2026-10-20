@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -46,6 +47,7 @@ class PagesFactsTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, {"TAUCETI_FACTS_CACHE": str(self.cache)}).start()
         patch.object(gh, "gh", side_effect=AssertionError("unexpected GitHub API call")).start()
+        self.real_fetch = Docs._fetch
         patch.object(Docs, "_fetch", side_effect=self.fetch).start()
         patch.object(facts, "LEAN_PREFIX", "Demo/").start()
 
@@ -134,13 +136,23 @@ class PagesFactsTests(unittest.TestCase):
         alpha = self.data["modules"]["Demo/A.lean"]["Demo.alpha"]
         for edit in ({"file": "Demo/Other.lean"}, {"url": "http://["}, {"url": BASE + "/Demo/A.html#wrong"},
                      {"url": BASE + "/Other.html#Demo.alpha"}, {"kind": ""}, {"doc": None},
-                     {"start": 3, "end": 2}, {"start": None}):
+                     {"start": 3, "end": 2}, {"start": None}, {"start": "1"}):
             with self.subTest(edit=edit):
                 data = copy.deepcopy(self.data)
                 data["modules"]["Demo/A.lean"]["Demo.alpha"].update(edit)
                 self.raw = pack(data)
                 with self.assertRaises(ArtifactError):
                     self.reader()
+        # Missing range fields are malformed; explicitly null ones mean doc-gen4 has no range.
+        data = copy.deepcopy(self.data)
+        for key in ("start", "end"):
+            del data["modules"]["Demo/A.lean"]["Demo.alpha"][key]
+        self.raw = pack(data)
+        with self.assertRaisesRegex(ArtifactError, "invalid source range"):
+            self.reader()
+        data["modules"]["Demo/A.lean"]["Demo.alpha"].update(start=None, end=None)
+        self.raw = pack(data)
+        self.assertIsNone(self.reader().declarations("Demo/A.html")["Demo.alpha"]["start"])
         data = copy.deepcopy(self.data)
         data["modules"]["Demo/Empty.lean"]["Demo.alpha"] = alpha
         self.raw = pack(data)
@@ -152,6 +164,24 @@ class PagesFactsTests(unittest.TestCase):
         data["modules"]["Demo/A.lean"][name] = {**alpha, "url": BASE + "/Demo/A.html#" + name}
         self.raw = pack(data)
         self.assertIn(name, self.reader().declarations("Demo/A.html"))
+
+    def test_only_a_404_means_the_bundle_is_absent(self):
+        """The transport decides 76 (replan) versus 77 (wait) for a lost pin, so classify exactly."""
+        def raising(error):
+            def urlopen(*args, **kwargs):
+                raise error
+            return urlopen
+
+        url = BASE + "/facts.json.gz"
+        cases = [(urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO()), ArtifactNotFound)]
+        cases += [(urllib.error.HTTPError(url, code, "x", {}, io.BytesIO()), ArtifactError)
+                  for code in (403, 429, 500, 503)]
+        cases += [(urllib.error.URLError("connection refused"), ArtifactError), (TimeoutError("slow"), ArtifactError)]
+        for error, expected in cases:
+            with self.subTest(error=repr(error)), patch("urllib.request.urlopen", side_effect=raising(error)):
+                with self.assertRaises(expected) as caught:
+                    self.real_fetch(url)
+                self.assertIs(type(caught.exception), expected)
 
     def test_transport_failures_wait_and_a_lost_pin_replans(self):
         pin = self.reader().pin()
