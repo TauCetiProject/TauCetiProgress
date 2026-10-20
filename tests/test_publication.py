@@ -61,8 +61,8 @@ with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROG
 
 # The protocol rejects partial reads, missing permissions, truncated pages and malformed ancestry.
 def page():
-    return [{"data": {"viewer": {"login": "author", "repository": None, "repositories": {
-        "nodes": [{"id": "F", "nameWithOwner": "author/renamed", "owner": {"login": "author"},
+    return [{"data": {"viewer": {"login": "author", "repositories": {
+        "nodes": [{"id": "F", "name": "renamed", "nameWithOwner": "author/renamed", "owner": {"login": "author"},
                    "isFork": True, "isArchived": False, "isLocked": False, "viewerPermission": "WRITE", "parent": {
                        "id": "U", "nameWithOwner": "org/repo", "parent": None}}],
         "pageInfo": {"hasNextPage": False, "endCursor": None}}},
@@ -87,6 +87,27 @@ for change in ("partial", "permission", "pagination", "owner", "ancestry"):
         pass
     else:
         raise AssertionError(change)
+
+# Absence must be provable without asking GitHub for a repository that may not exist: that query
+# answers with a NOT_FOUND error, not a quiet null, which made discovery fail for every actor with
+# no fork yet. The listing covers every owned repository, so a same-named non-fork is a collision.
+def owned(*nodes):
+    data = page()
+    data[0]["data"]["viewer"]["repositories"]["nodes"] = list(nodes)
+    return data
+other = {"id": "O", "name": "notes", "nameWithOwner": "author/notes", "owner": {"login": "author"},
+         "isFork": False, "isArchived": False, "isLocked": False, "viewerPermission": "ADMIN",
+         "parent": None}
+none = discover(lambda _: json.dumps(owned()), "org/repo")
+assert none["fork"] is None and none["absent"] is True, none
+unrelated = discover(lambda _: json.dumps(owned(other)), "org/repo")
+assert unrelated["fork"] is None and unrelated["absent"] is True, unrelated
+same_name = dict(other, name="Repo", nameWithOwner="author/Repo")
+clash = discover(lambda _: json.dumps(owned(same_name)), "org/repo")
+assert clash["fork"] is None and clash["absent"] is False, "a same-named repository blocks creation"
+assert "repository(name:" not in "".join(
+    a for a in (lambda calls: (discover(lambda args: calls.append(args) or json.dumps(owned()),
+                                        "org/repo"), calls[0])[1])([]))
 print("PASS: retained mutation reconciliation and strict fork discovery")
 
 # A successful asynchronous fork response is still pending until it becomes visible.

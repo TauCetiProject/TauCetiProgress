@@ -490,11 +490,21 @@ def test_push_target_prefers_the_canonical_repo():
 
 
 def fork_page(fork=True, permission="WRITE", parent="UPSTREAM", collision=False):
+    # The shape GitHub returns: every repository the actor owns. A collision is a same-named
+    # repository in that listing; there is no `viewer.repository` lookup, because for a missing name
+    # GitHub answers with an error rather than null.
+    nodes = [{"id": "FORK", "name": "roadmap-fork", "nameWithOwner": "someone/roadmap-fork",
+              "owner": {"login": "someone"}, "isFork": True, "isArchived": False, "isLocked": False,
+              "viewerPermission": permission,
+              "parent": {"id": parent, "nameWithOwner": "TauCetiProject/TauCetiRoadmap", "parent": None}}
+             ] if fork else []
+    if collision:
+        nodes.append({"id": "OTHER", "name": "TauCetiRoadmap", "nameWithOwner": "someone/TauCetiRoadmap",
+                      "owner": {"login": "someone"}, "isFork": False, "isArchived": False,
+                      "isLocked": False, "viewerPermission": "ADMIN", "parent": None})
     return [{"data": {
-        "viewer": {"login": "someone", "repository": {"id": "OTHER"} if collision else None,
-                   "repositories": {"nodes": [{"id": "FORK", "nameWithOwner": "someone/roadmap-fork",
-                       "owner": {"login": "someone"}, "isFork": True, "isArchived": False, "isLocked": False, "viewerPermission": permission,
-                       "parent": {"id": parent, "nameWithOwner": "TauCetiProject/TauCetiRoadmap", "parent": None}}] if fork else [],
+        "viewer": {"login": "someone",
+                   "repositories": {"nodes": nodes,
                        "pageInfo": {"hasNextPage": False, "endCursor": None}}},
         "repository": {"id": "UPSTREAM", "nameWithOwner": "TauCetiProject/TauCetiRoadmap", "isPrivate": False}}}]
 
