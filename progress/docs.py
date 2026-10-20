@@ -298,8 +298,9 @@ class Docs:
 
     def _any_module(self):
         """Some module page, for probing the build's source commit."""
+        root = os.environ.get("TAUCETI_LEAN_ROOT", "").replace(".", "/")
         for name in self.index():
             page = self.module_of(name)
-            if page:
+            if page and (not root or page == root + ".html" or page.startswith(root + "/")):
                 return page
-        raise DocsError("the declaration index names no module pages")
+        raise DocsError("the declaration index names no project module pages")

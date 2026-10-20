@@ -88,7 +88,8 @@ def pr_body(plan, section_header, version=None):
     return (
         f"{BODY_MARKER.replace('{}', json.dumps(meta, sort_keys=True, separators=(',', ':')))}\n"
         f"This PR records progress on the {plan['roadmap']} roadmap for the window "
-        f"`{plan['from_sha'][:7]}..{plan['to_sha'][:7]}` of TauCeti `main`, covering "
+        f"`{plan['from_sha'][:7]}..{plan['to_sha'][:7]}` of {gh.CODE_REPO} "
+        f"`{os.environ.get('TAUCETI_BASE_BRANCH', 'main')}`, covering "
         f"{len(plan['prs'])} merged pull requests.\n\n"
         f"`STATUS.md` is rewritten as a snapshot at `{plan['to_sha'][:7]}`; `PROGRESS.md` gains one "
         f"appended section for the window. Both files are machine-owned and their prose is not "
