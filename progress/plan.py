@@ -48,18 +48,6 @@ class NotDue(Exception):
     worker's `EX_NOPROGRESS`, so a round falls through to other work."""
 
 
-def docs_source_commit():
-    """The TauCeti commit the published documentation was built from, or None if unreadable."""
-    from .docs import Docs, DocsError, DocsGenerationChanged
-
-    try:
-        return Docs().source_commit()
-    except DocsGenerationChanged:
-        raise
-    except DocsError:
-        return None
-
-
 def _utcnow():
     return datetime.datetime.now(datetime.timezone.utc)
 

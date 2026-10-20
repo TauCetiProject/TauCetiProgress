@@ -54,9 +54,9 @@ the tip. That is the right trade for a document whose whole purpose is to be rea
 records the exact commit, so nothing is misdated.
 
 Links are not computed by this project at all, and neither are declaration names. Both are read from
-doc-gen4's own published output — the declaration index and each module page, which carry the exact
-name, kind, source file and line range — so a link resolves because it was read from the page it
-points at. `git blame` over those line ranges is what decides whether a declaration belongs to the
+compiler-derived documentation facts, or from the guarded declaration index and module pages on
+older deployments. Those facts carry the exact name, kind, source file and line range; canonical
+links come from the producer's documentation output. `git blame` over those line ranges is what decides whether a declaration belongs to the
 window.
 
 There is deliberately no Lean parser here. Qualifying a name correctly means resolving `namespace`
@@ -119,18 +119,30 @@ schema, compiler-derived names/kinds/ranges, provenance, source/window history a
 coverage are validated. Canonical URLs and docstrings come from the bundle; attribution still
 uses Git blame at its exact source commit. Current HTML may have advanced.
 
-The site serves only the current bundle. Planning must therefore retain its exact bytes locally
-before saving a plan, using atomic cache writes in `TAUCETI_FACTS_CACHE` (default
-`/tmp/tauceti-facts-cache`), keyed by documentation origin, source and hash. Facts verifies and
-uses that copy, without reading the live site. Discovery always fetches anew; a later deployment
-cannot silently replace a saved pin. Do not delete cached bundles while their reports can resume.
+The site serves only the current bundle. Before emitting a selected plan, Progress retains its
+exact compressed bytes, keyed by documentation origin, source and hash. `plan --out FILE` also
+writes a hash-named sibling bundle and records its relative `bundle_file` name in the pin, then
+atomically writes the JSON plan. Both writes flush the file and parent directory. Keep that
+bundle with the plan when moving or retaining report artifacts. Facts verifies the sibling first,
+then the shared cache, without reading the live site when a valid copy is available.
 
-If the local copy is missing or corrupt, facts may fetch the same URL again, accepting it only
-when its hash and source still match. A valid newer bundle returns exit 76 with old/new source
-and hash diagnostics, requesting the #25 bounded mechanical replan of the same unadvanced report
-obligation before any writer starts. Transport/corruption/coverage or cache-retention failures exit
-77 for an infrastructure wait. Invalid saved source/window identity exits 78 for safe recovery;
-configuration mistakes exit 1. No failure changes a report cursor or deletes its artifacts.
+The shared cache uses `TAUCETI_FACTS_CACHE` when set; otherwise it uses
+`$XDG_STATE_HOME/tauceti-progress/facts` or `~/.local/state/tauceti-progress/facts`. Preserve this
+state across mechanical attempts; only the mutable HTML cache needs per-attempt isolation.
+Discovery fetches anew, and plans that end not due do not retain bundles. Shared entries can be
+reclaimed after confirming that every retained plan referring to them has its own verified sibling;
+keep each report's plan and bundle together for its lifetime. No automatic cleanup deletes pins.
+The obsolete `TAUCETI_FACTS_BASE` setting is ignored with a diagnostic.
+
+If both local copies are missing or corrupt, facts may fetch the same URL again, accepting it only
+when its hash and source still match. A complete changed bundle, unsupported live schema or HTTP
+404 requests exit 76: the #25 bounded mechanical retry makes a fresh plan for the same unadvanced
+obligation before any writer starts. The fresh plan applies the normal strict discovery policy;
+this is never fallback inside the failed plan. Old/new source and hash diagnostics are included
+when available. Transport errors, truncated/corrupt transfers, new-generation coverage errors or
+retention failures exit 77 for an infrastructure wait. Invalid saved pin/history, contradictory
+coverage or impossible pinned ranges exit 78 for safe recovery; configuration mistakes exit 1.
+No failure changes a report cursor or deletes its artifacts.
 
 Legacy HTML plans retain their guarded reader. Saved manifest plans remain readable using their
 original exact manifest/bundle pin; new plans never discover that protocol. Prepared reports
@@ -139,7 +151,10 @@ The [producer fixture](tests/fixtures/pages-facts/README.md) covers the new prot
 manifest fixture remains only for compatibility tests.
 
 Production cutover requires #19012 to deploy a complete accessible bundle, then a companion Worker
-Progress pin update with bounded exit-76 mechanical retries and exit-77/78 recovery handling. Use
+Progress pin update with bounded exit-76 mechanical retries (including `facts-replan-required`),
+exit-77/78 recovery handling, and retention of `bundle_file` siblings with plans. Until that release,
+keep the existing Worker pin. Verify the endpoint returns a real HTTP 404 on pre-export deployments.
+Use
 an existing naturally due report to verify prepare/publish through the normal Worker path. Do not
 create a synthetic paid round, reset a cursor, or delete retained facts for acceptance or rollback.
 

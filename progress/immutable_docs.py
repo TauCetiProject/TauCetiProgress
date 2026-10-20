@@ -214,11 +214,19 @@ class FactsDocs:
             try:
                 with os.fdopen(fd, "wb") as output:
                     output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
                 os.replace(tmp, path)
+                directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
             finally:
                 pathlib.Path(tmp).unlink(missing_ok=True)
+            return True
         except OSError:
-            pass  # read-only caches do not invalidate verified data
+            return False  # remote immutable caches remain optional
 
     def source_commit(self):
         return self.commit
@@ -255,88 +263,140 @@ class FactsGenerationChanged(DocsGenerationChanged):
                      f"sha256={digest}; saved copy unavailable; replan the unadvanced window",)
 
 
+class FactsReplanRequired(ArtifactError):
+    """The sole pinned copy is gone and fresh source selection is needed, without moving a cursor."""
+
+
 class PagesDocs(FactsDocs):
-    """One /docs/facts.json.gz response, compatible with TauCeti PR #19012.
+    """A single Pages response, retained with an emitted plan rather than by the publisher."""
 
-    No advertised digest or remote history exists. Gzip CRC/schema validate the initial response;
-    the consumer hashes and retains it. Reloading a plan verifies that hash before using its bytes.
-    """
-
-    def __init__(self, base=None, pin=None, cache_dir=None, opener=None, raw=None):
-        if pin is not None:
-            _require(isinstance(pin, dict), "invalid saved facts bundle pin")
-            _schema(pin, "pin")
-            _require(pin.get("mode") == "pages" and _sha(pin.get("source_commit"), 40)
-                     and _sha(pin.get("facts_sha256"), 64), "invalid saved facts bundle identity")
-            _require("coverage" in pin and "generation" in pin, "incomplete saved facts bundle pin")
-            base = pin.get("docs_base")
-        self.base = base
-        parsed = _url(base, "facts_base")
-        _require(parsed.scheme in ("http", "https") and parsed.netloc
-                 and not parsed.query and not parsed.fragment and not parsed.username,
-                 "invalid facts_base")
+    def __init__(self, base=None, pin=None, cache_dir=None, opener=None, raw=None, bundle_path=None):
+        self._restoring = pin is not None
+        try:
+            if pin is not None:
+                _require(isinstance(pin, dict), "invalid saved facts bundle pin")
+                _schema(pin, "pin")
+                _require(pin.get("mode") == "pages" and _sha(pin.get("source_commit"), 40)
+                         and _sha(pin.get("facts_sha256"), 64), "invalid saved facts bundle identity")
+                _require("coverage" in pin and "generation" in pin, "incomplete saved facts bundle pin")
+                base = pin.get("docs_base")
+            parsed = _url(base, "docs_base")
+            _require(parsed.scheme in ("http", "https") and parsed.netloc
+                     and not parsed.query and not parsed.fragment and not parsed.username,
+                     "invalid docs_base")
+        except ArtifactError as exc:
+            if pin is not None:
+                raise ReplanRequired(str(exc)) from exc
+            raise ConfigurationError(str(exc)) from exc
         self.base = base.rstrip("/")
+        self._bundle_file = pin.get("bundle_file") if pin else None
         self._opener = opener or self._fetch
+        state = pathlib.Path(os.environ.get("XDG_STATE_HOME") or pathlib.Path.home() / ".local/state")
         root = pathlib.Path(cache_dir or os.environ.get("TAUCETI_FACTS_CACHE")
-                            or "/tmp/tauceti-facts-cache")
+                            or state / "tauceti-progress/facts")
         origin = root / hashlib.sha256(self.base.encode()).hexdigest() / "pages"
-        from_cache = False
+        self._retained = False
         if pin is not None:
-            path = origin / pin["source_commit"] / pin["facts_sha256"] / "facts.json.gz"
-            try:
-                cached = path.read_bytes()
-            except OSError:
-                cached = None
-            if cached is not None and hashlib.sha256(cached).hexdigest() == pin["facts_sha256"]:
-                raw = cached
-                from_cache = True
+            cache_path = origin / pin["source_commit"] / pin["facts_sha256"] / "facts.json.gz"
+            for path in (bundle_path, cache_path):
+                if path is not None:
+                    cached = self._verified_copy(pathlib.Path(path), pin["facts_sha256"])
+                    if cached is not None:
+                        raw = cached
+                        self._retained = True
+                        break
         if raw is None:
-            raw = self._opener(self.base + "/facts.json.gz")
+            try:
+                raw = self._opener(self.base + "/facts.json.gz")
+            except ArtifactNotFound as exc:
+                if pin is not None:
+                    raise FactsReplanRequired(
+                        f"pinned facts unavailable: source={pin['source_commit']} "
+                        f"sha256={pin['facts_sha256']}; live bundle returned 404; "
+                        "replan the unadvanced window") from exc
+                raise
         _require(isinstance(raw, bytes), "facts.json.gz: expected binary response")
         digest = hashlib.sha256(raw).hexdigest()
         try:
-            data = _json(gzip.decompress(raw), "facts.json.gz")
-        except (OSError, EOFError, zlib.error) as exc:
-            raise ArtifactError(f"facts.json.gz: truncated or invalid gzip: {exc}") from exc
-        version = data.get("schema_version")
-        _require(type(version) is int, "facts.json.gz: invalid schema_version")
-        if version != 1:
-            raise UnsupportedFactsSchema(f"facts.json.gz advertises unsupported schema {version}")
-        self.commit = data.get("source_commit")
-        _require(_sha(self.commit, 40), "facts.json.gz: invalid source_commit")
-        provenance = data.get("provenance")
-        _require(isinstance(provenance, dict) and all(isinstance(provenance.get(k), str)
-                 and provenance[k] for k in ("toolchain", "doc_gen")),
-                 "facts.json.gz: missing toolchain/doc-gen provenance")
-        modules = data.get("modules")
-        _require(isinstance(modules, dict) and modules and all(_source_path(p) for p in modules),
-                 "facts.json.gz: invalid module coverage")
-        self.modules = sorted(modules)
-        self.facts_hash = digest
-        self.generation = f"pages/{self.commit}/{digest}"
-        self._load_modules(data)
-        if pin is not None:
-            if digest != pin["facts_sha256"] or self.commit != pin["source_commit"]:
-                raise FactsGenerationChanged(pin, self.commit, digest)
-            self._check_pin(pin)
-        self.cache_dir = origin / self.commit / digest
-        if from_cache:
-            return
-        # Saving a plan must retain the sole copy the publisher no longer guarantees to serve.
-        # A failed cache write is fatal for this protocol (unlike remote immutable generations).
-        path = self.cache_dir / "facts.json.gz"
-        self._store(path, raw)
+            try:
+                data = _json(gzip.decompress(raw), "facts.json.gz")
+            except (OSError, EOFError, zlib.error) as exc:
+                raise ArtifactError(f"facts.json.gz: truncated or invalid gzip: {exc}") from exc
+            version = data.get("schema_version")
+            _require(type(version) is int, "facts.json.gz: invalid schema_version")
+        except ArtifactError as exc:
+            if pin is not None and digest == pin["facts_sha256"]:
+                raise ReplanRequired(f"invalid hash-verified saved facts: {exc}") from exc
+            raise
+        # A complete, differently hashed response cannot replace this pin. Replanning applies the
+        # discovery policy afresh (including 404/unsupported-schema HTML compatibility), while a
+        # corrupt/truncated transfer above remains a transport/integrity wait.
+        if pin is not None and digest != pin["facts_sha256"]:
+            if version == 1 and _sha(data.get("source_commit"), 40):
+                raise FactsGenerationChanged(pin, data["source_commit"], digest)
+            raise FactsReplanRequired(
+                f"pinned facts unavailable: source={pin['source_commit']} sha256={pin['facts_sha256']}; "
+                f"live bundle sha256={digest} schema={version}; replan the unadvanced window")
         try:
-            retained = path.read_bytes()
-        except OSError as exc:
-            raise ArtifactError(f"cannot retain pinned facts at {path}: {exc}") from exc
-        _require(hashlib.sha256(retained).hexdigest() == digest,
-                 f"cannot retain complete pinned facts at {path}")
+            if version != 1:
+                raise UnsupportedFactsSchema(f"facts.json.gz advertises unsupported schema {version}")
+            self.commit = data.get("source_commit")
+            _require(_sha(self.commit, 40), "facts.json.gz: invalid source_commit")
+            provenance = data.get("provenance")
+            _require(isinstance(provenance, dict) and all(isinstance(provenance.get(k), str)
+                     and provenance[k] for k in ("toolchain", "doc_gen")),
+                     "facts.json.gz: missing toolchain/doc-gen provenance")
+            modules = data.get("modules")
+            _require(isinstance(modules, dict) and modules and all(_source_path(p) for p in modules),
+                     "facts.json.gz: invalid module coverage")
+            self.modules = sorted(modules)
+            self.facts_hash = digest
+            self.generation = f"pages/{self.commit}/{digest}"
+            self._load_modules(data)
+            if pin is not None:
+                _require(self.commit == pin["source_commit"],
+                         "saved source commit contradicts the pinned facts hash")
+                self._check_pin(pin)
+        except ArtifactError as exc:
+            if pin is not None:
+                raise ReplanRequired(str(exc)) from exc
+            raise
+        self._raw = raw
+        self.cache_dir = origin / self.commit / digest
+
+    @staticmethod
+    def _verified_copy(path, digest):
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return None
+        return raw if hashlib.sha256(raw).hexdigest() == digest else None
+
+    def retain(self, path=None):
+        """Retain only selected plans. Explicit paths tie a bundle's lifetime to its plan artifact."""
+        if path is None and self._retained:
+            return
+        path = pathlib.Path(path) if path is not None else self.cache_dir / "facts.json.gz"
+        if self._verified_copy(path, self.facts_hash) is None:
+            _require(self._store(path, self._raw), f"cannot retain pinned facts at {path}")
+            _require(self._verified_copy(path, self.facts_hash) is not None,
+                     f"cannot retain complete pinned facts at {path}")
+        self._retained = True
+
+    def require_coverage(self, paths):
+        try:
+            super().require_coverage(paths)
+        except ArtifactError as exc:
+            if self._restoring:
+                raise ReplanRequired(str(exc)) from exc
+            raise
 
     def pin(self):
+        self.retain()
         return {"mode": "pages", "schema_version": 1, "docs_base": self.base,
                 "source_commit": self.commit, "generation": self.generation,
-                "facts_sha256": self.facts_hash, "coverage": self.modules}
+                "facts_sha256": self.facts_hash, "coverage": self.modules,
+                **({"bundle_file": self._bundle_file} if self._bundle_file else {})}
 
 
 def discover(base=None, cache_dir=None, opener=None):
@@ -344,6 +404,9 @@ def discover(base=None, cache_dir=None, opener=None):
     mode = os.environ.get("TAUCETI_FACTS_MODE", "auto")
     if mode not in ("auto", "legacy", "immutable"):
         raise ConfigurationError(f"unknown TAUCETI_FACTS_MODE: {mode}")
+    if os.environ.get("TAUCETI_FACTS_BASE"):
+        print("documentation: TAUCETI_FACTS_BASE is obsolete and ignored; use TAUCETI_DOCS_URL",
+              file=sys.stderr)
     legacy = Docs()
     if mode == "legacy":
         return legacy

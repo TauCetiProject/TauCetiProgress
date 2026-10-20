@@ -20,5 +20,5 @@ The producer publishes only `<docs base>/facts.json.gz`. Tests gzip these exact 
 the real payload, and derive broken/deployment scenarios from it. Git integration tests commit the
 source fixture to a temporary repository and substitute that local commit as `source_commit`,
 without parsing declarations or running Lean. There is no manifest, current pointer, immutable
-remote URL, R2 base, or GitHub API read in this protocol. Report pins retain compressed bytes in
-an origin/source/hash cache on the consumer.
+remote URL, R2 base, or GitHub API read in this protocol. Report pins retain compressed bytes beside saved plans and in
+a durable origin/source/hash cache on the consumer.

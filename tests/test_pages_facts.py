@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,17 +17,21 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from progress import apply, cli, facts, gh, plan, window
 from progress.docs import Docs, DocsGenerationChanged
 from progress.immutable_docs import (ArtifactError, ArtifactNotFound, ConfigurationError,
-                                     FactsDocs, PagesDocs, discover)
+                                     FactsDocs, PagesDocs, FactsReplanRequired, ReplanRequired, discover)
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures/pages-facts"
 BASE = "https://taucetiproject.org/docs"
 
 
-def pack(data):
+def gzip_bytes(raw):
     buffer = io.BytesIO()
     with gzip.GzipFile(filename="", fileobj=buffer, mode="wb", compresslevel=9, mtime=0) as stream:
-        stream.write(json.dumps(data, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+        stream.write(raw)
     return buffer.getvalue()
+
+
+def pack(data):
+    return gzip_bytes(json.dumps(data, sort_keys=True, separators=(",", ":")).encode() + b"\n")
 
 
 class PagesFactsTests(unittest.TestCase):
@@ -36,7 +41,7 @@ class PagesFactsTests(unittest.TestCase):
         self.root = pathlib.Path(self.tmp.name)
         self.cache = self.root / "cache"
         self.data = json.loads((FIXTURE / "facts.json").read_bytes())
-        self.raw = pack(self.data)
+        self.raw = gzip_bytes((FIXTURE / "facts.json").read_bytes())
         self.requests = []
         self.error = None
         self.addCleanup(patch.stopall)
@@ -60,6 +65,7 @@ class PagesFactsTests(unittest.TestCase):
 
     def test_real_producer_fixture_is_one_response_and_preserves_generated_facts(self):
         reader = self.reader()
+        self.assertEqual(gzip.decompress(self.raw), (FIXTURE / "facts.json").read_bytes())
         self.assertEqual(self.requests, [BASE + "/facts.json.gz"])
         self.assertEqual(reader.pin()["facts_sha256"], hashlib.sha256(self.raw).hexdigest())
         self.assertEqual((reader.cache_dir / "facts.json.gz").read_bytes(), self.raw)
@@ -95,6 +101,7 @@ class PagesFactsTests(unittest.TestCase):
 
     def test_lost_or_corrupt_copy_can_be_refetched_only_if_hash_agrees(self):
         old = self.reader()
+        old.pin()
         path = old.cache_dir / "facts.json.gz"
         path.write_bytes(b"corrupt")
         self.assertEqual(self.restore(old.pin()).pin(), old.pin())
@@ -136,7 +143,7 @@ class PagesFactsTests(unittest.TestCase):
         (self.restore(pin).cache_dir / "facts.json.gz").unlink()
         for error in (ArtifactError("HTTP 503"), ArtifactError("timeout"), ArtifactNotFound("HTTP 404")):
             self.error = error
-            with self.assertRaises(ArtifactError):
+            with self.assertRaises(FactsReplanRequired if isinstance(error, ArtifactNotFound) else ArtifactError):
                 self.restore(pin)
         self.error = ArtifactError("HTTP 503")
         with self.assertRaisesRegex(ArtifactError, "503"):
@@ -159,15 +166,32 @@ class PagesFactsTests(unittest.TestCase):
         with self.assertRaisesRegex(ArtifactError, "duplicate JSON key"):
             self.reader()
 
-    def test_discovery_requires_a_durable_local_copy(self):
+    def test_emitted_pin_requires_a_durable_local_copy(self):
         with patch.object(FactsDocs, "_store", return_value=None):
             with self.assertRaisesRegex(ArtifactError, "cannot retain pinned facts"):
-                self.reader()
+                self.reader().pin()
 
     def test_saved_pin_coverage_is_verified(self):
         pin = self.reader().pin()
         pin["coverage"] = []
         with self.assertRaisesRegex(ArtifactError, "coverage changed"):
+            self.restore(pin)
+
+    def test_default_cache_uses_persistent_state(self):
+        state = self.root / "state"
+        with patch.dict(os.environ, {"TAUCETI_FACTS_CACHE": "", "XDG_STATE_HOME": str(state)}):
+            reader = discover(base=BASE)
+            reader.pin()
+        self.assertTrue(reader.cache_dir.is_relative_to(state / "tauceti-progress/facts"))
+        pin = self.reader().pin()
+        pin["source_commit"] = "b" * 40
+        # Equal bytes/hash prove this is a corrupt saved identity, not deployment churn.
+        with self.assertRaisesRegex(ReplanRequired, "contradicts the pinned facts hash"):
+            self.restore(pin)
+        self.raw = b"invalid gzip named by an invalid saved pin"
+        pin["source_commit"] = self.data["source_commit"]
+        pin["facts_sha256"] = hashlib.sha256(self.raw).hexdigest()
+        with self.assertRaisesRegex(ReplanRequired, "invalid hash-verified saved facts"):
             self.restore(pin)
 
     def init_repo(self):
@@ -199,6 +223,113 @@ class PagesFactsTests(unittest.TestCase):
             return plan.build_plan(self.roadmap, self.code, ref="main", min_prs=1,
                                    commits=[], open_prs=[], docs=self.reader())
 
+    def cli_plan(self, target, min_prs=1):
+        with patch.object(plan, "_own_login", return_value="tester"), \
+             patch.object(gh, "recent_roadmap_commits", return_value=[]), \
+             patch.object(gh, "open_progress_prs", return_value=[]), \
+             patch.object(gh, "closed_prs_for_area", return_value={101: self.head}):
+            return cli.main(["plan", "--roadmap-dir", str(self.roadmap), "--code-dir", str(self.code),
+                             "--ref", "main", "--min-prs", str(min_prs), "--out", str(target)])
+
+    def test_cli_plan_keeps_its_bundle_across_cache_loss_and_artifact_relocation(self):
+        self.init_repo()
+        target = self.root / "reports/plan.json"
+        self.assertEqual(self.cli_plan(target), 0)
+        p = json.loads(target.read_text())
+        bundle = target.parent / p["documentation"]["bundle_file"]
+        self.assertEqual(hashlib.sha256(bundle.read_bytes()).hexdigest(),
+                         p["documentation"]["facts_sha256"])
+        shutil.rmtree(self.cache)
+        relocated = self.root / "relocated"
+        shutil.copytree(target.parent, relocated)
+        shutil.rmtree(target.parent)
+        self.error = ArtifactError("origin offline")
+        self.requests.clear()
+        output = self.root / "facts.json"
+        self.assertEqual(cli.main(["facts", "--plan", str(relocated / "plan.json"), "--code-dir",
+                                   str(self.code), "--out", str(output)]), 0)
+        self.assertEqual(json.loads(output.read_text())["documentation"], p["documentation"])
+        self.assertEqual(self.requests, [])
+
+    def test_not_due_discovery_does_not_accumulate_bundles(self):
+        self.init_repo()
+        target = self.root / "reports/plan.json"
+        self.assertEqual(self.cli_plan(target, min_prs=2), 75)
+        self.assertFalse(self.cache.exists())
+        self.assertFalse(target.parent.exists())
+
+    def test_failed_atomic_plan_replacement_preserves_the_previous_pin_and_bundle(self):
+        self.init_repo()
+        target = self.root / "reports/plan.json"
+        self.assertEqual(self.cli_plan(target), 0)
+        previous = target.read_bytes()
+        previous_pin = json.loads(previous)["documentation"]
+        self.data["provenance"]["doc_gen"] += "-next-export"
+        self.raw = pack(self.data)
+        replace = os.replace
+
+        def interrupted(source, destination):
+            if pathlib.Path(destination) == target:
+                raise OSError("interrupted plan rename")
+            return replace(source, destination)
+
+        with patch("os.replace", side_effect=interrupted):
+            self.assertEqual(self.cli_plan(target), 77)
+        self.assertEqual(target.read_bytes(), previous)
+        sibling = target.parent / previous_pin["bundle_file"]
+        self.assertEqual(hashlib.sha256(sibling.read_bytes()).hexdigest(), previous_pin["facts_sha256"])
+
+    def test_cli_default_404_uses_legacy_and_503_is_an_infrastructure_wait(self):
+        self.init_repo()
+        target = self.root / "legacy-plan.json"
+        legacy = Docs(base=BASE)
+        self.error = ArtifactNotFound("HTTP 404")
+        with patch("progress.immutable_docs.Docs", return_value=legacy), \
+             patch("progress.docs.Docs", return_value=legacy), \
+             patch.object(legacy, "source_commit", return_value=self.head), \
+             patch.object(legacy, "declarations", side_effect=lambda page:
+                          self.data["modules"][page.removesuffix(".html") + ".lean"]):
+            self.assertEqual(self.cli_plan(target), 0)
+            self.assertNotIn("documentation", json.loads(target.read_text()))
+            output = self.root / "legacy-facts.json"
+            self.assertEqual(cli.main(["facts", "--plan", str(target), "--code-dir", str(self.code),
+                                       "--out", str(output)]), 0)
+            self.assertEqual(len(json.loads(output.read_text())["declarations"]), 16)
+            self.error = ArtifactError("HTTP 503")
+            unavailable = self.root / "unavailable-plan.json"
+            self.assertEqual(self.cli_plan(unavailable), 77)
+            self.assertFalse(unavailable.exists())
+
+    def test_lost_pinned_copy_replans_on_404_or_complete_changed_schema(self):
+        self.init_repo()
+        pin = self.reader().pin()
+        (self.restore(pin).cache_dir / "facts.json.gz").unlink()
+        target, output = self.root / "plan.json", self.root / "facts.json"
+        p = {"from_sha": self.first, "to_sha": self.head, "prs": [101], "documentation": pin}
+        target.write_text(json.dumps(p))
+        argv = ["facts", "--plan", str(target), "--code-dir", str(self.code), "--out", str(output)]
+        self.error = ArtifactNotFound("HTTP 404")
+        self.assertEqual(cli.main(argv), 76)
+        self.error = None
+        self.raw = pack({**self.data, "schema_version": 2})
+        self.assertEqual(cli.main(argv), 76)
+        self.raw = pack({**self.data, "provenance": {}})
+        self.assertEqual(cli.main(argv), 76)
+        self.assertEqual(self.cli_plan(self.root / "bad-discovery.json"), 77)
+        self.raw = self.raw[:-8]
+        self.assertEqual(cli.main(argv), 77)
+        self.assertFalse(output.exists())
+        self.assertEqual(json.loads(target.read_text()), p)
+
+    def test_invalid_history_is_rejected_before_a_pin_fetch(self):
+        self.init_repo()
+        pin = self.reader().pin()
+        (self.restore(pin).cache_dir / "facts.json.gz").unlink()
+        self.requests.clear()
+        with self.assertRaises(ReplanRequired):
+            facts.collect(self.code, "0" * 40, self.head, pr_numbers=[101], documentation=pin)
+        self.assertEqual(self.requests, [])
+
     def test_missing_required_empty_module_refuses_plan_and_facts_without_output(self):
         self.init_repo()
         del self.data["modules"]["Demo/Empty.lean"]
@@ -210,7 +341,7 @@ class PagesFactsTests(unittest.TestCase):
         plan_file, output = self.root / "plan.json", self.root / "facts.json"
         plan_file.write_text(json.dumps(p))
         self.assertEqual(cli.main(["facts", "--plan", str(plan_file), "--code-dir", str(self.code),
-                                   "--out", str(output)]), 77)
+                                   "--out", str(output)]), 78)
         self.assertFalse(output.exists())
         self.assertEqual(json.loads(plan_file.read_text()), p)
 
