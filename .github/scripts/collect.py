@@ -102,35 +102,6 @@ def gh_api_paged(path):
     return out
 
 
-def gh_api_paged_field(path, field):
-    """Every page of an endpoint that wraps its list in an object, flattened.
-
-    `/check-runs` answers `{"total_count": N, "check_runs": [...]}` rather than a bare array, so the
-    pages are concatenated JSON *objects*. Same decoding discipline as `gh_api_paged`; only the
-    unwrapping differs.
-    """
-    proc = subprocess.run(["gh", "api", "--paginate", path], capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise CollectError(f"gh api --paginate {path} failed: {proc.stderr.strip()}")
-    text = proc.stdout.strip()
-    if not text:
-        return []
-    decoder = json.JSONDecoder()
-    out, idx = [], 0
-    while idx < len(text):
-        try:
-            page, end = decoder.raw_decode(text, idx)
-        except json.JSONDecodeError as exc:
-            raise CollectError(f"could not parse paginated output of {path}: {exc}") from exc
-        if not isinstance(page, dict):
-            raise CollectError(f"{path} returned a {type(page).__name__}, expected an object")
-        out.extend(page.get(field) or [])
-        idx = end
-        while idx < len(text) and text[idx].isspace():
-            idx += 1
-    return out
-
-
 def blob_text(repo, sha):
     """A blob's contents, by SHA. Empty string when there is no SHA."""
     if not sha:
@@ -404,22 +375,6 @@ def main(argv=None):
             # Only for a first report, so at most once per roadmap ever.
             expected_bootstrap = bootstrap_cursor(area)
 
-    # Only check-runs, and only from the head we pinned. Commit statuses are deliberately NOT
-    # collected: any repository writer can POST one under any context, so they are not evidence, and
-    # the gate refuses them if they somehow appear.
-    check_runs = []
-    runs = gh_api_paged_field(f"repos/{args.repo}/commits/{head_sha}/check-runs?per_page=100",
-                              "check_runs")
-    for run in runs:
-        check_runs.append({
-            "name": run.get("name"),
-            "head_sha": head_sha,
-            "conclusion": run.get("conclusion"),
-            "status": run.get("status"),
-            "app_id": ((run.get("app") or {}).get("id")),
-            "source": "check_run",
-        })
-
     bundle = {
         "base_repo": args.repo,
         "code_window": resolve_window(new_progress),
@@ -443,11 +398,10 @@ def main(argv=None):
         # Recorded so the gate can confirm the baseline came from the directory being changed.
         "old_paths": old_paths,
         "current_main_cursor": current_cursor,
-        "check_runs": check_runs,
     }
     pathlib.Path(args.out).write_text(json.dumps(bundle, indent=2), encoding="utf-8")
     print(f"collected: area={area or '(none)'} head={head_sha[:7]} main={main_sha[:7]} "
-          f"status={status} behind={behind} files={len(changed)} checks={len(check_runs)}")
+          f"status={status} behind={behind} files={len(changed)}")
     return 0
 
 
