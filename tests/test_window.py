@@ -349,9 +349,11 @@ def make_roadmap(root, areas):
 def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge_shas=None, **kw):
     """`build_plan` with the network stubbed: a fixed documented build and fixed area labels."""
     from progress import gh as gh_mod, plan as plan_mod
-    orig_docs, orig_labels = plan_mod.docs_source_commit, gh_mod.closed_prs_for_area
+    from progress import immutable_docs
+    from types import SimpleNamespace
+    orig_docs, orig_labels = immutable_docs.discover, gh_mod.closed_prs_for_area
     orig_login = plan_mod._own_login
-    plan_mod.docs_source_commit = lambda: docs_sha
+    immutable_docs.discover = lambda: SimpleNamespace(source_commit=lambda: docs_sha)
     plan_mod._own_login = lambda: "test-user"
     gh_mod.closed_prs_for_area = lambda area, **_: {
         n: (merge_shas or {}).get(n) for n in area_prs.get(area, [])}
@@ -362,7 +364,7 @@ def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge
                       "messageHeadline": "progress: X (2026-01-01)"}],
             open_prs=[], ref=ref, min_prs=1, **kw)
     finally:
-        plan_mod.docs_source_commit, gh_mod.closed_prs_for_area = orig_docs, orig_labels
+        immutable_docs.discover, gh_mod.closed_prs_for_area = orig_docs, orig_labels
         plan_mod._own_login = orig_login
 
 

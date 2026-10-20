@@ -50,10 +50,11 @@ with tempfile.TemporaryDirectory() as tmp:
         assert "invalid window" in err.getvalue() and not out.exists()
 
     # A mixed probe page can also fail planning; do not downgrade its typed result to NotDue.
-    with patch("progress.docs.Docs") as factory:
+    with patch("progress.immutable_docs.discover") as factory, \
+         patch.object(plan, "_own_login", return_value="tester"):
         factory.return_value.source_commit.side_effect = DocsGenerationChanged(OLD, NEW)
         try:
-            plan.docs_source_commit()
+            plan.build_plan(tmp, tmp, commits=[], open_prs=[])
         except DocsGenerationChanged:
             pass
         else:
@@ -81,8 +82,14 @@ with tempfile.TemporaryDirectory() as tmp:
     else:
         raise AssertionError("mixed source links must never choose a generation")
 
-    with patch("progress.docs.Docs", return_value=reader):
-        assert plan.docs_source_commit() is None
+    with patch("progress.immutable_docs.discover", return_value=reader), \
+         patch.object(plan, "_own_login", return_value="tester"):
+        try:
+            plan.build_plan(tmp, tmp, commits=[], open_prs=[])
+        except plan.NotDue:
+            pass
+        else:
+            raise AssertionError("an unreadable legacy build must remain not due")
     with patch.object(plan, "build_plan", side_effect=plan.NotDue("documentation could not be read")):
         with contextlib.redirect_stderr(io.StringIO()):
             assert cli.main(["plan", "--code-dir", tmp, "--roadmap-dir", tmp]) == 75

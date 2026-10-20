@@ -1,4 +1,4 @@
-"""D0 wire fixture, generation races, integrity failures, and plan/facts integration."""
+"""Historical saved manifest plans: exact artifact validation and resume compatibility."""
 import copy
 import gzip
 import hashlib
@@ -15,7 +15,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from progress import apply, cli, facts, gh, plan, window
 from progress.docs import Docs
-from progress.immutable_docs import ArtifactError, ArtifactNotFound, ConfigurationError, FactsDocs, discover
+from progress.immutable_docs import (ArtifactError, ArtifactNotFound, ConfigurationError,
+                                     FactsDocs)
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures/facts-v1"
 BASE = "https://facts.example/progress"
@@ -55,7 +56,7 @@ class ImmutableDocsTests(unittest.TestCase):
                         for p in (FIXTURE / "v1").rglob("*") if p.is_file()}
         self.requests = []
         self.addCleanup(patch.stopall)
-        patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "auto", "TAUCETI_FACTS_BASE": BASE,
+        patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "auto",
                                 "TAUCETI_FACTS_CACHE": str(self.cache)}).start()
         # Neither the immutable reader nor facts may introduce provider calls.
         patch.object(gh, "gh", side_effect=AssertionError("unexpected GitHub API traffic")).start()
@@ -70,7 +71,9 @@ class ImmutableDocsTests(unittest.TestCase):
             raise ArtifactNotFound("object unavailable: " + rel)
 
     def reader(self):
-        return discover(BASE, cache_dir=self.cache, opener=self.fetch)
+        pointer = json.loads(self.objects["v1/current.json"])
+        return FactsDocs({**pointer, "mode": "immutable", "facts_base": BASE},
+                         cache_dir=self.cache, opener=self.fetch)
 
     def pinned(self, pin):
         return FactsDocs(pin, cache_dir=self.cache, opener=self.fetch)
@@ -105,24 +108,12 @@ class ImmutableDocsTests(unittest.TestCase):
         self.assertEqual(self.pinned(pin).declarations("TauCeti/A.html"),
                          old.declarations("TauCeti/A.html"))
         self.assertNotIn("v1/current.json", self.requests)
-        # Pointer replacement after the GET, before fetching the manifest, is harmless too.
-        self.objects["v1/current.json"] = encoded({k: v for k, v in pin.items()
-                                                   if k in ("schema_version", "source_commit",
-                                                            "manifest_path", "manifest_sha256")})
-        def racing_fetch(url):
-            raw = self.fetch(url)
-            if url.endswith("current.json"):
-                self.objects.update(generation(data))
-            return raw
-        self.assertEqual(discover(BASE, cache_dir=self.cache, opener=racing_fetch).pin(), pin)
-
     def test_cached_pin_works_when_pointer_and_origin_are_unavailable(self):
         old = self.reader()
         self.objects.clear()
         self.requests.clear()
         self.assertEqual(self.pinned(old.pin()).pin(), old.pin())
         self.assertEqual(self.requests, [])
-        self.assertIsInstance(self.reader(), Docs)  # no generation selected in a new plan
 
     def test_cache_from_another_origin_is_never_reused(self):
         pin = self.reader().pin()
@@ -130,57 +121,6 @@ class ImmutableDocsTests(unittest.TestCase):
         with self.assertRaisesRegex(ArtifactError, "other origin"):
             FactsDocs(pin, cache_dir=self.cache,
                       opener=lambda url: (_ for _ in ()).throw(ArtifactError("other origin unavailable")))
-
-    def test_unsupported_or_unavailable_pointer_uses_legacy(self):
-        for raw in (b'{"schema_version":2}',):
-            self.objects["v1/current.json"] = raw
-            self.assertIsInstance(self.reader(), Docs)
-        with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "legacy"}):
-            self.requests.clear()
-            self.assertIsInstance(self.reader(), Docs)
-            self.assertEqual(self.requests, [])
-
-    def test_pointer_http_errors_are_distinct_from_absence(self):
-        for status in (403, 429, 500):
-            with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
-                    BASE, status, "unavailable", None, None)):
-                with self.assertRaises(ArtifactError):
-                    discover(BASE)
-        with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
-                BASE, 404, "not found", None, None)):
-            self.assertIsInstance(discover(BASE), Docs)
-            with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "immutable"}):
-                with self.assertRaisesRegex(ArtifactError, "immutable facts are required"):
-                    discover(BASE)
-
-    def test_strict_mode_and_invalid_configuration(self):
-        with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "immutable"}):
-            self.objects["v1/current.json"] = b'{"schema_version":2}'
-            with self.assertRaisesRegex(ArtifactError, "immutable facts are required"):
-                self.reader()
-        with patch.dict(os.environ, {"TAUCETI_FACTS_MODE": "typo"}):
-            with self.assertRaises(ConfigurationError):
-                self.reader()
-
-    def test_supported_pointer_failures_never_fall_back(self):
-        pointer = json.loads(self.objects["v1/current.json"])
-        for edit in ({"manifest_sha256": "0" * 64}, {"source_commit": "b" * 40},
-                     {"manifest_path": "https://other.example/manifest.json"},
-                     {"manifest_path": "../manifest.json"}):
-            with self.subTest(edit=edit):
-                self.objects["v1/current.json"] = encoded({**pointer, **edit})
-                with self.assertRaises(ArtifactError):
-                    self.reader()
-        self.objects["v1/current.json"] = b"{truncated"
-        with self.assertRaisesRegex(ArtifactError, "JSON"):
-            self.reader()
-        for raw in (b'{}', b'{"schema_version":"1"}', b'{"schema_version":true}'):
-            self.objects["v1/current.json"] = raw
-            with self.assertRaisesRegex(ArtifactError, "schema_version"):
-                self.reader()
-        self.objects["v1/current.json"] = b'{"schema_version":1,"schema_version":2}'
-        with self.assertRaisesRegex(ArtifactError, "duplicate JSON key"):
-            self.reader()
 
     def test_manifest_schema_source_lengths_hash_and_coverage(self):
         for edit in ({"schema_version": 2}, {"source_commit": "b" * 40},
@@ -307,9 +247,7 @@ class ImmutableDocsTests(unittest.TestCase):
 
     def test_plan_persists_pin_and_cli_uses_it_after_cutover(self):
         self.repo()
-        # Exercise configured discovery as well as direct reader injection.
-        with patch.object(FactsDocs, "_fetch", side_effect=self.fetch):
-            p = self.build_plan(None)
+        p = self.build_plan(self.reader())
         self.assertEqual(p["documentation"]["coverage"], ["TauCeti/A.lean", "TauCeti/Empty.lean"])
         plan_file, output = self.root / "plan.json", self.root / "facts.json"
         plan_file.write_text(plan.plan_json(p))

@@ -146,7 +146,7 @@ def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None):
     return [path for path in touched if path in present]
 
 
-def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None):
+def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None, bundle_path=None):
     """The factual spine of a window.
 
     `to_sha` is the documented window end chosen by the plan. The documentation must still describe
@@ -154,15 +154,22 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
     past pull requests whose declarations were never inspected.
     """
     from .docs import Docs, DocsError, DocsGenerationChanged, DocsNotFound
-    from .immutable_docs import ArtifactError, FactsDocs, ReplanRequired
+    from .immutable_docs import ArtifactError, FactsDocs, PagesDocs, ReplanRequired
 
     if documentation is not None:
-        if not isinstance(documentation, dict) or documentation.get("mode") != "immutable":
+        if not isinstance(documentation, dict) or documentation.get("mode") not in ("immutable", "pages"):
             raise ReplanRequired("invalid saved documentation pin; replan the window")
-        docs = FactsDocs(documentation)
+        # Reject local plan/history contradictions before an unavailable copy can cause a fetch
+        # or acquire the mechanical deployment-retry signal.
+        if documentation.get("source_commit") != to_sha or not window.has_commit(repo_dir, to_sha) \
+                or not window.has_commit(repo_dir, from_sha) \
+                or not window.is_ancestor(repo_dir, from_sha, to_sha):
+            raise ReplanRequired("pinned facts source/window history mismatch; replan the window")
+        docs = (PagesDocs(pin=documentation, bundle_path=bundle_path) if documentation["mode"] == "pages"
+                else FactsDocs(documentation))
     docs = docs or Docs()  # saved legacy plans never discover a new source
     immutable = isinstance(docs, FactsDocs)
-    if immutable:
+    if immutable and documentation is None:
         if not window.has_commit(repo_dir, to_sha) or not window.has_commit(repo_dir, from_sha) \
                 or not window.is_ancestor(repo_dir, from_sha, to_sha):
             raise ReplanRequired("pinned facts source/window history mismatch; replan the window")
@@ -240,7 +247,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
             if info["file"] != path or info["start"] is None:
                 continue
             if immutable and info["end"] > len(source.splitlines()):
-                raise ArtifactError(f"pinned source range for {name} exceeds {path}")
+                raise ReplanRequired(f"pinned source range for {name} exceeds {path}")
             span = [blame.get(n) for n in range(info["start"], info["end"] + 1)]
             span = [c for c in span if c]
             if not span:

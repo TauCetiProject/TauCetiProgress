@@ -1,10 +1,9 @@
 # Immutable facts v1 contract fixture
 
-This is the proposed shared D0/D1 wire fixture for
-[TauCeti#18933](https://github.com/TauCetiProject/TauCeti/issues/18933) and
-[Progress#26](https://github.com/TauCetiProject/TauCetiProgress/issues/26). At implementation time
-D0 has not published its fixture or producer. Agree these field names with D0 before cutover;
-this fixture defines the consumer's supported schema rather than claiming a live producer exists.
+This historical fixture tests saved-plan compatibility with Progress PR #33's manifest protocol.
+New plans use the [single Pages bundle](../pages-facts/README.md) from TauCeti PR #19012 and
+never request this pointer or discover remote generations. Keep these artifacts so existing
+saved manifest plans and caches remain testable.
 The files under `v1/` can be served unchanged from any HTTP facts base. `facts.json` is the
 uncompressed reference payload. All JSON is UTF-8. Hashes cover the exact published bytes.
 
