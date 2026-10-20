@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from progress import files, gate  # noqa: E402
-from progress.gate import Refused  # noqa: E402
+from progress.gate import Pending, Refused  # noqa: E402
 
 failures = []
 
@@ -34,6 +34,18 @@ def refuses(fn, needle=None):
             raise AssertionError(f"refused for the wrong reason: {str(exc)!r}") from None
         return str(exc)
     raise AssertionError("expected a refusal, the gate ALLOWED this")
+
+
+def waits(fn, needle=None):
+    try:
+        fn()
+    except Pending as exc:
+        if needle and needle not in str(exc):
+            raise AssertionError(f"pending for the wrong reason: {str(exc)!r}") from None
+        return str(exc)
+    except Refused as exc:
+        raise AssertionError(f"expected pending, the gate REFUSED this: {exc}") from None
+    raise AssertionError("expected pending, the gate ALLOWED this")
 
 
 REPO = "TauCetiProject/TauCetiRoadmap"
@@ -627,9 +639,66 @@ def test_refuses_a_skipped_or_neutral_build():
         refuses(lambda c=concl: call(checks=[build_run(conclusion=c)]), "concluded " + repr(concl))
 
 
-def test_refuses_an_incomplete_build():
-    checks = [build_run(conclusion=None, status="in_progress")]
-    refuses(lambda: call(checks=checks), "in_progress")
+def test_waits_for_an_incomplete_build():
+    """Not a refusal: the report usually opens before CI finishes, and the gate re-runs when it does.
+    Still a `Refused`, so anything that only asks "may this merge?" gets no."""
+    for status in sorted(gate.UNFINISHED_STATUSES):
+        checks = [build_run(conclusion=None, status=status)]
+        waits(lambda c=checks: call(checks=c), repr(status))
+        refuses(lambda c=checks: call(checks=c))
+
+
+def test_a_failure_elsewhere_wins_over_waiting_for_the_build():
+    """A report that would be refused anyway should hear so now, not after CI."""
+    unfinished = [build_run(conclusion=None, status="in_progress")]
+    other = make_pr(head={"ref": f"progress/aaaaaaa-{TO[:7]}/{AREA}", "sha": HEAD,
+                          "repo": {"full_name": REPO}})
+    exc = refuses(lambda: call(pr=other, checks=unfinished), "branch says the window starts at")
+    assert "in_progress" not in exc
+    try:
+        call(pr=other, checks=unfinished)
+    except Pending:
+        raise AssertionError("a refusal was reported as pending") from None
+    except Refused:
+        pass
+
+
+def test_a_finished_failing_build_is_refused_even_while_another_runs():
+    checks = [build_run(conclusion=None, status="in_progress"), build_run(conclusion="failure")]
+    try:
+        call(checks=checks)
+    except Pending:
+        raise AssertionError("a failed build was reported as pending") from None
+    except Refused as exc:
+        assert "concluded 'failure'" in str(exc), exc
+
+
+def test_cli_exit_codes_distinguish_pending_from_refused():
+    import contextlib
+    import io
+    import json as _json
+    import tempfile
+    old_status, new_status, old_progress, new_progress = make_content()
+    bundle = {
+        "pr": make_pr(), "changed_files": make_files(), "tree_entries": make_tree(),
+        "old_status": old_status, "new_status": new_status, "old_progress": old_progress,
+        "new_progress": new_progress, "base_repo": REPO, "code_window": make_window(),
+        "area_exists": True, "collected_at": NOW, "current_main_cursor": FROM,
+        "compare_status": "ahead", "behind_by": 0, "main_sha": MAIN,
+        "old_paths": {n: f"TauCetiRoadmap/{AREA}/{n}" for n in ("STATUS.md", "PROGRESS.md")},
+    }
+    for checks, rc, prefix in (
+        (CHECKS_OK, 0, "ALLOWED: "),
+        ([build_run(conclusion=None, status="queued")], gate.EX_PENDING, "PENDING: "),
+        ([build_run(conclusion="failure")], gate.EX_REFUSED, "REFUSED: "),
+    ):
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
+            _json.dump(dict(bundle, check_runs=checks), f)
+            f.flush()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                got = gate.main(["--bundle", f.name])
+        assert got == rc and out.getvalue().startswith(prefix), (got, out.getvalue())
 
 
 def test_refuses_a_branch_whose_window_disagrees_with_the_section():
@@ -643,13 +712,13 @@ def test_refuses_a_branch_whose_window_disagrees_with_the_section():
     refuses(lambda: call(pr=other2), "branch says the window ends at")
 
 
-def test_refuses_a_pending_build():
+def test_refuses_a_completed_build_without_a_conclusion():
     checks = [build_run(conclusion=None)]
     refuses(lambda: call(checks=checks), "concluded None")
 
 
-def test_refuses_a_missing_build():
-    refuses(lambda: call(checks=[]), "has not reported")
+def test_waits_for_a_build_that_has_not_reported():
+    waits(lambda: call(checks=[]), "has not reported")
 
 
 def test_refuses_a_failing_build_listed_after_a_success():

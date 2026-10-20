@@ -149,10 +149,11 @@ jobs:
           python3 validator/.github/scripts/collect.py \
             --repo "$REPO" --pr "$PR" --out bundle.json
 
-      # The gate. Exit 0 allows, exit 3 is a considered refusal, anything else is a crash. A crash
-      # must NOT read as a refusal: the two are different, and conflating them turns an unexpected
-      # failure into a quiet no-op. Note 3 rather than 2, because `argparse` exits 2 on a usage
-      # error; and the exit code must AGREE with the output, so a refusal also has to say REFUSED.
+      # The gate. Exit 0 allows, exit 3 is a considered refusal, exit 4 means the `build` check has
+      # not finished yet, anything else is a crash. A crash must NOT read as a refusal: the two are
+      # different, and conflating them turns an unexpected failure into a quiet no-op. Note 3 rather
+      # than 2, because `argparse` exits 2 on a usage error; and the exit code must AGREE with the
+      # output, so a refusal also has to say REFUSED, and a pending verdict PENDING.
       - name: Run the gate
         id: gate
         env:
@@ -174,6 +175,14 @@ jobs:
           fi
           if [ "$rc" -eq 3 ] && head -n1 gate.out | grep -q '^REFUSED: '; then
             echo "verdict=refuse" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Not a refusal: the caller re-runs this gate when CI completes, and that run decides.
+          # Nothing is posted, because a comment saying "did not merge" on a report that lands
+          # minutes later is noise, and on a report whose re-check never comes it reads as final.
+          if [ "$rc" -eq 4 ] && head -n1 gate.out | grep -q '^PENDING: '; then
+            echo "verdict=pending" >> "$GITHUB_OUTPUT"
+            echo "::notice title=waiting for build::$(sed -n 's/^PENDING: //p' gate.out | head -n1)"
             exit 0
           fi
           echo "::error title=progress gate crashed::exit $rc — see the log above"
