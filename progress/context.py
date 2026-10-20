@@ -16,6 +16,8 @@ Three jobs, all of which are about keeping the model honest and the cost predict
    everything.
 """
 
+import os
+
 import re
 
 from . import facts as facts_mod

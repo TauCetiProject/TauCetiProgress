@@ -20,6 +20,8 @@ line number the documentation supplied -- a declaration's docstring. Reading a k
 parsing.
 """
 
+import os
+
 import re
 
 from . import window

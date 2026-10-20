@@ -9,6 +9,8 @@ script can aggregate it across roadmaps. The extraction rule is the consumer's
 Pure: text in, values out.
 """
 
+import os
+
 import hashlib
 import json
 import re

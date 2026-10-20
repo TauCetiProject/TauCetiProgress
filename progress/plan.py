@@ -13,6 +13,8 @@ Two thresholds, both overridable so they can be raised as the project grows:
   quiet day produces a padded report about three commits.
 """
 
+import os
+
 import datetime
 import json
 import pathlib
@@ -37,8 +39,8 @@ STATUS_NAME = "STATUS.md"
 PROGRESS_NAME = "PROGRESS.md"
 
 # Where areas live in the roadmap repo. `Completed/` holds finished roadmaps (EffectiveBounds).
-AREAS_DIR = "TauCetiRoadmap"
-COMPLETED_DIR = "Completed"
+AREAS_DIR = os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap")
+COMPLETED_DIR = os.environ.get("TAUCETI_COMPLETED_DIR", "Completed")
 
 
 class NotDue(Exception):

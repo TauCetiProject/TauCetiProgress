@@ -25,9 +25,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-DEFAULT_SITE = "https://leanprover.zulipchat.com"
-DEFAULT_CHANNEL = "Tau Ceti"
-DEFAULT_TOPIC = "Progress logs"
+DEFAULT_SITE = os.environ.get("TAUCETI_ZULIP_SITE", "https://leanprover.zulipchat.com")
+DEFAULT_CHANNEL = os.environ.get("TAUCETI_ZULIP_CHANNEL", "Tau Ceti")
+DEFAULT_TOPIC = os.environ.get("TAUCETI_ZULIP_TOPIC", "Progress logs")
 
 ZWSP = "​"  # zero-width space, used to defuse mentions and linkifiers
 

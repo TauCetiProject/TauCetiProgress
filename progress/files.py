@@ -16,6 +16,8 @@ is the only thing standing between a model and a human-owned repository. The gat
 never truth -- see the trust-boundary section of README.md.
 """
 
+import os
+
 import json
 import re
 

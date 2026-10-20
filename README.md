@@ -165,3 +165,15 @@ idempotent on a stable per-window id -- but it is a second sink and the threat m
 ## Licence
 
 Apache-2.0.
+
+Project bindings are shared with [TauCetiTools](https://github.com/TauCetiProject/TauCetiTools).
+Pass `--conf PATH_OR_HTTPS_URL` to select the content/roadmap repositories, source root,
+publication destinations, review policy and optional archive. For example:
+
+```sh
+tauceti-progress due --conf ./tauceti.toml
+```
+
+The [manual setup](https://github.com/TauCetiProject/TauCetiTools/blob/main/docs/project-setup.md)
+documents credentials and generated workflow callers. An absent optional destination in a configured
+project stays disabled. Invocations without configuration retain the Tau Ceti defaults.

@@ -29,6 +29,8 @@ reports that can no longer merge -- see `superseded_prs` for the two ways that h
 the repository grows one unmergeable report per area per round and never sheds them.
 """
 
+import os
+
 import json
 import pathlib
 import subprocess
