@@ -102,6 +102,8 @@ jobs:
       head_sha: ${{ steps.gate.outputs.head_sha }}
       main_sha: ${{ steps.gate.outputs.main_sha }}
       area: ${{ steps.gate.outputs.area }}
+      roadmap_dir: ${{ steps.gate.outputs.roadmap_dir }}
+      completed_dir: ${{ steps.gate.outputs.completed_dir }}
     steps:
       # The validator itself, at exactly the ref the caller pinned. Checking out this repository
       # (never the pull request) is what keeps the executed code trusted.
@@ -168,6 +170,8 @@ jobs:
             echo "head_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("head_sha",""))')"
             echo "main_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("main_sha",""))')"
             echo "area=$(python3 -c 'import json,re;a=json.load(open("bundle.json")).get("area","");print(a if re.fullmatch(r"[A-Za-z0-9]+", a or "") else "")')"
+            echo "roadmap_dir=${TAUCETI_ROADMAP_DIR:-TauCetiRoadmap}"
+            echo "completed_dir=${TAUCETI_COMPLETED_DIR:-Completed}"
           } >> "$GITHUB_OUTPUT"
           if [ "$rc" -eq 0 ]; then
             echo "verdict=allow" >> "$GITHUB_OUTPUT"
@@ -385,6 +389,8 @@ jobs:
           REPO: ${{ github.repository }}
           AREA: ${{ needs.validate.outputs.area }}
           COMMIT: ${{ steps.land.outputs.commit }}
+          ROADMAP_DIR: ${{ needs.validate.outputs.roadmap_dir }}
+          COMPLETED_DIR: ${{ needs.validate.outputs.completed_dir }}
         run: |
           set +e -uo pipefail
           if ! [[ "$AREA" =~ ^[A-Za-z0-9]+$ ]]; then
@@ -407,11 +413,12 @@ jobs:
           while read -r number from; do
             # The one directory this report changes, or nothing.
             dir="$(gh api --paginate --slurp "repos/$REPO/pulls/$number/files" \
-                   | jq -r --arg area "$AREA" '
+                   | jq -r --arg area "$AREA" --arg active "$ROADMAP_DIR" --arg completed "$COMPLETED_DIR" '
                        [.[][].filename
-                        | capture("^(?<d>(TauCetiRoadmap|Completed)/[A-Za-z0-9]+)/(STATUS|PROGRESS)\\.md$")
-                        // {d: ""}
-                        | .d] | unique
+                        | (capture("^(?<parent>.+)/(?<area>[A-Za-z0-9]+)/(STATUS|PROGRESS)\\.md$")
+                           // {parent: "", area: ""})
+                        | if (.parent == $active or .parent == $completed) and .area == $area
+                          then .parent + "/" + .area else "" end] | unique
                        | if length == 1 and (.[0] | endswith("/" + $area)) then .[0] else "" end')"
             if [ -z "$dir" ]; then
               echo "#$number: not confined to one $AREA directory; leaving it"

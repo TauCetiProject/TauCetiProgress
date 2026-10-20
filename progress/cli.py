@@ -53,6 +53,7 @@ def cmd_prompt(args):
     text = path.read_text(encoding="utf-8")
     text = text.replace("TauCetiRoadmap", os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap"))
     text = text.replace("TauCeti#", os.environ.get("TAUCETI_CONTENT_NAME", "TauCeti") + "#")
+    text = text.replace("Tau Ceti", os.environ.get("TAUCETI_CONTENT_NAME", "Tau Ceti"))
     sys.stdout.write(text)
     return 0
 
