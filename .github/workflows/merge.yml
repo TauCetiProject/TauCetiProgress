@@ -359,3 +359,81 @@ jobs:
           else
             echo "head is in $head_repo, not $REPO; leaving its branch alone"
           fi
+
+      # Landing moved the area's cursor, and a report can only land if its window starts at its
+      # directory's cursor on `main`. So another open report for this area that starts anywhere else
+      # can never land; close it, whoever opened it. This is not one operator vetoing another:
+      # whether a report can land depends only on `main`, which is what this reads. Nothing else
+      # would close these: the gate only runs on events for a pull request itself, and the worker
+      # sweeps only its own operator's reports.
+      #
+      # Each candidate is judged against the cursor of the directory IT changes, read from `main`
+      # now, not against the window that just landed. An area name can exist under both
+      # `TauCetiRoadmap/` and `Completed/`, with separate cursors; and `main` may have moved again
+      # since this landing. Candidates are listed BEFORE any cursor is read, so a listed report
+      # can only start at a cursor `main` has already reached: if it is still current it is kept.
+      # Anything ambiguous -- changes outside one directory, no status on `main`, an unreadable
+      # cursor -- is left alone.
+      #
+      # Best effort throughout (`set +e`). The landing is done and recorded, and a report left open
+      # is only clutter, so a failure here warns rather than turning the run red.
+      - name: Close reports that can no longer land
+        if: steps.land.outputs.landed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR: ${{ inputs.pr }}
+          REPO: ${{ github.repository }}
+          AREA: ${{ needs.validate.outputs.area }}
+          COMMIT: ${{ steps.land.outputs.commit }}
+        run: |
+          set +e -uo pipefail
+          if ! [[ "$AREA" =~ ^[A-Za-z0-9]+$ ]]; then
+            echo "::warning title=no sweep::area unknown; not closing other reports"
+            exit 0
+          fi
+          if ! gh api --paginate --slurp "repos/$REPO/pulls?state=open&per_page=100" > open.json \
+             || ! jq -r --arg repo "$REPO" --arg area "$AREA" --argjson pr "$PR" '
+                    .[][]
+                    | select(.number != $pr)
+                    | select(.base.ref == "main" and .base.repo.full_name == $repo)
+                    | (.head.ref
+                       | capture("^progress/(?<from>[0-9a-f]{7})-[0-9a-f]{7}/(?<area>[A-Za-z0-9]+)$"))
+                        as $b
+                    | select($b.area == $area)
+                    | "\(.number) \($b.from)"' open.json > candidates.txt; then
+            echo "::warning title=no sweep::could not list open pull requests"
+            exit 0
+          fi
+          while read -r number from; do
+            # The one directory this report changes, or nothing.
+            dir="$(gh api --paginate --slurp "repos/$REPO/pulls/$number/files" \
+                   | jq -r --arg area "$AREA" '
+                       [.[][].filename
+                        | capture("^(?<d>(TauCetiRoadmap|Completed)/[A-Za-z0-9]+)/(STATUS|PROGRESS)\\.md$")
+                        // {d: ""}
+                        | .d] | unique
+                       | if length == 1 and (.[0] | endswith("/" + $area)) then .[0] else "" end')"
+            if [ -z "$dir" ]; then
+              echo "#$number: not confined to one $AREA directory; leaving it"
+              continue
+            fi
+            cursor="$(gh api "repos/$REPO/contents/$dir/STATUS.md?ref=main" \
+                        -H "Accept: application/vnd.github.raw" \
+                      | sed -n '1s/^<!--tauceti-status:v1 \(.*\)-->$/\1/p' \
+                      | jq -r '.to_sha // ""')"
+            if ! [[ "$cursor" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "#$number: no readable cursor for $dir on main; leaving it"
+              continue
+            fi
+            if [ "$from" = "${cursor:0:7}" ]; then
+              echo "#$number starts at the current $dir cursor; leaving it"
+              continue
+            fi
+            printf 'closing #%s: its window starts at %s, the %s cursor is %s\n' \
+              "$number" "$from" "$dir" "${cursor:0:7}"
+            fmt='This report can no longer land. Its window starts at `%s`, but the `%s` cursor on'
+            fmt="$fmt"' `main` is now `%s` (#%s landed as %s), so the gate can never append it.'
+            body="$(printf "$fmt" "$from" "$dir" "${cursor:0:7}" "$PR" "$COMMIT")"
+            gh pr close "$number" --repo "$REPO" --comment "$body" \
+              || echo "::warning title=not closed::could not close #$number"
+          done < candidates.txt
