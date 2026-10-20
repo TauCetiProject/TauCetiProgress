@@ -190,3 +190,11 @@ with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROG
         except gh.GhError:
             pass
         assert len(sends) == 2, "earlier uncertain send still requires reconciliation"
+
+# The apply CLI preserves the distinction across the process boundary.
+from progress import cli
+from types import SimpleNamespace
+opts = SimpleNamespace(plan="unused", status_body="unused", section_body="unused", roadmap_dir="unused", dry_run=False, version="fixture")
+for error, expected in ((gh.GhError("temporary wait"), 77), (gh.PublicationRejected("definitive rejection"), 78)):
+    with patch.object(cli, "_load_plan", return_value={}), patch.object(apply, "run", side_effect=error):
+        assert cli.cmd_apply(opts) == expected

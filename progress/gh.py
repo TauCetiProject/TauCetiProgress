@@ -33,6 +33,10 @@ class GhError(RuntimeError):
     """A `gh` invocation failed."""
 
 
+class PublicationRejected(GhError):
+    """The proxy verified a definitive rejection; preserve artifacts for repair."""
+
+
 def readonly(args):
     if args[:2] in (["pr", "list"], ["pr", "view"], ["repo", "view"]):
         return True
@@ -74,6 +78,8 @@ def gh(args, retries=3, reconcile=None, context=None):
         outcome = reconcile() if reconcile else None
         if isinstance(outcome, str):
             return outcome
+        if proc.returncode == 78:
+            raise PublicationRejected(f"publication definitively rejected: {proc.stderr.strip()}")
         raise GhError(f"Worker retained publication for reconciliation: {proc.stderr.strip()}")
     if not readonly(args):
         actor = gh(["api", "user", "--jq", ".login"]).strip().lower()

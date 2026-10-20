@@ -498,7 +498,14 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
                  roadmap_dir, check=False)
     if local.returncode not in (0, 1):
         raise ApplyError("could not inspect retained progress branch")
+    pending_commit = False
     if local.returncode == 0:
+        ancestor = _run(["git", "merge-base", "--is-ancestor", branch, "origin/main"],
+                        roadmap_dir, check=False)
+        if ancestor.returncode not in (0, 1):
+            raise ApplyError("could not inspect uncommitted progress branch")
+        pending_commit = ancestor.returncode == 0
+    if local.returncode == 0 and not pending_commit:
         # Validate the saved commit against its own parent. Unrelated merges on
         # main and renderer upgrades must not change or regenerate this report.
         parent = _run(["git", "rev-parse", f"{branch}^"], roadmap_dir).stdout.strip()
@@ -517,7 +524,7 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
         try:
             header = files.validate_update(plan["roadmap"], old_status, status_text, old_progress,
                                            progress_text, expect_from_sha=plan["from_sha"])
-            if header["to_sha"] != plan["to_sha"] or header["prs"] != plan["prs"]:
+            if header["to_sha"] != plan["to_sha"] or header["prs"] != sorted(set(plan["prs"])):
                 raise files.FormatError("saved branch window differs from the plan")
         except (files.FormatError, TypeError) as exc:
             print(f"retained progress branch cannot publish ({exc}); preserving it for recovery")
@@ -532,13 +539,23 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
             print("prepared report area is no longer present; preserving it for recovery")
             return EX_RETAINED
         try:
+            base = branch if pending_commit else "origin/main"
             status_text, progress_text, header = render_update(
-                plan, status_body, section_body, base_file("origin/main", plan["status_path"]), current_progress
+                plan, status_body, section_body, base_file(base, plan["status_path"]),
+                base_file(base, plan["progress_path"])
             )
         except files.FormatError as exc:
             print(f"prepared report cannot publish ({exc}); preserving it for recovery")
             return EX_RETAINED
-        _run(["git", "checkout", "-q", "-b", branch, "origin/main"], roadmap_dir)
+        if pending_commit:
+            for path, desired in ((status_path, status_text), (progress_path, progress_text)):
+                original = base_file(branch, str(path.relative_to(roadmap_dir)))
+                if path.exists() and path.read_text(encoding="utf-8") not in (original, desired):
+                    print("uncommitted progress bytes differ from retained report; preserving them for recovery")
+                    return EX_RETAINED
+            _run(["git", "checkout", "-q", branch], roadmap_dir)
+        else:
+            _run(["git", "checkout", "-q", "-b", branch, "origin/main"], roadmap_dir)
         status_path.write_text(status_text, encoding="utf-8")
         progress_path.write_text(progress_text, encoding="utf-8")
         _run(["git", "add", "--", plan["status_path"], plan["progress_path"]], roadmap_dir)
