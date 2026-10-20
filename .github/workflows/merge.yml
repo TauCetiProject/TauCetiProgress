@@ -260,10 +260,11 @@ jobs:
       # written in, by the ids the gate computed from the bytes it checked. So the head does not need
       # to contain current `main`, and nothing that landed since it was built is touched.
       #
-      # `main` may move while this runs. The verdict depended on `main` only through this area's
-      # directory (the two files, which give the baseline, the cursor and the cadence, and README.md,
-      # which makes it a roadmap), so if those are byte-identical on the new `main` the verdict
-      # stands there too, and the commit is rebuilt on it and swapped again. If they changed, it stops.
+      # `main` may move while this runs. The verdict read `main` in exactly four places: the two
+      # files (the append-only baseline and the cursor), README.md (that the roadmap exists), and the
+      # date `PROGRESS.md` last changed (the cadence). If all four read the same on the new `main`,
+      # the verdict is the same there, so the commit is rebuilt on it and swapped again. If any
+      # differs, it stops.
       - name: Land the validated blobs by compare-and-swap on refs/heads/main
         id: land
         env:
@@ -275,12 +276,15 @@ jobs:
           AREA: ${{ needs.validate.outputs.area }}
           PARENT: ${{ needs.validate.outputs.parent }}
           BLOBS: ${{ needs.validate.outputs.blobs }}
+          ROADMAP_DIR: ${{ needs.validate.outputs.roadmap_dir }}
+          COMPLETED_DIR: ${{ needs.validate.outputs.completed_dir }}
         run: |
           set -euo pipefail
 
           # Re-checked here rather than trusted, because this job holds the write token.
-          if ! [[ "$AREA" =~ ^[A-Za-z0-9]+$ && "$PARENT" =~ ^[A-Za-z0-9]+$ ]]; then
-            echo "::error title=bad validate outputs::area or parent is not alphanumeric"
+          if ! [[ "$AREA" =~ ^[A-Za-z0-9]+$ ]] \
+             || { [ "$PARENT" != "$ROADMAP_DIR" ] && [ "$PARENT" != "$COMPLETED_DIR" ]; }; then
+            echo "::error title=bad validate outputs::area is not alphanumeric or parent is not a roadmap root"
             exit 1
           fi
           dir="$PARENT/$AREA"
@@ -290,14 +294,33 @@ jobs:
             then [to_entries[] | {path: .key, mode: "100644", type: "blob", sha: .value}]
             else error("the validated blobs are not exactly this area'"'"'s two files") end' <<< "$BLOBS")"
 
-          # This area's directory on a given commit, as `name=blobid` for the three files the verdict
-          # read. Fails rather than returning nothing, so an API error cannot look like "unchanged".
-          area_files() {
-            gh api "repos/$REPO/contents/$dir?ref=$1" --jq '
-              [.[] | select(.name == "STATUS.md" or .name == "PROGRESS.md" or .name == "README.md")
-               | .name + "=" + .sha] | sort | join(" ")'
+          # What the verdict read from `main`, as of a given commit. Each path is asked for by name, so
+          # a missing file is a definite "absent" (a first report has no STATUS.md or PROGRESS.md yet)
+          # and any other failure fails, rather than reading as "unchanged". The cadence date is the
+          # collector's own query (`last_commit_date`).
+          blob_at() {
+            local out
+            if out="$(gh api "repos/$REPO/contents/$2?ref=$1" --jq .sha 2> lookup.err)"; then
+              [[ "$out" =~ ^[0-9a-f]{40}$ ]] || return 1
+              echo "$out"
+            elif grep -q 'HTTP 404' lookup.err; then
+              echo absent
+            else
+              cat lookup.err >&2
+              return 1
+            fi
           }
-          validated="$(area_files "$MAIN_SHA")"
+          read_by_verdict() {
+            local status progress readme changed
+            status="$(blob_at "$1" "$dir/STATUS.md")" || return 1
+            progress="$(blob_at "$1" "$dir/PROGRESS.md")" || return 1
+            readme="$(blob_at "$1" "$dir/README.md")" || return 1
+            changed="$(gh api "repos/$REPO/commits?sha=$1&path=$dir/PROGRESS.md&per_page=1" \
+                         --jq '.[0].commit.committer.date // "never"')" || return 1
+            echo "STATUS.md=$status PROGRESS.md=$progress README.md=$readme changed=$changed"
+          }
+          validated="$(read_by_verdict "$MAIN_SHA")"
+          printf 'validated against %s\n' "$validated"
 
           # Message written here rather than taken from the pull request: the title is mutable and
           # attacker-influenced, and the `progress:` prefix is load-bearing (the daily cadence check
@@ -329,19 +352,25 @@ jobs:
               break
             fi
             after="$(gh api "repos/$REPO/commits/main" --jq .sha || echo unknown)"
-            if [ "$after" = "$commit" ]; then
-              echo "::notice::the update landed despite the error response"
-              landed=true
-              break
-            fi
             if ! [[ "$after" =~ ^[0-9a-f]{40}$ ]] || [ "$after" = "$base" ]; then
               echo "::warning title=not landed::the update failed and main is ${after:0:7}"
               cat update.err
               break
             fi
-            now="$(area_files "$after" || echo unreadable)"
+            # The update may have applied with its response lost, and something else landed on top
+            # before the re-read. Then our commit is in main's history, and it HAS landed.
+            if [ "$after" = "$commit" ] || [ "$(gh api "repos/$REPO/compare/$commit...$after" \
+                   --jq .status || echo unknown)" = ahead ]; then
+              echo "::notice::the update landed despite the error response"
+              landed=true
+              break
+            fi
+            if ! now="$(read_by_verdict "$after")"; then
+              echo "::warning title=not landed::could not re-read $dir on main ${after:0:7}"
+              break
+            fi
             if [ "$now" != "$validated" ]; then
-              echo "::warning title=area changed::$dir changed on main (now ${after:0:7}); this report was not landed"
+              echo "::warning title=area changed::$dir on main is now $now; this report was not landed"
               break
             fi
             printf 'main moved %s -> %s without touching %s; rebuilding on it\n' \
