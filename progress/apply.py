@@ -49,6 +49,10 @@ class ApplyError(RuntimeError):
     pass
 
 
+class RemoteUnavailable(ApplyError):
+    """A remote read or push outcome remains uncertain and may recover later."""
+
+
 def branch_name(plan):
     """`progress/<from7>-<to7>/<Area>`: a pure function of the window.
 
@@ -327,7 +331,7 @@ def remote_branch_exists(roadmap_dir, branch, remote="origin"):
     proc = _run(["git", "ls-remote", "--exit-code", "--heads", remote, branch],
                roadmap_dir, check=False)
     if proc.returncode not in (0, 2):
-        raise ApplyError(f"could not determine whether {remote}/{branch} exists: {proc.stderr.strip()}")
+        raise RemoteUnavailable(f"could not determine whether {remote}/{branch} exists: {proc.stderr.strip()}")
     return proc.returncode == 0
 
 
@@ -594,7 +598,7 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
                 print("report fork is not writable; preserving prepared report for permission recovery")
                 return EX_RETAINED
             if not remote_branch_exists(roadmap_dir, branch, remote):
-                raise ApplyError("report push did not produce a visible branch; retaining prepared report")
+                raise RemoteUnavailable("report push did not produce a visible branch; retaining prepared report")
 
     # Re-check between push and create: another worker may have opened the PR for this exact window
     # in the meantime, and the branch name is deterministic so it would be the same branch.

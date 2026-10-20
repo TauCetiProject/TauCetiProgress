@@ -125,9 +125,12 @@ def cmd_apply(args):
     except gh.PublicationRejected as exc:
         print(f"publication needs recovery: {exc}", file=sys.stderr)
         return 78
-    except (gh.GhError, apply_mod.ApplyError, OSError) as exc:
+    except (gh.GhError, apply_mod.RemoteUnavailable) as exc:
         print(f"publication temporarily unavailable: {exc}", file=sys.stderr)
         return 77
+    except (apply_mod.ApplyError, OSError) as exc:
+        print(f"local publication state needs recovery: {exc}", file=sys.stderr)
+        return 78
 
 
 

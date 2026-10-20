@@ -153,6 +153,11 @@ with tempfile.TemporaryDirectory() as tmp:
             except apply.ApplyError:
                 pass
         before = (repo / plan["progress_path"]).read_bytes()
+        saved_status = (repo / plan["status_path"]).read_bytes()
+        (repo / plan["status_path"]).write_text("unrelated dirty bytes")
+        assert apply.run(plan, status, section, repo) == apply.EX_RETAINED
+        assert (repo / plan["status_path"]).read_text() == "unrelated dirty bytes"
+        (repo / plan["status_path"]).write_bytes(saved_status)
         try:
             apply.run(plan, status, section, repo)
         except gh.GhError:

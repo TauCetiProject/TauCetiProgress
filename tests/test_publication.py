@@ -195,6 +195,8 @@ with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROG
 from progress import cli
 from types import SimpleNamespace
 opts = SimpleNamespace(plan="unused", status_body="unused", section_body="unused", roadmap_dir="unused", dry_run=False, version="fixture")
-for error, expected in ((gh.GhError("temporary wait"), 77), (gh.PublicationRejected("definitive rejection"), 78)):
+for error, expected in ((gh.GhError("temporary wait"), 77), (gh.PublicationRejected("definitive rejection"), 78),
+                        (apply.RemoteUnavailable("remote read outage"), 77), (apply.ApplyError("staged paths differ"), 78),
+                        (OSError("git executable missing"), 78)):
     with patch.object(cli, "_load_plan", return_value={}), patch.object(apply, "run", side_effect=error):
         assert cli.cmd_apply(opts) == expected
