@@ -456,29 +456,44 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
     if not (roadmap_dir / rel).is_dir():
         raise ApplyError(f"{rel} is not a directory in {roadmap_dir}")
 
-    old_status = status_path.read_text(encoding="utf-8") if status_path.is_file() else None
-    old_progress = progress_path.read_text(encoding="utf-8") if progress_path.is_file() else None
+    # Always render from the canonical base. A previous interrupted invocation
+    # can leave this checkout on its already-prepared progress branch.
+    def base_file(path):
+        tree = _run(["git", "ls-tree", "--name-only", "origin/main", "--", path], roadmap_dir)
+        return _run(["git", "show", f"origin/main:{path}"], roadmap_dir).stdout if tree.stdout.strip() else None
 
+    old_status = base_file(plan["status_path"])
+    old_progress = base_file(plan["progress_path"])
     status_text, progress_text, header = render_update(
         plan, status_body, section_body, old_status, old_progress
     )
-
-    # --- commit on the deterministic branch ----------------------------------------------------
-    _run(["git", "checkout", "-q", "-B", branch, "origin/main"], roadmap_dir)
-    status_path.write_text(status_text, encoding="utf-8")
-    progress_path.write_text(progress_text, encoding="utf-8")
-    # Add only the two paths: an `add -A` here could sweep up anything else in the clone, and the
-    # gate would (correctly) refuse the result.
-    _run(["git", "add", "--", plan["status_path"], plan["progress_path"]], roadmap_dir)
-
-    changed = _run(["git", "diff", "--cached", "--name-only"], roadmap_dir).stdout.split()
-    if sorted(changed) != sorted([plan["status_path"], plan["progress_path"]]):
-        raise ApplyError(f"staged paths are {changed}, expected exactly the two generated files")
-
     title = pr_title(plan)
     body = pr_body(plan, header, version=version)
-    _run(["git", "commit", "-q", "-m", title, "-m", f"Window {plan['from_sha'][:7]}..{plan['to_sha'][:7]}"],
-         roadmap_dir)
+
+    # Reuse the exact local commit after an interrupted publication. Never
+    # replace a deterministic branch whose bytes differ from the retained plan.
+    local = _run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                 roadmap_dir, check=False)
+    if local.returncode not in (0, 1):
+        raise ApplyError("could not inspect retained progress branch")
+    if local.returncode == 0:
+        paths = _run(["git", "diff", "--name-only", "origin/main", branch], roadmap_dir).stdout.split()
+        expected_paths = [plan["status_path"], plan["progress_path"]]
+        if (sorted(paths) != sorted(expected_paths)
+                or _run(["git", "show", f"{branch}:{plan['status_path']}"], roadmap_dir).stdout != status_text
+                or _run(["git", "show", f"{branch}:{plan['progress_path']}"], roadmap_dir).stdout != progress_text):
+            raise ApplyError("retained progress branch differs from prepared report; preserving it for recovery")
+        _run(["git", "checkout", "-q", branch], roadmap_dir)
+    else:
+        _run(["git", "checkout", "-q", "-b", branch, "origin/main"], roadmap_dir)
+        status_path.write_text(status_text, encoding="utf-8")
+        progress_path.write_text(progress_text, encoding="utf-8")
+        _run(["git", "add", "--", plan["status_path"], plan["progress_path"]], roadmap_dir)
+        changed = _run(["git", "diff", "--cached", "--name-only"], roadmap_dir).stdout.split()
+        if sorted(changed) != sorted([plan["status_path"], plan["progress_path"]]):
+            raise ApplyError(f"staged paths are {changed}, expected exactly the two generated files")
+        _run(["git", "commit", "-q", "-m", title, "-m", f"Window {plan['from_sha'][:7]}..{plan['to_sha'][:7]}"],
+             roadmap_dir)
 
     if dry_run:
         diff = _run(["git", "show", "--stat", "--format=%s", "HEAD"], roadmap_dir).stdout

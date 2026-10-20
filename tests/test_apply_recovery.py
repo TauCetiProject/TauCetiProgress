@@ -1,5 +1,4 @@
 """Resume a lost PR response using the same branch, prose and one GitHub mutation."""
-import json
 import os
 import pathlib
 import subprocess
@@ -58,3 +57,45 @@ with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROG
         assert [status.read_bytes(), section.read_bytes()] == original
         assert not list((root / "outbox").glob("*.json"))
 print("PASS: lost PR creation response resumes without duplicate mutation or prose changes")
+
+# A pre-push failure leaves the deterministic local commit reusable on the next apply.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    repo = root / "roadmap"
+    repo.mkdir()
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "Fixture")
+    (repo / "Area").mkdir()
+    (repo / "Area/README.md").write_text("Area")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    status, section = root / "status", root / "section"
+    status.write_text(prose)
+    section.write_text(prose)
+    with patch.object(apply, "existing_pr", return_value=None), patch.object(apply, "own_pr", return_value=None), \
+         patch.object(apply, "push_target", side_effect=gh.GhError("fork pending")):
+        for _ in range(2):
+            try:
+                apply.run(plan, status, section, repo)
+            except gh.GhError:
+                pass
+            else:
+                raise AssertionError("publication should remain pending")
+            current = git("rev-parse", "HEAD")
+            if _ == 0:
+                retained_commit = current
+            else:
+                assert current == retained_commit, "resume must preserve the exact local report commit"
+        status.write_text(prose + " Changed")
+        try:
+            apply.run(plan, status, section, repo)
+        except apply.ApplyError:
+            pass
+        else:
+            raise AssertionError("conflicting prepared branch must not be overwritten")
+        assert git("rev-parse", "HEAD") == retained_commit
+print("PASS: interrupted fork publication preserves and reuses the exact local branch")
