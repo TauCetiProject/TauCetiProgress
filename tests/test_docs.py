@@ -310,6 +310,18 @@ def test_a_site_redeploying_under_a_run_is_refused():
             raise AssertionError("expected a DocsError for a page from another build")
 
 
+def test_source_probe_ignores_dependency_modules_for_a_configured_project():
+    from unittest.mock import patch
+
+    index = json.dumps({"declarations": {
+        "Mathlib.first": {"docLink": "./Mathlib/First.html#Mathlib.first"},
+        "Arcturus.distance": {"docLink": "./Arcturus/WeightedHamming.html#Arcturus.distance"},
+    }})
+    with patch.dict(os.environ, {"TAUCETI_LEAN_ROOT": "Arcturus"}):
+        d = make({docs_mod.INDEX_PATH: index})
+        assert d._any_module() == "Arcturus/WeightedHamming.html"
+
+
 for _name, _fn in sorted(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         check(_name, _fn)

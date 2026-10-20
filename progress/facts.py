@@ -26,7 +26,7 @@ import re
 
 from . import window
 
-LEAN_PREFIX = "TauCeti/"
+LEAN_PREFIX = os.environ.get("TAUCETI_LEAN_ROOT", "TauCeti").replace(".", "/") + "/"
 LEAN_SUFFIX = ".lean"
 
 # Per-PR caps. A single PR adding hundreds of declarations is real (a big port), but a report does

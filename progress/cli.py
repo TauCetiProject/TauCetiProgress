@@ -43,14 +43,18 @@ def cmd_prompt(args):
     its output must pass are one versioned thing, pinned by the same SHA. They were duplicated once,
     the two copies drifted, and a fix was very nearly made to the dead one.
 
-    The worker substitutes its own `__PLACEHOLDERS__` after fetching, so this deliberately prints the
-    template unchanged.
+    Bind the project's roadmap directory and PR citation name here. The worker fills the
+    remaining `__PLACEHOLDERS__` after fetching.
     """
     path = PROMPT_DIR / f"{args.name}.md"
     if not path.is_file():
         print(f"no such prompt: {args.name}", file=sys.stderr)
         return 1
-    sys.stdout.write(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    text = text.replace("TauCetiRoadmap", os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap"))
+    text = text.replace("TauCeti#", os.environ.get("TAUCETI_CONTENT_NAME", "TauCeti") + "#")
+    text = text.replace("Tau Ceti", os.environ.get("TAUCETI_CONTENT_NAME", "Tau Ceti"))
+    sys.stdout.write(text)
     return 0
 
 
