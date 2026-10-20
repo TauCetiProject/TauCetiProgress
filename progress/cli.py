@@ -90,18 +90,17 @@ def cmd_plan(args):
         print(f"not due: {exc}", file=sys.stderr)
         return EX_NOPROGRESS
     if args.out:
-        from .immutable_docs import ArtifactError, FactsDocs, PagesDocs
+        from .docs import ArtifactError, Docs, store
 
         target = pathlib.Path(args.out)
-        pin = result.get("documentation")
-        if pin and pin.get("mode") == "pages":
-            # A content-named sibling prevents concurrent plan writers from replacing the bundle
-            # belonging to another complete plan. Keep these files with retained report artifacts.
-            sibling = target.with_name(target.name + ".facts-" + pin["facts_sha256"] + ".json.gz")
-            PagesDocs(pin=pin).retain(sibling)
-            result["documentation"] = {**pin, "bundle_file": sibling.name}
+        pin = result["documentation"]
+        # A content-named sibling prevents concurrent plan writers from replacing the bundle
+        # belonging to another complete plan. Keep these files with retained report artifacts.
+        sibling = target.with_name(target.name + ".facts-" + pin["facts_sha256"] + ".json.gz")
+        Docs(pin=pin).retain(sibling)
+        result["documentation"] = {**pin, "bundle_file": sibling.name}
         out = plan.plan_json(result)
-        if not FactsDocs._store(target, (out + "\n").encode("utf-8")):
+        if not store(target, (out + "\n").encode("utf-8")):
             raise ArtifactError(f"could not atomically retain plan at {target}")
         print(f"wrote {args.out}: {result['roadmap']}, {len(result['prs'])} PR(s)")
     else:
@@ -111,14 +110,13 @@ def cmd_plan(args):
 
 def cmd_facts(args):
     from . import facts
-    from .docs import DocsGenerationChanged
-    from .immutable_docs import ReplanRequired
+    from .docs import DocsGenerationChanged, ReplanRequired
 
     p = _load_plan(args.plan)
-    if "documentation" in p and p["documentation"] is None:
-        raise ReplanRequired("saved documentation pin is null; replan the window")
-    bundle_path = None
     pin = p.get("documentation")
+    if pin is None:
+        raise ReplanRequired("the plan pins no documentation facts; replan the window")
+    bundle_path = None
     if isinstance(pin, dict) and "bundle_file" in pin:
         name = pin["bundle_file"]
         if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\\" in name:
@@ -128,7 +126,7 @@ def cmd_facts(args):
     # commit range, so a report on one roadmap would be grounded in every roadmap's work.
     try:
         result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"],
-                               documentation=p.get("documentation"), bundle_path=bundle_path)
+                               documentation=pin, bundle_path=bundle_path)
     except DocsGenerationChanged as exc:
         return _generation_changed("facts", exc)
     except facts.FactsError as exc:
@@ -264,7 +262,7 @@ def main(argv=None):
         args.min_prs = plan_mod.MIN_PRS
     if getattr(args, "ref", None) is None:
         args.ref = plan_mod.CODE_REF
-    from .immutable_docs import ArtifactError, ConfigurationError, FactsReplanRequired, ReplanRequired
+    from .docs import ArtifactError, ConfigurationError, FactsReplanRequired, ReplanRequired
 
     try:
         return args.fn(args)

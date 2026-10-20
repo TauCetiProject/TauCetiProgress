@@ -353,30 +353,15 @@ def build_plan(
     # it, so that work would never be reported at all -- and would offer links for results whose
     # pages do not exist yet. Ending it at the documented commit makes the header, the prose and the
     # links describe one and the same state.
-    from .immutable_docs import ArtifactError, FactsDocs, discover
+    from .docs import ArtifactError, discover
 
     if docs is None:
         docs = discover()
-    from .docs import DocsError, DocsGenerationChanged
-
-    try:
-        docs_sha = docs.source_commit()
-    except (ArtifactError, DocsGenerationChanged):
-        raise
-    except DocsError:
-        docs_sha = None
-    if docs_sha is None:
-        raise NotDue("the published documentation could not be read, so no window can be closed")
+    docs_sha = docs.source_commit()
     tip = window.head_sha(code_dir, ref=ref)
-    if isinstance(docs, FactsDocs):
-        if not window.has_commit(code_dir, docs_sha) or not window.is_ancestor(code_dir, docs_sha, tip):
-            raise ArtifactError(
-                f"generation {docs.generation}: source {docs_sha} is not in {ref} history ({tip})"
-            )
-    if docs_sha != tip and not window.is_ancestor(code_dir, docs_sha, tip):
-        raise NotDue(
-            f"the documentation was built from {docs_sha[:7]}, which is not an ancestor of {ref} "
-            f"({tip[:7]}); they describe different histories"
+    if not window.has_commit(code_dir, docs_sha) or not window.is_ancestor(code_dir, docs_sha, tip):
+        raise ArtifactError(
+            f"generation {docs.generation}: source {docs_sha} is not in {ref} history ({tip})"
         )
     to_sha = docs_sha
 
@@ -484,15 +469,12 @@ def build_plan(
     area_layers, area_readme_sha = read_area_layers(roadmap_dir, best["rel_dir"])
     sub_roadmaps = read_sub_roadmaps(roadmap_dir, best["area"], best["rel_dir"])
 
-    documentation = {}
-    if isinstance(docs, FactsDocs):
-        from .facts import required_modules
+    from .facts import required_modules
 
-        docs.require_coverage(required_modules(code_dir, best["from_sha"], to_sha, best["prs"]))
-        documentation = {"documentation": docs.pin()}
+    docs.require_coverage(required_modules(code_dir, best["from_sha"], to_sha, best["prs"]))
 
     return {
-        **documentation,
+        "documentation": docs.pin(),
         "roadmap": best["area"],
         "rel_dir": best["rel_dir"],
         "layers": area_layers,

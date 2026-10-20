@@ -10,14 +10,11 @@ not contain.
 The ground truth is assembled from two authorities, neither of which requires understanding Lean:
 
 * **doc-gen4** says which declarations exist, what they are called, what kind they are, which page
-  documents them, and exactly which file and lines define them. It computes that from the elaborated
-  environment, which is the only way to get it right; see `docs.py` for why a text scanner cannot.
+  documents them, what their docstrings say, and exactly which file and lines define them. It
+  computes that from the elaborated environment, which is the only way to get it right; see
+  `docs.py` for why a text scanner cannot, and for the facts bundle it is read from.
 * **git blame** says who wrote those lines. A declaration belongs to this window when the commits
   that wrote its defining lines are in the window. That is an exact question with an exact answer.
-
-The one piece of text this module reads directly is the comment block sitting immediately above a
-line number the documentation supplied -- a declaration's docstring. Reading a known location is not
-parsing.
 """
 
 import os
@@ -35,8 +32,8 @@ LEAN_SUFFIX = ".lean"
 MAX_DECLS_PER_PR = 40
 MAX_DOC_CHARS = 400
 
-# Reading a module page costs a request, so a window touching an enormous number of modules is capped
-# rather than left to run away. The cap is reported when it bites.
+# Each module costs a git blame, so a window touching an enormous number of modules is capped rather
+# than left to run away. The cap is reported when it bites.
 MAX_MODULES = 200
 
 _BLAME_LINE_RE = re.compile(r"\A([0-9a-f]{40}) \d+ (\d+)")
@@ -95,34 +92,6 @@ def _first_sentence(flat):
     return (flat[: m.end()] if m else flat).strip()
 
 
-def docstring_in(text, start_line, end_line):
-    """The `/-- ... -/` docstring a declaration opens with, flattened, or "".
-
-    doc-gen4's source range BEGINS at the docstring when there is one -- `L61-L73` for a declaration
-    whose `/--` is on line 61 -- so this reads from a position the documentation supplied rather than
-    searching for the declaration itself. If the range does not open with `/--`, there is no
-    docstring and that is all this needs to know.
-    """
-    src = text.splitlines()
-    i = start_line - 1  # 1-based to 0-based
-    if i < 0 or i >= len(src) or not src[i].lstrip().startswith("/--"):
-        return ""
-    collected = []
-    limit = min(end_line, len(src))
-    while i < limit:
-        collected.append(src[i])
-        if "-/" in src[i] and (len(collected) > 1 or src[i].strip() != "/--"):
-            break
-        i += 1
-    body = "\n".join(collected).strip()
-    if body.startswith("/--"):
-        body = body[3:]
-    cut = body.find("-/")
-    if cut >= 0:
-        body = body[:cut]
-    return _first_sentence(" ".join(body.split()))
-
-
 def pr_commits(repo_dir, from_sha, to_sha, numbers):
     """The first-parent merge commits attributed to a selected set of PRs."""
     wanted = set(numbers)
@@ -149,41 +118,28 @@ def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None):
 def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None, bundle_path=None):
     """The factual spine of a window.
 
-    `to_sha` is the documented window end chosen by the plan. The documentation must still describe
-    that commit when facts are collected: accepting an older build would advance the report's cursor
-    past pull requests whose declarations were never inspected.
+    `to_sha` is the documented window end chosen by the plan, and `documentation` the plan's pin of
+    the facts bundle that describes it (`docs` supplies a reader directly instead). Accepting any
+    other build would advance the report's cursor past pull requests whose declarations were never
+    inspected.
     """
-    from .docs import Docs, DocsError, DocsGenerationChanged, DocsNotFound
-    from .immutable_docs import ArtifactError, FactsDocs, PagesDocs, ReplanRequired
+    from .docs import ArtifactError, Docs, ReplanRequired
 
+    if documentation is None and docs is None:
+        raise ReplanRequired("the plan pins no documentation facts; replan the window")
+    if documentation is not None and not isinstance(documentation, dict):
+        raise ReplanRequired("invalid saved documentation pin; replan the window")
+    # Reject local plan/history contradictions before an unavailable copy can cause a fetch or
+    # acquire the mechanical deployment-retry signal.
+    if (documentation is not None and documentation.get("source_commit") != to_sha) \
+            or not window.has_commit(repo_dir, to_sha) or not window.has_commit(repo_dir, from_sha) \
+            or not window.is_ancestor(repo_dir, from_sha, to_sha):
+        raise ReplanRequired("pinned facts source/window history mismatch; replan the window")
     if documentation is not None:
-        if not isinstance(documentation, dict) or documentation.get("mode") not in ("immutable", "pages"):
-            raise ReplanRequired("invalid saved documentation pin; replan the window")
-        # Reject local plan/history contradictions before an unavailable copy can cause a fetch
-        # or acquire the mechanical deployment-retry signal.
-        if documentation.get("source_commit") != to_sha or not window.has_commit(repo_dir, to_sha) \
-                or not window.has_commit(repo_dir, from_sha) \
-                or not window.is_ancestor(repo_dir, from_sha, to_sha):
-            raise ReplanRequired("pinned facts source/window history mismatch; replan the window")
-        docs = (PagesDocs(pin=documentation, bundle_path=bundle_path) if documentation["mode"] == "pages"
-                else FactsDocs(documentation))
-    docs = docs or Docs()  # saved legacy plans never discover a new source
-    immutable = isinstance(docs, FactsDocs)
-    if immutable and documentation is None:
-        if not window.has_commit(repo_dir, to_sha) or not window.has_commit(repo_dir, from_sha) \
-                or not window.is_ancestor(repo_dir, from_sha, to_sha):
-            raise ReplanRequired("pinned facts source/window history mismatch; replan the window")
-    try:
-        docs_sha = docs.source_commit()
-    except (DocsGenerationChanged, ArtifactError):
-        raise
-    except DocsError as exc:
-        raise FactsError(f"could not determine the documented commit: {exc}") from exc
-
+        docs = Docs(pin=documentation, bundle_path=bundle_path)
+    docs_sha = docs.source_commit()
     if docs_sha != to_sha:
-        if immutable:
-            raise ReplanRequired(f"pinned source {docs_sha} differs from plan {to_sha}; replan")
-        raise DocsGenerationChanged(to_sha, docs_sha)
+        raise ReplanRequired(f"pinned source {docs_sha} differs from plan {to_sha}; replan")
 
     numbers = (window.window_prs(repo_dir, from_sha, docs_sha)
                if pr_numbers is None else list(pr_numbers))
@@ -191,9 +147,8 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
     pr_of_commit = pr_commits(repo_dir, from_sha, docs_sha, numbers)
 
     files = changed_lean_files(repo_dir, pr_of_commit)
-    if immutable:
-        required = set(required_modules(repo_dir, from_sha, docs_sha, numbers, touched=files))
-        docs.require_coverage(required)  # before presentation limits; no partial coverage accepted
+    required = set(required_modules(repo_dir, from_sha, docs_sha, numbers, touched=files))
+    docs.require_coverage(required)  # before presentation limits; no partial coverage accepted
     truncated_modules = 0
     if len(files) > MAX_MODULES:
         truncated_modules = len(files) - MAX_MODULES
@@ -201,52 +156,27 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
 
     flat = {}
     per_pr = {}
-    unpublished = 0
+    removed = 0
     for path in files:
         page = module_page_for_file(path)
         if not page:
             continue
-        if immutable and path not in required:
-            unpublished += 1  # removed at this source commit; no declaration page is required
+        if path not in required:
+            removed += 1  # removed at this source commit; it needs no documentation
             continue
-        try:
-            documented = docs.declarations(page)
-        except ArtifactError:
-            raise
-        except DocsNotFound as exc:
-            # The docs build imports every TauCeti module. A 404 for a file still present at its
-            # source commit therefore came from a different build (or a broken deploy), even if
-            # another cached page has already contributed declarations. Only a file removed or
-            # renamed before that commit can lack a page without making this window incoherent.
-            if window.git(["ls-tree", "--name-only", docs_sha, "--", path], repo_dir).strip():
-                raise FactsError(
-                    f"the documentation has no page for {path}, which exists at {docs_sha[:7]}; "
-                    "the site may be redeploying"
-                ) from exc
-            unpublished += 1
-            continue
-        except DocsGenerationChanged:
-            raise
-        except DocsError as exc:
-            # Anything else means the documentation could not be READ, which is not the same as it
-            # having nothing to say. This used to be skipped like a missing page, so a run that
-            # straddled a deploy -- every page after it refused as "from another build" -- reported
-            # a 72-pull-request window as having added no declarations at all.
-            raise FactsError(f"could not read the documentation for {path}: {exc}") from exc
+        documented = docs.declarations(page)
         if not documented:
             continue
         try:
             blame = blame_commits(repo_dir, docs_sha, path)
             source = window.git(["show", f"{docs_sha}:{path}"], repo_dir)
         except window.GitError as exc:
-            if immutable:
-                raise ArtifactError(f"cannot attribute pinned module {path}: {exc}") from exc
-            continue
+            raise ArtifactError(f"cannot attribute pinned module {path}: {exc}") from exc
 
         for name, info in documented.items():
             if info["file"] != path or info["start"] is None:
                 continue
-            if immutable and info["end"] > len(source.splitlines()):
+            if info["end"] > len(source.splitlines()):
                 raise ReplanRequired(f"pinned source range for {name} exceeds {path}")
             span = [blame.get(n) for n in range(info["start"], info["end"] + 1)]
             span = [c for c in span if c]
@@ -263,8 +193,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
                 "kind": info["kind"],
                 "url": info["url"],
                 "file": path,
-                "doc": (_first_sentence(" ".join(info["doc"].split())) if immutable else
-                        docstring_in(source, info["start"], info["end"]))[:MAX_DOC_CHARS],
+                "doc": _first_sentence(" ".join(info["doc"].split()))[:MAX_DOC_CHARS],
                 "pr": number,
                 # Every line written in this window means the declaration is new here; only some
                 # means it existed already and was revised.
@@ -294,10 +223,10 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
         raise FactsError(
             f"no declaration could be attributed to any of the window's {len(numbers)} pull "
             f"request(s) ({len(pr_of_commit)} merge commit(s) found, {len(files)} Lean file(s) "
-            f"changed, {unpublished} with no published page); refusing to report the window as empty"
+            f"changed, {removed} removed by the documented commit); refusing to report the window as empty"
         )
     return {
-        **({"documentation": docs.pin()} if immutable else {}),
+        "documentation": docs.pin(),
         "from_sha": from_sha,
         "to_sha": to_sha,
         "docs_sha": docs_sha,

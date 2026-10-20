@@ -1,7 +1,4 @@
-"""The generated API documentation, read as the authority on what declarations exist.
-
-This module replaced a hand-written Lean scanner, and the reason is worth recording so nobody
-reintroduces one.
+"""The published documentation facts, read as the authority on what declarations exist.
 
 Deciding what a Lean file declares cannot be done by reading the text. Names are qualified by an
 enclosing `namespace`, which interacts with `section`, with `end` closing either, with `open ... in`,
@@ -13,69 +10,41 @@ plausible-looking dead link. The first version of this code produced
 `ContinuousLinearMap.IsFredholm.of_continuousLinearEquiv` for a declaration the compiler calls
 `TauCeti.IsFredholm.of_continuousLinearEquiv`.
 
-doc-gen4 already publishes the answer, computed from the elaborated environment:
+doc-gen4 already computes the answer from the elaborated environment, and TauCeti's docs build
+exports it as one file, `<docs base>/facts.json.gz`, deployed beside the HTML it describes: every
+documented module with its declarations' names, kinds, canonical links, source ranges and
+docstrings, at one source commit. One request returns one build, so a report can never mix two
+deployments. There is no other reader: a site without the file has no facts to offer, and the run
+waits for one.
 
-* `declarations/declaration-data.bmp` -- every declaration, with its kind and the page it lives on.
-* each module page -- for every declaration, a `gh_link` giving the exact source commit, file and
-  line range.
-
-So names, kinds, links and source positions are all read from there. What remains for this project's
-own code is a question git can answer exactly -- "were these lines written during this window?" --
-and reading a comment block that sits immediately above a line number the documentation supplied.
-Neither requires knowing any Lean grammar.
+The site serves only the current file. A plan retains the exact bytes it selected (keyed by origin,
+source and hash, and as a sibling of `plan --out`), so facts read the same generation after a later
+deploy; when no verified copy remains, the window is replanned without moving any cursor.
 """
 
+import gzip
+import hashlib
+import http.client
 import json
 import os
 import pathlib
 import re
 import tempfile
-import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import zlib
 
 DOCS_BASE = os.environ.get("TAUCETI_DOCS_URL", "https://taucetiproject.org/docs")
-INDEX_PATH = "declarations/declaration-data.bmp"
-
-# How long a cached page may be reused across runs.
-#
-# The site is static within one build but the builds keep coming, so a cache with no expiry pins
-# every later run to whichever build it first saw. That is not hypothetical: a worker's
-# `/tmp/tauceti-docs-cache` held an index from five days earlier, `source_commit()` therefore
-# returned a five-day-old commit, and every window `plan` could close ended there. An area whose
-# first pull request merged after that commit then had a cursor outside the documented history, and
-# the whole plan aborted -- so no progress report was written at all until someone deleted the
-# directory by hand.
-#
-# An hour is far shorter than the deploy cadence and far longer than a single run, so the cache
-# still does its actual job (one bootstrap reads hundreds of module pages) while never outliving
-# the build it describes by more than a deploy or two.
-DOCS_CACHE_TTL = int(os.environ.get("TAUCETI_DOCS_TTL", "3600"))
-
-# `<div class="decl" id="Full.Name">` opens a declaration; the `gh_link` inside it names the commit,
-# file and lines. Both are doc-gen4's own markup, so this is reading a published format rather than
-# guessing at one -- and `declarations()` fails loudly if the markup stops matching.
-_DECL_RE = re.compile(r'<div class="decl" id="([^"]+)">')
-_GH_LINK_RE = re.compile(
-    r'<div class="gh_link"><a href="https://github\.com/[^/]+/[^/]+/blob/([0-9a-f]{40})/([^"#]+)#L(\d+)-L(\d+)"'
-)
-# doc-gen4 puts a source link in every module page's navigation, including pages with no
-# declarations. Those pages still need a build identity: otherwise a newer, empty HTTP 200 page
-# could be mistaken for an empty page from the build selected by source_commit().
-_NAV_LINK_RE = re.compile(
-    r'<p class="gh_nav_link"><a href="https://github\.com/[^/]+/[^/]+/blob/([0-9a-f]{40})/[^"#]+">'
-)
-_KIND_RE = re.compile(r'<span class="decl_kind">([a-z ]+)</span>')
 
 
 class DocsError(RuntimeError):
-    """The documentation could not be read, or does not look like doc-gen4 output."""
+    """The documentation facts could not be read."""
 
 
 class DocsGenerationChanged(DocsError):
     """Positive evidence of different documentation builds; retry plan AND facts together.
 
-    Missing pages, unverifiable markup and transport failures remain ordinary DocsError results.
     Consumers must not retry paid writing or publish any part of an incoherent window.
     """
 
@@ -90,217 +59,284 @@ class DocsGenerationChanged(DocsError):
         )
 
 
-class DocsNotFound(DocsError):
-    """The site answered, and the page does not exist (HTTP 404).
+class ArtifactError(DocsError):
+    """Retriable facts infrastructure failure; retain artifacts and do not move the cursor."""
 
-    `facts.collect` checks this against the chosen source commit before deciding whether the
-    missing page is benign. A 404 from another build is not evidence that the module is absent.
-    """
+
+class ArtifactNotFound(ArtifactError):
+    """An artifact URL returned HTTP 404 (distinct from a transport outage)."""
+
+
+class UnsupportedFactsSchema(ArtifactError):
+    """An explicitly versioned bundle is newer than this consumer."""
+
+
+class ReplanRequired(ArtifactError):
+    """The saved source/window identity is invalid; retain artifacts for safe replanning."""
+
+
+class FactsReplanRequired(ArtifactError):
+    """The sole pinned copy is gone and fresh source selection is needed, without moving a cursor."""
+
+
+class ConfigurationError(ValueError):
+    """The local facts-reader configuration must be corrected."""
+
+
+class FactsGenerationChanged(DocsGenerationChanged):
+    """The mutable bundle no longer holds a saved plan's exact bytes; replan mechanically."""
+
+    def __init__(self, pin, source, digest):
+        super().__init__(pin["source_commit"], source, "facts.json.gz")
+        self.expected_sha256 = pin["facts_sha256"]
+        self.observed_sha256 = digest
+        self.args = (f"facts.json.gz changed: expected source={self.expected} "
+                     f"sha256={self.expected_sha256}, observed source={self.observed} "
+                     f"sha256={digest}; saved copy unavailable; replan the unadvanced window",)
+
+
+def _require(condition, message):
+    if not condition:
+        raise ArtifactError(message)
+
+
+def _sha(value, length):
+    return isinstance(value, str) and re.fullmatch(f"[0-9a-f]{{{length}}}", value) is not None
+
+
+def _json(raw, label):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            _require(key not in result, f"{label}: duplicate JSON key {key}")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, UnicodeError) as exc:
+        raise ArtifactError(f"{label}: invalid JSON: {exc}") from exc
+    _require(isinstance(value, dict), f"{label}: expected an object")
+    return value
+
+
+def _schema(value, label):
+    _require(type(value.get("schema_version")) is int and value["schema_version"] == 1,
+             f"{label}: unsupported schema_version")
+
+
+def _source_path(value):
+    return (isinstance(value, str) and value.endswith(".lean")
+            and not value.startswith("/") and "\\" not in value
+            and all(p not in ("", ".", "..") for p in value.split("/")))
+
+
+def _url(value, label):
+    try:
+        return urllib.parse.urlsplit(value if isinstance(value, str) else "")
+    except ValueError as exc:
+        raise ArtifactError(f"{label}: invalid URL: {exc}") from exc
+
+
+def store(path, raw):
+    """Atomically and durably write `raw` to `path`; False when the location is not writable."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
+        try:
+            with os.fdopen(fd, "wb") as output:
+                output.write(raw)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(tmp, path)
+            directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            pathlib.Path(tmp).unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 class Docs:
-    """A cached reader for one published documentation site."""
+    """One hash-verified `facts.json.gz`, discovered live or restored from a saved plan's pin."""
 
-    def __init__(self, base=DOCS_BASE, cache_dir=None, opener=None, ttl=None):
+    def __init__(self, base=None, pin=None, cache_dir=None, opener=None, raw=None, bundle_path=None):
+        self._restoring = pin is not None
+        try:
+            if pin is not None:
+                _require(isinstance(pin, dict), "invalid saved facts bundle pin")
+                _schema(pin, "pin")
+                _require(_sha(pin.get("source_commit"), 40) and _sha(pin.get("facts_sha256"), 64),
+                         "invalid saved facts bundle identity")
+                _require("coverage" in pin and "generation" in pin, "incomplete saved facts bundle pin")
+                base = pin.get("docs_base")
+            parsed = _url(base, "docs_base")
+            _require(parsed.scheme in ("http", "https") and parsed.netloc
+                     and not parsed.query and not parsed.fragment and not parsed.username,
+                     "invalid docs_base")
+        except ArtifactError as exc:
+            if pin is not None:
+                raise ReplanRequired(str(exc)) from exc
+            raise ConfigurationError(str(exc)) from exc
         self.base = base.rstrip("/")
-        self.cache_dir = pathlib.Path(
-            cache_dir or os.environ.get("TAUCETI_DOCS_CACHE") or "/tmp/tauceti-docs-cache"
-        )
-        self.ttl = DOCS_CACHE_TTL if ttl is None else ttl
+        self._bundle_file = pin.get("bundle_file") if pin else None
         self._opener = opener or self._fetch
-        self._index = None
-        self._pages = {}
-        self._source_commit = None
-
-    # ----- transport -------------------------------------------------------------------------
-
-    def _fetch(self, url):
-        try:
-            with urllib.request.urlopen(url, timeout=60) as resp:
-                return resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            # `HTTPError` is a `URLError`, so it has to be caught first. Only a 404 says the page is
-            # absent; a 403, 429 or 5xx says nothing about the page and everything about the request.
-            if exc.code == 404:
-                raise DocsNotFound(f"{url} does not exist (HTTP 404)") from exc
-            raise DocsError(f"fetching {url} failed: {exc}") from exc
-        except urllib.error.URLError as exc:
-            raise DocsError(f"fetching {url} failed: {exc}") from exc
-
-    def _fresh(self, path):
-        """Is a cached file young enough to reuse? A missing or unreadable one never is.
-
-        The age is required to be non-NEGATIVE as well as small. An mtime in the future -- a corrected
-        clock, or a shared filesystem whose skew runs the other way -- otherwise reads as "fresh" for
-        as long as the skew lasts, which is the immortal-cache outage rebuilt out of arithmetic.
-        """
-        if self.ttl <= 0:
-            return False
-        try:
-            age = time.time() - path.stat().st_mtime
-        except OSError:
-            return False
-        return 0 <= age < self.ttl
-
-    def _store(self, path, text):
-        """Put `text` at `path` so a concurrent reader sees either the old file or the whole new one.
-
-        Several workers share one cache directory. `write_text` truncates first, so a reader arriving
-        mid-write finds a fresh mtime on a partial file: a half-written index raises a JSON error, and
-        a half-written module page parses as ZERO declarations, which reads as an honest "nothing was
-        documented here" and is silently reported as such. Write a sibling temp file and rename.
-        """
-        try:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=self.cache_dir, prefix=".tmp-")
+        state = pathlib.Path(os.environ.get("XDG_STATE_HOME") or pathlib.Path.home() / ".local/state")
+        root = pathlib.Path(cache_dir or os.environ.get("TAUCETI_FACTS_CACHE")
+                            or state / "tauceti-progress/facts")
+        origin = root / hashlib.sha256(self.base.encode()).hexdigest() / "pages"
+        self._retained = False
+        if pin is not None:
+            cache_path = origin / pin["source_commit"] / pin["facts_sha256"] / "facts.json.gz"
+            for path in (bundle_path, cache_path):
+                if path is not None:
+                    cached = self._verified_copy(pathlib.Path(path), pin["facts_sha256"])
+                    if cached is not None:
+                        raw = cached
+                        self._retained = True
+                        break
+        if raw is None:
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(text)
-                os.replace(tmp, path)
-            except OSError:
-                pathlib.Path(tmp).unlink(missing_ok=True)
+                raw = self._opener(self.base + "/facts.json.gz")
+            except ArtifactNotFound as exc:
+                if pin is not None:
+                    raise FactsReplanRequired(
+                        f"pinned facts unavailable: source={pin['source_commit']} "
+                        f"sha256={pin['facts_sha256']}; live bundle returned 404; "
+                        "replan the unadvanced window") from exc
                 raise
-        except OSError:
-            pass  # a cache that cannot be written is not an error
-
-    def _get(self, rel, refetch=False):
-        """Fetch `rel` relative to the docs root, memoised in process and on disk.
-
-        The disk cache is keyed by URL and is an optimisation for the bootstrap case, which reads many
-        module pages. It expires after `ttl` because the site itself does not stand still -- see
-        DOCS_CACHE_TTL for the outage that taught us. Expiry alone does NOT make a run coherent, since
-        two URLs cross their TTLs independently; `declarations` is what enforces one build per run.
-
-        `refetch` bypasses both caches, for re-reading a page that turned out to be from a stale build.
-        """
-        if rel in self._pages and not refetch:
-            return self._pages[rel]
-        path = self.cache_dir / rel.replace("/", "__")
-        text = None
-        if not refetch and self._fresh(path):
+        _require(isinstance(raw, bytes), "facts.json.gz: expected binary response")
+        digest = hashlib.sha256(raw).hexdigest()
+        try:
             try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
-                text = None  # unreadable or vanished under us: fall through to the transport
-        if text is None:
-            text = self._opener(f"{self.base}/{rel}")
-            self._store(path, text)
-        self._pages[rel] = text
-        return text
+                data = _json(gzip.decompress(raw), "facts.json.gz")
+            except (OSError, EOFError, zlib.error) as exc:
+                raise ArtifactError(f"facts.json.gz: truncated or invalid gzip: {exc}") from exc
+            version = data.get("schema_version")
+            _require(type(version) is int, "facts.json.gz: invalid schema_version")
+        except ArtifactError as exc:
+            if pin is not None and digest == pin["facts_sha256"]:
+                raise ReplanRequired(f"invalid hash-verified saved facts: {exc}") from exc
+            raise
+        # A complete, differently hashed response cannot replace this pin. Replanning discovers
+        # afresh, while a corrupt/truncated transfer above remains a transport/integrity wait.
+        if pin is not None and digest != pin["facts_sha256"]:
+            if version == 1 and _sha(data.get("source_commit"), 40):
+                raise FactsGenerationChanged(pin, data["source_commit"], digest)
+            raise FactsReplanRequired(
+                f"pinned facts unavailable: source={pin['source_commit']} sha256={pin['facts_sha256']}; "
+                f"live bundle sha256={digest} schema={version}; replan the unadvanced window")
+        try:
+            if version != 1:
+                raise UnsupportedFactsSchema(f"facts.json.gz advertises unsupported schema {version}")
+            self.commit = data.get("source_commit")
+            _require(_sha(self.commit, 40), "facts.json.gz: invalid source_commit")
+            provenance = data.get("provenance")
+            _require(isinstance(provenance, dict) and all(isinstance(provenance.get(k), str)
+                     and provenance[k] for k in ("toolchain", "doc_gen")),
+                     "facts.json.gz: missing toolchain/doc-gen provenance")
+            modules = data.get("modules")
+            _require(isinstance(modules, dict) and modules and all(_source_path(p) for p in modules),
+                     "facts.json.gz: invalid module coverage")
+            self.modules = sorted(modules)
+            self.facts_hash = digest
+            self.generation = f"pages/{self.commit}/{digest}"
+            self._load_modules(modules)
+            if pin is not None:
+                _require(self.commit == pin["source_commit"],
+                         "saved source commit contradicts the pinned facts hash")
+                _require(pin["coverage"] == self.modules, "pin: module coverage changed")
+                _require(pin["generation"] == self.generation, "pin: generation mismatch")
+        except ArtifactError as exc:
+            if pin is not None:
+                raise ReplanRequired(str(exc)) from exc
+            raise
+        self._raw = raw
+        self.cache_dir = origin / self.commit / digest
 
-    # ----- the declaration index -------------------------------------------------------------
-
-    def index(self):
-        """`{full_name: {"kind", "docLink"}}` for every declaration the site documents."""
-        if self._index is None:
-            try:
-                data = json.loads(self._get(INDEX_PATH))
-            except json.JSONDecodeError as exc:
-                raise DocsError(f"{INDEX_PATH} is not JSON: {exc}") from exc
-            decls = data.get("declarations")
-            if not isinstance(decls, dict) or not decls:
-                raise DocsError(f"{INDEX_PATH} has no declarations map")
-            self._index = decls
-        return self._index
-
-    def module_of(self, name):
-        """The module page a declaration lives on, as a site-relative path, or None."""
-        entry = self.index().get(name)
-        if not entry:
-            return None
-        link = entry.get("docLink") or ""
-        return link[2:].split("#", 1)[0] if link.startswith("./") else None
-
-    # ----- module pages ----------------------------------------------------------------------
+    def _load_modules(self, modules):
+        self._modules = modules
+        names = set()
+        for path, declarations in modules.items():
+            _require(isinstance(declarations, dict), f"facts: invalid module {path}")
+            for name, info in declarations.items():
+                _require(isinstance(name, str) and bool(name) and name not in names,
+                         "facts: empty or duplicate declaration name")
+                names.add(name)
+                _require(isinstance(info, dict), f"facts: invalid declaration {name}")
+                _require(isinstance(info.get("kind"), str) and bool(info["kind"])
+                         and isinstance(info.get("doc"), str), f"facts: invalid kind/doc for {name}")
+                url = _url(info.get("url"), f"facts URL for {name}")
+                _require(url.scheme in ("http", "https") and bool(url.netloc) and bool(url.fragment),
+                         f"facts: invalid canonical URL for {name}")
+                suffix = "/" + path[:-5] + ".html"
+                _require((url.path.endswith(suffix) or urllib.parse.unquote(url.path).endswith(suffix))
+                         and (url.fragment == name or urllib.parse.unquote(url.fragment) == name),
+                         f"facts: canonical URL does not match module/declaration {name}")
+                _require(info.get("file") == path, f"facts: source file mismatch for {name}")
+                start, end = info.get("start"), info.get("end")
+                _require("start" in info and "end" in info and
+                         ((start is None and end is None) or
+                          (type(start) is int and type(end) is int and 1 <= start <= end)),
+                         f"facts: invalid source range for {name}")
 
     @staticmethod
-    def _page_commit(html, module_page="a module page"):
-        """The build commit named by a module page's source links, if any.
+    def _fetch(url):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            error = ArtifactNotFound if exc.code == 404 else ArtifactError
+            exc.close()
+            raise error(f"fetching {url} failed: {exc}") from exc
+        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as exc:
+            raise ArtifactError(f"fetching {url} failed: {exc}") from exc
 
-        doc-gen4 writes a source link in the navigation even when the page has no declarations.
-        Declaration links and the navigation must name the same build when both are present.
-        """
-        nav = _NAV_LINK_RE.search(html)
-        decl = _GH_LINK_RE.search(html)
-        if nav and decl and nav.group(1) != decl.group(1):
-            raise DocsError(f"{module_page} has source links from different builds")
-        link = nav or decl
-        return link.group(1) if link else None
+    @staticmethod
+    def _verified_copy(path, digest):
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return None
+        return raw if hashlib.sha256(raw).hexdigest() == digest else None
+
+    def retain(self, path=None):
+        """Retain only selected plans. Explicit paths tie a bundle's lifetime to its plan artifact."""
+        if path is None and self._retained:
+            return
+        path = pathlib.Path(path) if path is not None else self.cache_dir / "facts.json.gz"
+        if self._verified_copy(path, self.facts_hash) is None:
+            _require(store(path, self._raw), f"cannot retain pinned facts at {path}")
+            _require(self._verified_copy(path, self.facts_hash) is not None,
+                     f"cannot retain complete pinned facts at {path}")
+        self._retained = True
+
+    def source_commit(self):
+        return self.commit
+
+    def require_coverage(self, paths):
+        missing = sorted(set(paths) - set(self.modules))
+        if missing:
+            error = ReplanRequired if self._restoring else ArtifactError
+            raise error(f"generation {self.generation}: missing required modules: {missing}")
 
     def declarations(self, module_page):
-        """Every declaration documented on a module page.
+        path = module_page.removesuffix(".html") + ".lean"
+        self.require_coverage([path])
+        return {name: {**info, "commit": self.commit} for name, info in self._modules[path].items()}
 
-        Returns `{full_name: {"kind", "url", "file", "start", "end", "commit"}}`. A declaration with
-        no `gh_link` (there are a few, for compiler-generated entries) is reported without a source
-        position, and callers simply cannot decide whether it is new.
+    def pin(self):
+        self.retain()
+        return {"schema_version": 1, "docs_base": self.base,
+                "source_commit": self.commit, "generation": self.generation,
+                "facts_sha256": self.facts_hash, "coverage": self.modules,
+                **({"bundle_file": self._bundle_file} if self._bundle_file else {})}
 
-        Every page is checked against the build this reader has already committed to. Expiry is
-        per-URL, so without the check a run can straddle a deploy: the probe page expires and fixes
-        `source_commit()` at the NEW build while another page is still served, in-TTL, from the old
-        one. `facts.collect` then reads line spans from one build and blames them at the other's
-        commit, which shifts a declaration's span onto whatever now occupies those lines -- reporting
-        work that did not land in the window, or missing work that did, with the cursor advancing past
-        it either way. A disagreeing page is re-fetched once; if the site is still moving, refuse.
-        """
-        html = self._get(module_page)
-        seen = self._page_commit(html, module_page)
-        if self._source_commit is not None:
-            if seen != self._source_commit:
-                html = self._get(module_page, refetch=True)
-                seen = self._page_commit(html, module_page)
-                if seen is None:
-                    # A successful response can be an empty module page from a newer build. With
-                    # no source link it cannot be tied to the build chosen by source_commit(), so
-                    # accepting it would let a nonempty but incomplete report advance the cursor.
-                    raise DocsError(
-                        f"{module_page} has no source link to verify its build against "
-                        f"{self._source_commit[:7]}; refusing an incoherent documentation window"
-                    )
-                if seen != self._source_commit:
-                    raise DocsGenerationChanged(self._source_commit, seen, module_page)
-        out = {}
-        marks = [(m.start(), m.group(1)) for m in _DECL_RE.finditer(html)]
-        if not marks:
-            return out
-        for i, (pos, name) in enumerate(marks):
-            end = marks[i + 1][0] if i + 1 < len(marks) else len(html)
-            seg = html[pos:end]
-            gh = _GH_LINK_RE.search(seg)
-            kind = _KIND_RE.search(seg)
-            out[name] = {
-                "kind": (kind.group(1).strip() if kind else ""),
-                "url": f"{self.base}/{module_page}#{name}",
-                "commit": gh.group(1) if gh else None,
-                "file": gh.group(2) if gh else None,
-                "start": int(gh.group(3)) if gh else None,
-                "end": int(gh.group(4)) if gh else None,
-            }
-        return out
 
-    def source_commit(self, probe_module=None):
-        """The TauCeti commit the published documentation was built from.
-
-        Read from the site itself rather than assumed, because the docs deploy independently of the
-        branch that nominates them: at the time of writing the published build was several commits
-        behind the branch tip. Reporting links against the branch tip would then produce dead links
-        for anything newer, so the commit stated by the documentation is what everything is anchored
-        to.
-        """
-        if self._source_commit is None:
-            module = probe_module or self._any_module()
-            for info in self.declarations(module).values():
-                if info["commit"]:
-                    self._source_commit = info["commit"]
-                    break
-            else:
-                raise DocsError(f"no source link found on {module}; cannot date the documentation")
-        return self._source_commit
-
-    def _any_module(self):
-        """Some module page, for probing the build's source commit."""
-        root = os.environ.get("TAUCETI_LEAN_ROOT", "").replace(".", "/")
-        for name in self.index():
-            page = self.module_of(name)
-            if page and (not root or page == root + ".html" or page.startswith(root + "/")):
-                return page
-        raise DocsError("the declaration index names no project module pages")
+def discover(base=None, cache_dir=None, opener=None):
+    """The live bundle, fetched afresh for each plan; never a stale disk discovery result."""
+    return Docs(base=base or DOCS_BASE, cache_dir=cache_dir, opener=opener)
