@@ -30,6 +30,8 @@ message, since every merged section is announced automatically. That second sink
 radius and is named here so it is not overlooked.
 """
 
+import os
+
 import datetime
 import json
 import re
@@ -43,7 +45,7 @@ BRANCH_RE = re.compile(r"\Aprogress/([0-9a-f]{7})-([0-9a-f]{7})/([A-Za-z0-9]+)\Z
 # group 3 the basename. The parent is captured because an area name can legitimately exist under
 # BOTH parents -- `Completed/` is where a finished roadmap is archived -- so matching on the area and
 # basename alone would let one update write to two directories at once.
-PATH_RE = re.compile(r"\A(TauCetiRoadmap|Completed)/([A-Za-z0-9]+)/(STATUS\.md|PROGRESS\.md)\Z")
+PATH_RE = re.compile(r"\A(" + "|".join(re.escape(x) for x in (os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap"), os.environ.get("TAUCETI_COMPLETED_DIR", "Completed"))) + r")/([A-Za-z0-9]+)/(STATUS\.md|PROGRESS\.md)\Z")
 
 # A blob mode other than a regular file means a symlink (120000), a gitlink/submodule (160000), or
 # an executable. A symlink named STATUS.md pointing at something else is the classic way to make a

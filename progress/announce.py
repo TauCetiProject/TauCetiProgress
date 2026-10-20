@@ -13,6 +13,8 @@ none. It is also a separate job from the merge, so the App token that can write 
 and the Zulip key never sit in the same job.
 """
 
+import os
+
 import pathlib
 import re
 
@@ -23,7 +25,7 @@ from . import files, zulip
 ID_PREFIX = "progress-log-id:"
 
 MAX_MESSAGE_CHARS = 8000
-ROADMAP_PARENTS = ("TauCetiRoadmap", "Completed")
+ROADMAP_PARENTS = (os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap"), os.environ.get("TAUCETI_COMPLETED_DIR", "Completed"))
 
 
 def section_id(header):
@@ -51,11 +53,11 @@ def split_section(text):
     return headers[0], body
 
 
-def roadmap_file_url(area, filename, parent="TauCetiRoadmap"):
+def roadmap_file_url(area, filename, parent=os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap")):
     """Canonical main-branch URL for a generated roadmap file."""
     if parent not in ROADMAP_PARENTS:
         raise ValueError(f"unexpected roadmap parent: {parent}")
-    return f"https://github.com/TauCetiProject/TauCetiRoadmap/blob/main/{parent}/{area}/{filename}"
+    return f"https://github.com/{os.environ.get('TAUCETI_ROADMAP_REPO', 'TauCetiProject/TauCetiRoadmap')}/blob/{os.environ.get('TAUCETI_BASE_BRANCH', 'main')}/{parent}/{area}/{filename}"
 
 
 def unwrap_prose(prose):
@@ -72,7 +74,7 @@ def unwrap_prose(prose):
     )
 
 
-def render_message(header, prose, roadmap_url=None, status_url=None, roadmap_parent="TauCetiRoadmap"):
+def render_message(header, prose, roadmap_url=None, status_url=None, roadmap_parent=os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap")):
     """The Zulip message for one section.
 
     Shape follows the review Kim gave Chris's bot: `TauCeti#NNN` linkifiers rather than markdown
@@ -108,7 +110,7 @@ def already_posted(client, channel, topic, sid):
     return None
 
 
-def run(section_file, channel=None, topic=None, roadmap_parent="TauCetiRoadmap", dry_run=False):
+def run(section_file, channel=None, topic=None, roadmap_parent=os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap"), dry_run=False):
     """Post the section in `section_file`. Returns a process exit code.
 
     Raises on a transient failure rather than swallowing it, so the workflow run goes red and a

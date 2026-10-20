@@ -11,6 +11,8 @@ Two design points worth stating, because both were defects in an earlier draft:
   right now".
 """
 
+import os
+
 import base64
 import fcntl
 import hashlib
@@ -20,8 +22,8 @@ from pathlib import Path
 import subprocess
 import time
 
-ROADMAP_REPO = "TauCetiProject/TauCetiRoadmap"
-CODE_REPO = "TauCetiProject/TauCeti"
+ROADMAP_REPO = os.environ.get("TAUCETI_ROADMAP_REPO", "TauCetiProject/TauCetiRoadmap")
+CODE_REPO = os.environ.get("TAUCETI_REPO", "TauCetiProject/TauCeti")
 
 ROADMAP_LABEL_PREFIX = "roadmap/"
 # Labels that exist but name no roadmap: infra/refactor/bump work, and new mathematics whose

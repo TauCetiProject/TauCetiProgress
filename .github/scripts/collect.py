@@ -29,6 +29,12 @@ them explicitly:
 Run as: collect.py --repo O/R --pr N --out bundle.json
 """
 
+import os
+
+from tauceti_tools.project import bootstrap
+
+bootstrap()
+
 import argparse
 import base64
 import datetime
@@ -45,7 +51,7 @@ from progress import files, gate, gh as gh_mod, plan as plan_mod, window  # noqa
 
 # Where the reported window has to live. `to_sha` is checked for reachability from this branch, which
 # tracks the newest TauCeti commit with published documentation.
-CODE_REPO = "TauCetiProject/TauCeti"
+CODE_REPO = os.environ.get("TAUCETI_REPO", "TauCetiProject/TauCeti")
 CODE_REF = "docgen"
 
 # `compare` returns at most 300 files. More than that cannot be a progress report, and a truncated

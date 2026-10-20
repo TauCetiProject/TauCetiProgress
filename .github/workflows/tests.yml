@@ -1,7 +1,7 @@
 name: tests
 
 # Byte-compile everything and run the plain-script test suites, matching TauCetiReview's minimal CI.
-# There is no test framework and no PyPI dependency: each tests/test_*.py exits non-zero on failure.
+# There is no test framework and only the shared Tools dependency: each tests/test_*.py exits non-zero on failure.
 
 on:
   push:
@@ -20,4 +20,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Run the suites
-        run: ./tests/run
+        run: |
+          python3 -m pip install .
+          ./tests/run

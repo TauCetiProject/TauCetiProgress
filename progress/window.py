@@ -12,6 +12,8 @@ the stored cursor and are never reported by any later window.
 Pure functions take text and lists; the two that shell out to `git` are marked.
 """
 
+import os
+
 import re
 import subprocess
 
@@ -32,7 +34,7 @@ _MERGE_RE = re.compile(r"\AMerge pull request #(\d+)\b")
 # The cost is latency: a report describes the project as of the last published docs build rather than
 # the tip. That is the right trade for a document whose whole purpose is to be readable, and the
 # header records the exact commit either way, so nothing is misdated.
-CODE_REF = "origin/docgen"
+CODE_REF = os.environ.get("TAUCETI_DOCS_REF", "origin/docgen")
 
 
 class GitError(RuntimeError):

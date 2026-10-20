@@ -15,6 +15,8 @@ must not silently treat an error as "nothing to do" -- that would let a transien
 advance a cursor past real work.
 """
 
+import os
+
 import argparse
 import json
 import pathlib
@@ -199,8 +201,8 @@ def build_parser():
     n.add_argument("--topic", default=None)
     n.add_argument(
         "--roadmap-parent",
-        choices=("TauCetiRoadmap", "Completed"),
-        default="TauCetiRoadmap",
+        choices=(os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap"), os.environ.get("TAUCETI_COMPLETED_DIR", "Completed")),
+        default=os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap"),
         help="parent directory containing the roadmap in TauCetiRoadmap",
     )
     n.add_argument("--dry-run", action="store_true")
@@ -209,7 +211,9 @@ def build_parser():
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    from tauceti_tools.project import conf_argument
+
+    args = build_parser().parse_args(conf_argument(list(sys.argv[1:] if argv is None else argv))[1])
     # Defaults live in plan.py so there is one source of truth for the thresholds.
     from . import plan as plan_mod
 

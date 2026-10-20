@@ -29,6 +29,15 @@ name: progress-merge
 on:
   workflow_call:
     inputs:
+      tools_repository:
+        type: string
+        default: TauCetiProject/TauCetiTools
+      tools_ref:
+        type: string
+        default: ''
+      project_conf:
+        type: string
+        default: ''
       pr:
         description: The pull request number to consider.
         required: true
@@ -103,6 +112,28 @@ jobs:
           ref: ${{ inputs.progress_ref }}
           path: validator
           persist-credentials: false
+
+      - name: Checkout configured shared tools
+        if: inputs.tools_ref != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tools_repository }}
+          ref: ${{ inputs.tools_ref }}
+          path: .tauceti-tools
+          persist-credentials: false
+      - name: Load project configuration
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.tauceti-tools
+          PROJECT_CONF: ${{ inputs.project_conf }}
+        run: |
+          if [ -n "$PROJECT_CONF" ]; then
+            test -n '${{ inputs.tools_ref }}'
+            python3 -m tauceti_tools config environment --conf "$PROJECT_CONF" --github-env "$GITHUB_ENV"
+          else
+            # Legacy callers still need the pinned package dependency.
+            python3 -m pip install ./validator
+          fi
+          echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
 
       # No checkout of the roadmap repository at all. The collector reads current `main` and the head
       # through the API at pinned SHAs, so there is no working tree that could drift from what is

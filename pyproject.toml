@@ -5,9 +5,9 @@ description = "Decide, generate, and publish per-roadmap progress reports for Ta
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-# No Python dependencies: like the review engine, this shells out to the `git` and `gh`
-# CLIs, and talks to Zulip over the standard library.
-dependencies = []
+# TauCetiTools supplies the shared configuration. Provider access still uses git/gh
+# and the standard library.
+dependencies = ["tauceti-tools @ git+https://github.com/TauCetiProject/TauCetiTools@4c7381d3a47fd9b9f7aa786dd2a28c375e36fee6"]
 
 [project.scripts]
 tauceti-progress = "progress.cli:main"
