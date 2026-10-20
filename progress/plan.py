@@ -337,6 +337,7 @@ def build_plan(
     stale_hours=STALE_PR_HOURS,
     now=None,
     only_area=None,
+    docs=None,
 ):
     """The whole decision. Returns a plan dict, or raises NotDue.
 
@@ -364,10 +365,27 @@ def build_plan(
     # it, so that work would never be reported at all -- and would offer links for results whose
     # pages do not exist yet. Ending it at the documented commit makes the header, the prose and the
     # links describe one and the same state.
-    docs_sha = docs_source_commit()
+    from .immutable_docs import ArtifactError, FactsDocs, discover
+
+    if docs is None and (os.environ.get("TAUCETI_FACTS_BASE")
+                         or os.environ.get("TAUCETI_FACTS_MODE")):
+        docs = discover()
+    from .docs import DocsError, DocsGenerationChanged
+
+    try:
+        docs_sha = docs.source_commit() if docs is not None else docs_source_commit()
+    except (ArtifactError, DocsGenerationChanged):
+        raise
+    except DocsError:
+        docs_sha = None
     if docs_sha is None:
         raise NotDue("the published documentation could not be read, so no window can be closed")
     tip = window.head_sha(code_dir, ref=ref)
+    if isinstance(docs, FactsDocs):
+        if not window.has_commit(code_dir, docs_sha) or not window.is_ancestor(code_dir, docs_sha, tip):
+            raise ArtifactError(
+                f"generation {docs.generation}: source {docs_sha} is not in {ref} history ({tip})"
+            )
     if docs_sha != tip and not window.is_ancestor(code_dir, docs_sha, tip):
         raise NotDue(
             f"the documentation was built from {docs_sha[:7]}, which is not an ancestor of {ref} "
@@ -479,7 +497,15 @@ def build_plan(
     area_layers, area_readme_sha = read_area_layers(roadmap_dir, best["rel_dir"])
     sub_roadmaps = read_sub_roadmaps(roadmap_dir, best["area"], best["rel_dir"])
 
+    documentation = {}
+    if isinstance(docs, FactsDocs):
+        from .facts import required_modules
+
+        docs.require_coverage(required_modules(code_dir, best["from_sha"], to_sha, best["prs"]))
+        documentation = {"documentation": docs.pin()}
+
     return {
+        **documentation,
         "roadmap": best["area"],
         "rel_dir": best["rel_dir"],
         "layers": area_layers,
