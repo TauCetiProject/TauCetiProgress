@@ -5,8 +5,14 @@ is unit-tested is everything that decides *what* those paths will do.
 """
 
 import json
+import os
 import pathlib
+import shutil
+import socket
+import subprocess
 import sys
+import tempfile
+import threading
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -514,7 +520,94 @@ def test_push_target_falls_back_to_a_fork():
     finally:
         apply_mod.gh.gh, apply_mod._run = orig_gh, orig_run
     assert (remote, owner) == ("fork", "someone")
-    assert ["repo", "fork", "TauCetiProject/TauCetiRoadmap", "--clone=false", "--remote=false"] in calls
+    # Pinned literally: `--clone=false` is what keeps this noninteractive, and `--remote` with a
+    # repository argument is rejected by current `gh` (issue #8).
+    assert ["repo", "fork", "TauCetiProject/TauCetiRoadmap", "--clone=false"] in calls
+
+
+def _refusing_proxy():
+    """A loopback HTTPS proxy that answers every CONNECT with 403 and records its target.
+
+    Owned by the test, on an ephemeral port, rather than pointing at a port assumed to be unused:
+    something listening there could hold the request open, or forward it off the machine.
+    """
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(0.2)
+    targets, stop = [], threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                continue
+            with conn:
+                conn.settimeout(5)
+                head = b""
+                try:
+                    while b"\r\n\r\n" not in head:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        head += chunk
+                    targets.append(head.split(b"\r\n", 1)[0].decode(errors="replace"))
+                    conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                except OSError:
+                    pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    def close():
+        stop.set()
+        thread.join(timeout=5)
+        server.close()
+    return server.getsockname()[1], targets, close
+
+
+def test_the_real_gh_accepts_the_fork_arguments():
+    """The argument contract is the installed `gh`'s, so a stub cannot check it; run the real CLI.
+
+    `gh` validates flags before it makes any request, and current versions reject `--remote` next
+    to a repository argument at exactly that stage. So run it with a bogus token and every request
+    routed to a local proxy that refuses to tunnel: no fork can be created, and whether the proxy
+    saw the fork request says whether `gh` accepted the arguments or stopped at the flags. This
+    covers flag validation only; `test_push_target_falls_back_to_a_fork` pins the argument list.
+    """
+    exe = shutil.which("gh")
+    if exe is None:
+        # CI must exercise this; a local checkout without `gh` cannot.
+        assert not os.environ.get("CI"), "gh is required in CI to check the fork arguments"
+        print("     (skipped: gh not installed)")
+        return
+    port, targets, close = _refusing_proxy()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith(("GH_", "GITHUB_", "XDG_"))
+                   and k.lower() not in ("no_proxy", "https_proxy", "http_proxy", "all_proxy")}
+            env.update(
+                GH_TOKEN="not-a-real-token", GH_CONFIG_DIR=tmp, GH_PROMPT_DISABLED="1",
+                GH_TELEMETRY="disabled", GH_NO_UPDATE_NOTIFIER="1",
+                GH_NO_EXTENSION_UPDATE_NOTIFIER="1", XDG_CONFIG_HOME=tmp, XDG_STATE_HOME=tmp,
+                XDG_CACHE_HOME=tmp, XDG_DATA_HOME=tmp,
+                HTTPS_PROXY=f"http://127.0.0.1:{port}", HTTP_PROXY=f"http://127.0.0.1:{port}",
+                NO_PROXY="",
+            )
+            run = lambda args: subprocess.run(  # noqa: E731
+                [exe, *args], capture_output=True, text=True, cwd=tmp, env=env,
+                stdin=subprocess.DEVNULL, timeout=60)
+            version = run(["--version"])
+            assert version.returncode == 0 and version.stdout.strip(), version.stderr
+            print(f"     {version.stdout.splitlines()[0]}")
+            proc = run(apply_mod.fork_args("TauCetiProject/TauCetiRoadmap"))
+    finally:
+        close()
+    assert proc.returncode != 0, "the refusing proxy must have stopped the request"
+    assert any(t.startswith("CONNECT api.github.com:443 ") for t in targets), \
+        f"gh never attempted the fork request, so it rejected the arguments: {proc.stderr}"
 
 
 # ----- a stranger must not be able to lock a window ---------------------------------------------
