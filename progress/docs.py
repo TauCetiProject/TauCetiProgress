@@ -72,6 +72,23 @@ class DocsError(RuntimeError):
     """The documentation could not be read, or does not look like doc-gen4 output."""
 
 
+class DocsGenerationChanged(DocsError):
+    """Positive evidence of different documentation builds; retry plan AND facts together.
+
+    Missing pages, unverifiable markup and transport failures remain ordinary DocsError results.
+    Consumers must not retry paid writing or publish any part of an incoherent window.
+    """
+
+    def __init__(self, expected, observed, page=None):
+        self.expected = expected
+        self.observed = observed
+        self.page = page
+        super().__init__(
+            f"{page or 'the documentation'} was built from {observed[:7]}, not {expected[:7]}; "
+            "the site is redeploying; replan the window before collecting facts"
+        )
+
+
 class DocsNotFound(DocsError):
     """The site answered, and the page does not exist (HTTP 404).
 
@@ -205,7 +222,7 @@ class Docs:
         nav = _NAV_LINK_RE.search(html)
         decl = _GH_LINK_RE.search(html)
         if nav and decl and nav.group(1) != decl.group(1):
-            raise DocsError("a module page has source links from different builds")
+            raise DocsGenerationChanged(nav.group(1), decl.group(1), "a module page")
         link = nav or decl
         return link.group(1) if link else None
 
@@ -225,8 +242,8 @@ class Docs:
         it either way. A disagreeing page is re-fetched once; if the site is still moving, refuse.
         """
         html = self._get(module_page)
+        seen = self._page_commit(html)
         if self._source_commit is not None:
-            seen = self._page_commit(html)
             if seen != self._source_commit:
                 html = self._get(module_page, refetch=True)
                 seen = self._page_commit(html)
@@ -239,10 +256,7 @@ class Docs:
                         f"{self._source_commit[:7]}; refusing an incoherent documentation window"
                     )
                 if seen != self._source_commit:
-                    raise DocsError(
-                        f"{module_page} was built from {seen[:7]}, not {self._source_commit[:7]}; "
-                        f"the site is redeploying and this run cannot describe one build"
-                    )
+                    raise DocsGenerationChanged(self._source_commit, seen, module_page)
         out = {}
         marks = [(m.start(), m.group(1)) for m in _DECL_RE.finditer(html)]
         if not marks:

@@ -73,6 +73,27 @@ Wall-clock time is used only for display. A cursor made of timestamps would be w
 clock running fast advances it past PRs whose merge times then fall *before* the stored cursor, and
 those PRs are never reported at all.
 
+## Documentation generation retries
+
+`plan` and `facts` exit **76** (`EX_DOCS_GENERATION_CHANGED`) when source links positively
+identify different documentation builds. Python callers receive `progress.docs.DocsGenerationChanged`
+with full `expected` and `observed` commit IDs and an optional `page`. The stderr diagnostic starts
+with `<stage>: documentation-generation-changed:` and includes both commits. Neither command writes
+its output artifact on this result. Existing artifacts are preserved; consumers must check the exit
+code before using them.
+
+Consumers should retry **plan and facts together**, at most twice after the initial attempt, with
+a new isolated `TAUCETI_DOCS_CACHE` directory shared by the two stages of each attempt. Start no
+writing model until both succeed. Persistent churn is an infrastructure wait for the same unadvanced
+report obligation, without spending a repair attempt or report cadence window. Never retry paid prose
+because facts changed. Keep prepared publication artifacts and the published cursor intact.
+
+Other failures retain their existing behavior: a missing extant module, unverifiable source links,
+fetch failure, or invalid factual window is not this retry signal. Missing deleted modules remain
+allowed. The exact planned commit, history, declaration and publication guards still apply. Older
+releases report generation changes as ordinary errors, so consumers may recognize their specific
+generation-mismatch diagnostic during rollout while keeping other errors fatal.
+
 ## The coverage header
 
 A status snapshot may carry a second machine header beside `tauceti-status:v1`:

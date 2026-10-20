@@ -131,19 +131,18 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     that commit when facts are collected: accepting an older build would advance the report's cursor
     past pull requests whose declarations were never inspected.
     """
-    from .docs import Docs, DocsError, DocsNotFound
+    from .docs import Docs, DocsError, DocsGenerationChanged, DocsNotFound
 
     docs = docs or Docs()
     try:
         docs_sha = docs.source_commit()
+    except DocsGenerationChanged:
+        raise
     except DocsError as exc:
         raise FactsError(f"could not determine the documented commit: {exc}") from exc
 
     if docs_sha != to_sha:
-        raise FactsError(
-            f"the documentation changed from planned commit {to_sha[:7]} to {docs_sha[:7]} "
-            "before facts were collected; replan the window"
-        )
+        raise DocsGenerationChanged(to_sha, docs_sha)
 
     numbers = (window.window_prs(repo_dir, from_sha, docs_sha)
                if pr_numbers is None else list(pr_numbers))
@@ -186,6 +185,8 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
                 ) from exc
             unpublished += 1
             continue
+        except DocsGenerationChanged:
+            raise
         except DocsError as exc:
             # Anything else means the documentation could not be READ, which is not the same as it
             # having nothing to say. This used to be skipped like a missing page, so a run that
