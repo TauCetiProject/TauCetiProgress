@@ -160,8 +160,9 @@ class FactsDocs:
                 url = _url(info.get("url"), f"facts URL for {name}")
                 _require(url.scheme in ("http", "https") and bool(url.netloc) and bool(url.fragment),
                          f"facts: invalid canonical URL for {name}")
-                _require(urllib.parse.unquote(url.path).endswith("/" + path[:-5] + ".html")
-                         and urllib.parse.unquote(url.fragment) == name,
+                suffix = "/" + path[:-5] + ".html"
+                _require((url.path.endswith(suffix) or urllib.parse.unquote(url.path).endswith(suffix))
+                         and (url.fragment == name or urllib.parse.unquote(url.fragment) == name),
                          f"facts: canonical URL does not match module/declaration {name}")
                 _require(info.get("file") == path, f"facts: source file mismatch for {name}")
                 start, end = info.get("start"), info.get("end")

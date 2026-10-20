@@ -244,6 +244,14 @@ class ImmutableDocsTests(unittest.TestCase):
                                   manifest_changes={"uncompressed_bytes": len(raw)})
         with self.assertRaisesRegex(ArtifactError, "duplicate JSON key"):
             self.reader()
+        # doc-gen emits literal name fragments, including percent characters in quoted names.
+        data = json.loads((FIXTURE / "facts.json").read_bytes())
+        name = "TauCeti.«literal%FF»"
+        data["modules"]["TauCeti/A.lean"][name] = {
+            **data["modules"]["TauCeti/A.lean"]["TauCeti.alpha"],
+            "url": "https://taucetiproject.org/docs/TauCeti/A.html#" + name}
+        self.objects = generation(data)
+        self.assertIn(name, self.reader().declarations("TauCeti/A.html"))
 
     def test_corrupt_bundle_is_refused_and_corrupt_cache_is_repaired(self):
         reader = self.reader()
