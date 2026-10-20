@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROG
 def page():
     return [{"data": {"viewer": {"login": "author", "repository": None, "repositories": {
         "nodes": [{"id": "F", "nameWithOwner": "author/renamed", "owner": {"login": "author"},
-                   "isFork": True, "viewerPermission": "WRITE", "parent": {
+                   "isFork": True, "isArchived": False, "isLocked": False, "viewerPermission": "WRITE", "parent": {
                        "id": "U", "nameWithOwner": "org/repo", "parent": None}}],
         "pageInfo": {"hasNextPage": False, "endCursor": None}}},
         "repository": {"id": "U", "nameWithOwner": "org/repo", "isPrivate": False}}}]
@@ -113,3 +113,50 @@ for code in (0, 2, 128):
             assert code == 128
         else:
             assert exists is (code == 0)
+
+# The Worker proxy is the sole journal owner when installed, including local waits.
+with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+        "TAUCETI_PROGRESS_OUTBOX": tmp, "TAUCETI_REAL_GH": "/fixture/native-gh"}):
+    with patch.object(gh.subprocess, "run", return_value=subprocess.CompletedProcess([], 77, "", "retained")) as run:
+        for _ in range(3):
+            try:
+                gh.gh(args, reconcile=lambda: None)
+            except gh.GhError:
+                pass
+        assert run.call_count == 3 and not list(pathlib.Path(tmp).glob("*.json"))
+
+# Complete absence can authorize PR creation retry; incomplete lookup cannot.
+for nodes, more, expected in (([], False, False), ([], True, None),
+    ([{"url": "url", "headRepositoryOwner": {"login": "author"}}], False, "url")):
+    raw = json.dumps([{"data": {"repository": {"pullRequests": {"nodes": nodes,
+                               "pageInfo": {"hasNextPage": more}}}}}])
+    with patch.object(gh, "gh", return_value=raw):
+        assert apply.reconcile_pr("progress/window/Area", "author", "org/repo") == expected
+
+# push_target reads before creating, and verifies ancestry/permission after a lost creation response.
+with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROGRESS_OUTBOX": tmp}):
+    os.environ.pop("TAUCETI_REAL_GH", None)
+    created, calls = [], []
+    def fork_cli(argv, **kwargs):
+        args = argv[1:]
+        calls.append(args)
+        if args[:2] == ["api", "repos/org/repo"]:
+            return subprocess.CompletedProcess(argv, 0, "false", "")
+        if args[:2] == ["api", "user"]:
+            return subprocess.CompletedProcess(argv, 0, "author", "")
+        if args[:2] == ["api", "graphql"]:
+            data = page()
+            if not created:
+                data[0]["data"]["viewer"]["repositories"]["nodes"] = []
+            return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
+        if args[:2] == ["repo", "fork"]:
+            created.append(True)
+            return subprocess.CompletedProcess(argv, 1, "", "lost successful fork response")
+        raise AssertionError(args)
+    with patch.object(gh.subprocess, "run", side_effect=fork_cli), patch.object(apply, "_run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+        assert apply.push_target("/unused", "org/repo") == ("fork", "author")
+    assert len(created) == 1
+    first_read = next(i for i, call in enumerate(calls) if call[:2] == ["api", "graphql"])
+    write = next(i for i, call in enumerate(calls) if call[:2] == ["repo", "fork"])
+    assert first_read < write and sum(call[:2] == ["api", "graphql"] for call in calls) == 3
+    assert not list(pathlib.Path(tmp).glob("*.json"))

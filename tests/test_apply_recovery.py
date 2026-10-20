@@ -1,4 +1,5 @@
 """Resume a lost PR response using the same branch, prose and one GitHub mutation."""
+import json
 import os
 import pathlib
 import subprocess
@@ -42,6 +43,9 @@ with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROG
             mutations.append(args)
             published.append({"url": "https://github.com/org/repo/pull/7", "headRepositoryOwner": {"login": "author"}})
             return subprocess.CompletedProcess(argv, 1, "", "connection reset after successful creation")
+        if args[:2] == ["api", "graphql"]:
+            return subprocess.CompletedProcess(argv, 0, json.dumps([{"data": {"repository": {"pullRequests": {
+                "nodes": published, "pageInfo": {"hasNextPage": False}}}}}]), "")
         raise AssertionError(args)
     with patch.object(apply, "existing_pr", return_value=None), \
          patch.object(apply, "own_pr", side_effect=lambda *a, **kw: published[0] if published and kw.get("states") != ("closed",) else None), \
@@ -90,12 +94,30 @@ with tempfile.TemporaryDirectory() as tmp:
                 retained_commit = current
             else:
                 assert current == retained_commit, "resume must preserve the exact local report commit"
-        status.write_text(prose + " Changed")
-        try:
-            apply.run(plan, status, section, repo)
-        except apply.ApplyError:
-            pass
-        else:
-            raise AssertionError("conflicting prepared branch must not be overwritten")
+        # Unrelated main changes and a renderer upgrade preserve the original commit.
+        git("checkout", "-q", "main")
+        (repo / "UNRELATED.md").write_text("main advanced")
+        git("add", ".")
+        git("commit", "-qm", "unrelated merge")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        with patch.object(apply, "render_update", side_effect=AssertionError("must reuse saved bytes")):
+            try:
+                apply.run(plan, status, section, repo)
+            except gh.GhError:
+                pass
         assert git("rev-parse", "HEAD") == retained_commit
+        # A changed window is terminal and leaves the branch intact.
+        changed = {**plan, "prs": [2]}
+        assert apply.run(changed, status, section, repo) == apply.EX_RETAINED
+        assert git("rev-parse", "HEAD") == retained_commit
+        # If the area's cursor has moved, return a terminal recovery result.
+        git("checkout", "-q", "main")
+        from progress import files
+        (repo / plan["progress_path"]).write_text(files.new_progress_file("Area") + files.render_section(
+            "Area", "9" * 40, "c" * 40, [9], "earlier", prose))
+        git("add", ".")
+        git("commit", "-qm", "area cursor advanced")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        assert apply.run(plan, status, section, repo) == apply.EX_RETAINED
+        assert git("rev-parse", f"refs/heads/{apply.branch_name(plan)}") == retained_commit
 print("PASS: interrupted fork publication preserves and reuses the exact local branch")

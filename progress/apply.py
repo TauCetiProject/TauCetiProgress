@@ -31,6 +31,7 @@ the repository grows one unmergeable report per area per round and never sheds t
 
 import json
 import pathlib
+import re
 import subprocess
 
 from . import files, gh, layers as layers_mod, window
@@ -41,6 +42,7 @@ BRANCH_PREFIX = "progress/"
 BODY_MARKER = "<!--tauceti-progress-pr:v1 {}-->"
 
 EX_NOPROGRESS = 75
+EX_RETAINED = 78  # Deterministic recovery problem; preserve artifacts and select other work.
 
 
 class ApplyError(RuntimeError):
@@ -146,6 +148,41 @@ def existing_pr(branch, repo=gh.ROADMAP_REPO, owner=None, states=("merged",)):
         ])
         rows.extend(json.loads(out))
     return rows[0] if rows else None
+
+
+def reconcile_pr(branch, head_owner, repo=gh.ROADMAP_REPO):
+    owner, name = repo.split("/", 1)
+    query = ("query($owner:String!,$name:String!,$head:String!,$endCursor:String){"
+             "repository(owner:$owner,name:$name){pullRequests(first:100,after:$endCursor,"
+             "headRefName:$head,states:[OPEN,CLOSED,MERGED]){nodes{url headRepositoryOwner{login}}"
+             "pageInfo{hasNextPage endCursor}}}}")
+    raw = gh.gh(["api", "graphql", "--paginate", "--slurp", "-f", "query=" + query,
+                 "-f", "owner=" + owner, "-f", "name=" + name, "-f", "head=" + branch])
+    try:
+        pages = json.loads(raw)
+        if not isinstance(pages, list) or not pages:
+            return None
+        uncertain = False
+        matches = []
+        for page in pages:
+            if page.get("errors"):
+                return None
+            connection = page["data"]["repository"]["pullRequests"]
+            for node in connection["nodes"]:
+                who = (node["headRepositoryOwner"] or {}).get("login")
+                if not who:
+                    uncertain = True
+                elif who.lower() == head_owner.lower():
+                    matches.append(node["url"])
+        if connection["pageInfo"]["hasNextPage"] is not False:
+            return None
+        if matches:
+            return matches[0]
+        if uncertain:
+            return None
+        return False
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def report_meta(body):
@@ -447,44 +484,60 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
         )
         return EX_NOPROGRESS
 
-    status_body = pathlib.Path(status_body_file).read_text(encoding="utf-8")
-    section_body = pathlib.Path(section_body_file).read_text(encoding="utf-8")
+    def base_file(ref, path):
+        tree = _run(["git", "ls-tree", "--name-only", ref, "--", path], roadmap_dir)
+        return _run(["git", "show", f"{ref}:{path}"], roadmap_dir).stdout if tree.stdout.strip() else None
 
-    rel = plan["rel_dir"]
-    status_path = roadmap_dir / plan["status_path"]
-    progress_path = roadmap_dir / plan["progress_path"]
-    if not (roadmap_dir / rel).is_dir():
-        raise ApplyError(f"{rel} is not a directory in {roadmap_dir}")
+    current_progress = base_file("origin/main", plan["progress_path"])
+    live_cursor = files.cursor(current_progress or "")
+    if live_cursor and live_cursor != plan["from_sha"]:
+        print("prepared report window is no longer current; preserving its prose and branch")
+        return EX_NOPROGRESS if live_cursor == plan["to_sha"] else EX_RETAINED
 
-    # Always render from the canonical base. A previous interrupted invocation
-    # can leave this checkout on its already-prepared progress branch.
-    def base_file(path):
-        tree = _run(["git", "ls-tree", "--name-only", "origin/main", "--", path], roadmap_dir)
-        return _run(["git", "show", f"origin/main:{path}"], roadmap_dir).stdout if tree.stdout.strip() else None
-
-    old_status = base_file(plan["status_path"])
-    old_progress = base_file(plan["progress_path"])
-    status_text, progress_text, header = render_update(
-        plan, status_body, section_body, old_status, old_progress
-    )
-    title = pr_title(plan)
-    body = pr_body(plan, header, version=version)
-
-    # Reuse the exact local commit after an interrupted publication. Never
-    # replace a deterministic branch whose bytes differ from the retained plan.
     local = _run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
                  roadmap_dir, check=False)
     if local.returncode not in (0, 1):
         raise ApplyError("could not inspect retained progress branch")
     if local.returncode == 0:
-        paths = _run(["git", "diff", "--name-only", "origin/main", branch], roadmap_dir).stdout.split()
-        expected_paths = [plan["status_path"], plan["progress_path"]]
-        if (sorted(paths) != sorted(expected_paths)
-                or _run(["git", "show", f"{branch}:{plan['status_path']}"], roadmap_dir).stdout != status_text
-                or _run(["git", "show", f"{branch}:{plan['progress_path']}"], roadmap_dir).stdout != progress_text):
-            raise ApplyError("retained progress branch differs from prepared report; preserving it for recovery")
+        # Validate the saved commit against its own parent. Unrelated merges on
+        # main and renderer upgrades must not change or regenerate this report.
+        parent = _run(["git", "rev-parse", f"{branch}^"], roadmap_dir).stdout.strip()
+        ancestor = _run(["git", "merge-base", "--is-ancestor", parent, "origin/main"],
+                        roadmap_dir, check=False)
+        if ancestor.returncode not in (0, 1):
+            raise ApplyError("could not inspect retained branch ancestry")
+        paths = _run(["git", "diff", "--name-only", parent, branch], roadmap_dir).stdout.split()
+        if ancestor.returncode or sorted(paths) != sorted([plan["status_path"], plan["progress_path"]]):
+            print("retained progress branch ancestry or paths differ; preserving it for recovery")
+            return EX_RETAINED
+        old_status = base_file(parent, plan["status_path"])
+        old_progress = base_file(parent, plan["progress_path"]) or files.new_progress_file(plan["roadmap"])
+        status_text = base_file(branch, plan["status_path"])
+        progress_text = base_file(branch, plan["progress_path"])
+        try:
+            header = files.validate_update(plan["roadmap"], old_status, status_text, old_progress,
+                                           progress_text, expect_from_sha=plan["from_sha"])
+            if header["to_sha"] != plan["to_sha"] or header["prs"] != plan["prs"]:
+                raise files.FormatError("saved branch window differs from the plan")
+        except (files.FormatError, TypeError) as exc:
+            print(f"retained progress branch cannot publish ({exc}); preserving it for recovery")
+            return EX_RETAINED
         _run(["git", "checkout", "-q", branch], roadmap_dir)
     else:
+        status_body = pathlib.Path(status_body_file).read_text(encoding="utf-8")
+        section_body = pathlib.Path(section_body_file).read_text(encoding="utf-8")
+        status_path = roadmap_dir / plan["status_path"]
+        progress_path = roadmap_dir / plan["progress_path"]
+        if not (roadmap_dir / plan["rel_dir"]).is_dir():
+            print("prepared report area is no longer present; preserving it for recovery")
+            return EX_RETAINED
+        try:
+            status_text, progress_text, header = render_update(
+                plan, status_body, section_body, base_file("origin/main", plan["status_path"]), current_progress
+            )
+        except files.FormatError as exc:
+            print(f"prepared report cannot publish ({exc}); preserving it for recovery")
+            return EX_RETAINED
         _run(["git", "checkout", "-q", "-b", branch, "origin/main"], roadmap_dir)
         status_path.write_text(status_text, encoding="utf-8")
         progress_path.write_text(progress_text, encoding="utf-8")
@@ -492,8 +545,10 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
         changed = _run(["git", "diff", "--cached", "--name-only"], roadmap_dir).stdout.split()
         if sorted(changed) != sorted([plan["status_path"], plan["progress_path"]]):
             raise ApplyError(f"staged paths are {changed}, expected exactly the two generated files")
-        _run(["git", "commit", "-q", "-m", title, "-m", f"Window {plan['from_sha'][:7]}..{plan['to_sha'][:7]}"],
+        _run(["git", "commit", "-q", "-m", pr_title(plan), "-m", f"Window {plan['from_sha'][:7]}..{plan['to_sha'][:7]}"],
              roadmap_dir)
+    title = pr_title(plan)
+    body = pr_body(plan, header, version=version)
 
     if dry_run:
         diff = _run(["git", "show", "--stat", "--format=%s", "HEAD"], roadmap_dir).stdout
@@ -518,6 +573,9 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
             # Most likely a peer created the same branch between the check and the push. That is fine:
             # fall through and let the pull-request step reconcile.
             print(f"create-only push declined ({proc.stderr.strip()[:200]}); reconciling instead")
+            if re.search(r"403|permission.*denied|repository.*disabled", proc.stderr, re.I):
+                print("report fork is not writable; preserving prepared report for permission recovery")
+                return EX_RETAINED
             if not remote_branch_exists(roadmap_dir, branch, remote):
                 raise ApplyError("report push did not produce a visible branch; retaining prepared report")
 
@@ -538,7 +596,7 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
     out = gh.gh([
         "pr", "create", "--repo", gh.ROADMAP_REPO, "--base", "main", "--head", head,
         "--title", title, "--body", body,
-    ], reconcile=lambda: (found["url"] if (found := own_pr(branch, states=("open", "closed", "merged"))) else None))
+    ], reconcile=lambda: reconcile_pr(branch, fork_owner or gh.ROADMAP_REPO.split("/")[0]))
     print(out.strip())
 
     # Only now that ours is open: sweep the area's dead and superseded reports. Ordered this way so

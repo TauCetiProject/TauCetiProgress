@@ -61,10 +61,26 @@ def gh(args, retries=3, reconcile=None, context=None):
     authoritative absence, or None for uncertainty. Absence allows one retry
     after five minutes. Retained bodies and argv are kept privately.
     """
+    if not readonly(args) and os.environ.get("TAUCETI_REAL_GH"):
+        # The Worker proxy owns durable intents and quota-aware reconciliation.
+        # A second journal must not count its local wait responses as writes.
+        if context and context.get("actor"):
+            current = gh(["api", "user", "--jq", ".login"]).strip().lower()
+            if current != context["actor"]:
+                raise GhError("fork actor changed before publication")
+        proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+        if proc.returncode == 0 and args[:2] != ["repo", "fork"]:
+            return proc.stdout
+        outcome = reconcile() if reconcile else None
+        if isinstance(outcome, str):
+            return outcome
+        raise GhError(f"Worker retained publication for reconciliation: {proc.stderr.strip()}")
     if not readonly(args):
         actor = gh(["api", "user", "--jq", ".login"]).strip().lower()
         if not actor:
             raise GhError("cannot identify mutation actor")
+        if context and context.get("actor") not in (None, actor):
+            raise GhError("fork actor changed before publication")
         operation = args
         if args[:2] in (["pr", "create"], ["pr", "close"]):
             operation = args[:2] + ([args[2]] if args[1] == "close" else [])
@@ -88,14 +104,24 @@ def gh(args, retries=3, reconcile=None, context=None):
                 if outcome is False and "absent_since" not in value:
                     value["absent_since"] = time.time()
                     _save_intent(path, value)
-                if (outcome is not False or time.time() - value["absent_since"] < 300
-                        or value["attempts"] >= 2 or value["argv"] != args):
+                if (not value.get("not_sent") and (outcome is not False or time.time() - value["absent_since"] < 300
+                        or value["attempts"] >= 2) or value["argv"] != args):
                     raise GhError("publication retained; uncertain outcome must reconcile before replay")
             else:
                 value = {"actor": actor, "argv": args, "created": time.time(), "attempts": 0, "context": context}
+            value.pop("not_sent", None)
             value["attempts"] += 1
             _save_intent(path, value)
-            proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+            try:
+                proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+            except OSError:
+                value["attempts"] -= 1
+                value["not_sent"] = True
+                _save_intent(path, value)
+                raise
+            if proc.returncode == 77:
+                value["attempts"] -= 1
+                _save_intent(path, value)
             if proc.returncode == 0 and args[:2] == ["api", "graphql"]:
                 try:
                     if json.loads(proc.stdout).get("errors"):

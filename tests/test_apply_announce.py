@@ -493,7 +493,7 @@ def fork_page(fork=True, permission="WRITE", parent="UPSTREAM", collision=False)
     return [{"data": {
         "viewer": {"login": "someone", "repository": {"id": "OTHER"} if collision else None,
                    "repositories": {"nodes": [{"id": "FORK", "nameWithOwner": "someone/roadmap-fork",
-                       "owner": {"login": "someone"}, "isFork": True, "viewerPermission": permission,
+                       "owner": {"login": "someone"}, "isFork": True, "isArchived": False, "isLocked": False, "viewerPermission": permission,
                        "parent": {"id": parent, "nameWithOwner": "TauCetiProject/TauCetiRoadmap", "parent": None}}] if fork else [],
                        "pageInfo": {"hasNextPage": False, "endCursor": None}}},
         "repository": {"id": "UPSTREAM", "nameWithOwner": "TauCetiProject/TauCetiRoadmap", "isPrivate": False}}}]
