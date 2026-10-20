@@ -255,7 +255,9 @@ def close_superseded(rows, replacement_url):
         note = f"Superseded by {replacement_url}: {reason}."
         try:
             gh.gh(["pr", "close", str(row["number"]), "--repo", gh.ROADMAP_REPO,
-                   "--comment", note])
+                   "--comment", note], reconcile=lambda: (
+                       "" if gh.gh(["pr", "view", str(row["number"]), "--repo", gh.ROADMAP_REPO,
+                                     "--json", "state", "--jq", ".state"]).strip() == "CLOSED" else None))
             print(f"closed superseded #{row['number']}: {reason}")
         except gh.GhError as exc:
             failed += 1
@@ -287,6 +289,8 @@ def sweep(plan, keep_branch, replacement_url):
 def remote_branch_exists(roadmap_dir, branch, remote="origin"):
     proc = _run(["git", "ls-remote", "--exit-code", "--heads", remote, branch],
                roadmap_dir, check=False)
+    if proc.returncode not in (0, 2):
+        raise ApplyError(f"could not determine whether {remote}/{branch} exists: {proc.stderr.strip()}")
     return proc.returncode == 0
 
 
@@ -316,36 +320,33 @@ def push_target(roadmap_dir, repo=gh.ROADMAP_REPO):
     if gh.gh(["api", f"repos/{repo}", "--jq", ".permissions.push"]).strip() == "true":
         return "origin", None
 
-    # `--jq` emits raw values, not JSON: a login comes back as `kim-em`, unquoted. Do not `json.loads`
-    # it -- that raises, and this is precisely the path an operator without push access takes.
-    login = gh.gh(["api", "user", "--jq", ".login"]).strip()
-    if not login:
-        raise RuntimeError("could not determine the authenticated login, so no fork can be used")
-    gh.gh(fork_args(repo))
+    from .forks import ForkUnknown, discover
 
-    # Identify the fork by ANCESTRY, never by name. Two guesses would both be wrong: a fork can be
-    # renamed, so `<login>/<name>` may not exist; and `<login>/<name>` may exist while being an
-    # unrelated repository that merely shares the name, in which case a report would be pushed
-    # somewhere it does not belong. `.parent.full_name` is the only field that actually answers
-    # "is this a fork of the repository I mean?", so it is required in both branches below.
-    #
-    # `--paginate`, because the fork listing is ordered by creation and a popular repository's
-    # first page says nothing about whether this account appears later.
-    fork = gh.gh([
-        "api", "--paginate", f"repos/{repo}/forks?per_page=100", "--jq",
-        f'.[] | select(.owner.login == "{login}") | select(.parent.full_name == "{repo}") '
-        f'| .full_name',
-    ]).strip().splitlines()
-    fork = fork[0].strip() if fork else ""
-    if not fork:
-        candidate = f"{login}/{repo.split('/')[-1]}"
-        parent = gh.gh(["api", f"repos/{candidate}", "--jq", '.parent.full_name // ""']).strip()
-        fork = candidate if parent == repo else ""
-    if not fork or "/" not in fork:
-        raise RuntimeError(
-            f"could not identify a fork of {repo} owned by {login}; publishing needs either push "
-            f"access to {repo} or a fork of it"
-        )
+    try:
+        before = discover(gh.gh, repo)
+        login = before["actor"]
+        fork = before["fork"]
+        if not fork:
+            if not before["absent"]:
+                raise ForkUnknown("fork visibility or repository name is uncertain")
+
+            def reconcile_fork():
+                live = discover(gh.gh, repo)
+                if live["actor"] != login or live["upstream_id"] != before["upstream_id"]:
+                    raise ForkUnknown("fork publication identity changed")
+                return live["fork"] if live["fork"] else (False if live["absent"] else None)
+
+            gh.gh(fork_args(repo), reconcile=reconcile_fork, context={
+                "operation": "fork", "actor": login, "upstream": repo, "upstream_id": before["upstream_id"],
+            })
+            after = discover(gh.gh, repo)
+            if after["actor"] != login or after["upstream_id"] != before["upstream_id"]:
+                raise ForkUnknown("fork publication identity changed")
+            fork = after["fork"]
+        if not fork:
+            raise ForkUnknown("fork not yet visible with verified ancestry and push permissions")
+    except ForkUnknown as exc:
+        raise gh.GhError(f"could not identify a fork of {repo}: {exc}") from exc
     url = f"https://github.com/{fork}.git"
     if _run(["git", "remote", "get-url", "fork"], roadmap_dir, check=False).returncode == 0:
         _run(["git", "remote", "set-url", "fork", url], roadmap_dir)
@@ -496,11 +497,14 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
         print(f"branch {branch} already exists on {remote} (an earlier run was interrupted); "
               f"opening the pull request for it rather than rewriting it")
     else:
-        proc = _run(["git", "push", remote, f"HEAD:refs/heads/{branch}"], roadmap_dir, check=False)
+        proc = _run(["git", "push", f"--force-with-lease=refs/heads/{branch}:",
+                     remote, f"HEAD:refs/heads/{branch}"], roadmap_dir, check=False)
         if proc.returncode != 0:
             # Most likely a peer created the same branch between the check and the push. That is fine:
             # fall through and let the pull-request step reconcile.
             print(f"create-only push declined ({proc.stderr.strip()[:200]}); reconciling instead")
+            if not remote_branch_exists(roadmap_dir, branch, remote):
+                raise ApplyError("report push did not produce a visible branch; retaining prepared report")
 
     # Re-check between push and create: another worker may have opened the PR for this exact window
     # in the meantime, and the branch name is deterministic so it would be the same branch.
@@ -519,7 +523,7 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
     out = gh.gh([
         "pr", "create", "--repo", gh.ROADMAP_REPO, "--base", "main", "--head", head,
         "--title", title, "--body", body,
-    ])
+    ], reconcile=lambda: (found["url"] if (found := own_pr(branch, states=("open", "closed", "merged"))) else None))
     print(out.strip())
 
     # Only now that ours is open: sweep the area's dead and superseded reports. Ordered this way so
