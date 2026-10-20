@@ -19,7 +19,7 @@ import tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from progress import cli, facts, window  # noqa: E402
-from progress.docs import Docs, DocsError, DocsNotFound, INDEX_PATH  # noqa: E402
+from progress.docs import Docs, DocsError, DocsGenerationChanged, DocsNotFound, INDEX_PATH  # noqa: E402
 from progress.facts import FactsError  # noqa: E402
 
 failures = []
@@ -257,8 +257,9 @@ def test_an_empty_page_from_another_build_refuses_a_partial_report():
         pages["TauCeti/B.html"] = b_nav("b" * 40)
         try:
             facts.collect(tmp, root, third, docs=docs)
-        except FactsError as exc:
-            assert "TauCeti/B.lean" in str(exc) and "redeploying" in str(exc), str(exc)
+        except DocsGenerationChanged as exc:
+            assert exc.expected == third and exc.observed == "b" * 40
+            assert exc.page == "TauCeti/B.html"
         else:
             raise AssertionError("expected a refusal, not a partial report")
 
@@ -341,7 +342,8 @@ def test_documentation_behind_the_planned_window_refuses_to_advance():
         third = commit(tmp, "feat: later (#103)", {"TauCeti/B.lean": "theorem later : True := trivial\n"})
         try:
             facts.collect(tmp, root, third, docs=docs_for(second))
-        except FactsError as exc:
+        except DocsGenerationChanged as exc:
+            assert exc.expected == third and exc.observed == second
             assert second[:7] in str(exc) and third[:7] in str(exc), str(exc)
             assert "replan" in str(exc), str(exc)
         else:
@@ -353,7 +355,7 @@ def test_documentation_from_a_foreign_history_is_refused():
         root, first, second = repo_with_two_prs(tmp)
         try:
             facts.collect(tmp, root, second, docs=docs_for("0" * 40))
-        except (FactsError, window.GitError) as exc:
+        except (FactsError, DocsGenerationChanged, window.GitError) as exc:
             assert "0000000" in str(exc) or "not an ancestor" in str(exc), str(exc)
             return
         raise AssertionError("expected a refusal")

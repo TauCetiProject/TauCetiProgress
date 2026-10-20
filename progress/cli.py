@@ -10,7 +10,8 @@ Subcommands, in the order a round uses them:
     announce  post a new section to Zulip (idempotent)
 
 Exit codes follow the worker's convention: 0 did something, 75 (`EX_NOPROGRESS`) nothing to do,
-1 a real error. The distinction matters because a round must fall through to other work on 75 but
+76 documentation generation changed (retry only plan/facts), 1 a real error.
+The distinction matters because a round must fall through to other work on 75 but
 must not silently treat an error as "nothing to do" -- that would let a transient GitHub failure
 advance a cursor past real work.
 """
@@ -23,6 +24,7 @@ import pathlib
 import sys
 
 EX_NOPROGRESS = 75
+EX_DOCS_GENERATION_CHANGED = 76
 
 
 def _load_plan(path):
@@ -65,6 +67,7 @@ def cmd_due(args):
 
 def cmd_plan(args):
     from . import plan
+    from .docs import DocsGenerationChanged
 
     try:
         result = plan.build_plan(
@@ -75,6 +78,8 @@ def cmd_plan(args):
             min_prs=args.min_prs,
             only_area=args.area,
         )
+    except DocsGenerationChanged as exc:
+        return _generation_changed("plan", exc)
     except plan.NotDue as exc:
         print(f"not due: {exc}", file=sys.stderr)
         return EX_NOPROGRESS
@@ -89,12 +94,15 @@ def cmd_plan(args):
 
 def cmd_facts(args):
     from . import facts
+    from .docs import DocsGenerationChanged
 
     p = _load_plan(args.plan)
     # The plan's PR list is the area filter. Without it `collect` would walk every merged PR in the
     # commit range, so a report on one roadmap would be grounded in every roadmap's work.
     try:
         result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"])
+    except DocsGenerationChanged as exc:
+        return _generation_changed("facts", exc)
     except facts.FactsError as exc:
         # A real error, never "nothing to do": no writing model may be started without the facts.
         print(f"facts: {exc}", file=sys.stderr)
@@ -107,6 +115,11 @@ def cmd_facts(args):
     else:
         print(out)
     return 0
+
+
+def _generation_changed(stage, exc):
+    print(f"{stage}: documentation-generation-changed: {exc}", file=sys.stderr)
+    return EX_DOCS_GENERATION_CHANGED
 
 
 def cmd_apply(args):
