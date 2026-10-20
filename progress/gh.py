@@ -12,7 +12,11 @@ Two design points worth stating, because both were defects in an earlier draft:
 """
 
 import base64
+import fcntl
+import hashlib
 import json
+import os
+from pathlib import Path
 import subprocess
 import time
 
@@ -29,16 +33,129 @@ class GhError(RuntimeError):
     """A `gh` invocation failed."""
 
 
-def gh(args, retries=3):
-    """Run `gh` and return stdout, retrying transient failures.
+class PublicationRejected(GhError):
+    """The proxy verified a definitive rejection; preserve artifacts for repair."""
 
-    Every call here is a read, so a retry is always safe. This mirrors the retry helper in
-    `TauCeti/scripts/roadmap_label.py`.
+
+def readonly(args):
+    if args[:2] in (["pr", "list"], ["pr", "view"], ["repo", "view"]):
+        return True
+    if args[:1] != ["api"]:
+        return False
+    if "graphql" in args:
+        query = next((a[6:] for a in args if a.startswith("query=")), "").lstrip()
+        return query.startswith(("query", "{"))
+    return not any(a in ("-X", "--method", "-f", "-F", "--field", "--raw-field", "--input")
+                   or a.startswith(("-X", "-f", "-F", "--method=", "--field=", "--raw-field=", "--input=")) for a in args)
+
+
+def _save_intent(path, value):
+    temp = path.with_suffix(".tmp")
+    with open(temp, "w", opener=lambda p, f: os.open(p, f, 0o600)) as saved:
+        json.dump(value, saved)
+        saved.flush()
+        os.fsync(saved.fileno())
+    temp.replace(path)
+
+
+def gh(args, retries=3, reconcile=None, context=None):
+    """Retry reads. Journal writes before sending; reconcile uncertain writes before replay.
+
+    A reconciliation callback returns stdout for a verified success, False for
+    authoritative absence, or None for uncertainty. Absence allows one retry
+    after five minutes. Retained bodies and argv are kept privately.
     """
+    if not readonly(args) and os.environ.get("TAUCETI_REAL_GH"):
+        # The Worker proxy owns durable intents and quota-aware reconciliation.
+        # A second journal must not count its local wait responses as writes.
+        if context and context.get("actor"):
+            current = gh(["api", "user", "--jq", ".login"]).strip().lower()
+            if current != context["actor"]:
+                raise GhError("fork actor changed before publication")
+        proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+        if proc.returncode == 0 and args[:2] != ["repo", "fork"]:
+            return proc.stdout
+        outcome = reconcile() if reconcile else None
+        if isinstance(outcome, str):
+            return outcome
+        if proc.returncode == 78:
+            raise PublicationRejected(f"publication definitively rejected: {proc.stderr.strip()}")
+        raise GhError(f"Worker retained publication for reconciliation: {proc.stderr.strip()}")
+    if not readonly(args):
+        actor = gh(["api", "user", "--jq", ".login"]).strip().lower()
+        if not actor:
+            raise GhError("cannot identify mutation actor")
+        if context and context.get("actor") not in (None, actor):
+            raise GhError("fork actor changed before publication")
+        operation = args
+        if args[:2] in (["pr", "create"], ["pr", "close"]):
+            operation = args[:2] + ([args[2]] if args[1] == "close" else [])
+            for flag in ("--repo", "--head", "--base"):
+                if flag in args:
+                    operation += [flag, args[args.index(flag) + 1]]
+        key = hashlib.sha256(json.dumps([os.environ.get("GH_HOST", "github.com"), actor, operation]).encode()).hexdigest()
+        root = Path(os.environ.get("TAUCETI_PROGRESS_OUTBOX", Path.home() / ".local/state/tauceti-progress/outbox"))
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = root / (key + ".json")
+        with open(root / (key + ".lock"), "a", opener=lambda p, f: os.open(p, f, 0o600)) as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if path.exists():
+                value = json.loads(path.read_text())
+                if value.get("actor") != actor or value.get("context") != context:
+                    raise GhError("retained publication identity changed; preserving original intent")
+                outcome = reconcile() if reconcile else None
+                if isinstance(outcome, str):
+                    path.unlink()
+                    return outcome
+                if outcome is False and "absent_since" not in value:
+                    value["absent_since"] = time.time()
+                    _save_intent(path, value)
+                known_unsent = value.get("not_sent") and value["attempts"] == 0
+                if (not known_unsent and (outcome is not False or time.time() - value["absent_since"] < 300
+                        or value["attempts"] >= 2) or value["argv"] != args):
+                    raise GhError("publication retained; uncertain outcome must reconcile before replay")
+            else:
+                value = {"actor": actor, "argv": args, "created": time.time(), "attempts": 0, "context": context}
+            value.pop("not_sent", None)
+            value["attempts"] += 1
+            _save_intent(path, value)
+            try:
+                proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+            except OSError:
+                value["attempts"] -= 1
+                value["not_sent"] = True
+                _save_intent(path, value)
+                raise
+            if proc.returncode == 77:
+                value["attempts"] -= 1
+                _save_intent(path, value)
+            if proc.returncode == 0 and args[:2] == ["api", "graphql"]:
+                try:
+                    if json.loads(proc.stdout).get("errors"):
+                        proc.returncode = 1
+                except (ValueError, AttributeError):
+                    proc.returncode = 1
+            if proc.returncode == 0 and args[:2] != ["repo", "fork"]:
+                path.unlink()
+                return proc.stdout
+            outcome = reconcile() if reconcile else None
+            if isinstance(outcome, str):
+                path.unlink()
+                return outcome
+            raise GhError(f"gh publication failed; retained for reconciliation: {proc.stderr.strip()}")
     last = ""
     for attempt in range(retries):
         proc = subprocess.run(["gh", *args], capture_output=True, text=True)
         if proc.returncode == 0:
+            # GraphQL can return partial data and errors with HTTP 200.
+            if args[:2] == ["api", "graphql"]:
+                try:
+                    payload = json.loads(proc.stdout)
+                    pages = payload if isinstance(payload, list) else [payload]
+                    if any(isinstance(page, dict) and page.get("errors") for page in pages):
+                        raise GhError("partial GraphQL read response")
+                except ValueError as exc:
+                    raise GhError("invalid GraphQL read response") from exc
             return proc.stdout
         last = proc.stderr.strip()
         if attempt + 1 < retries:

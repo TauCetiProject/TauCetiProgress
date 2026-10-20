@@ -111,14 +111,27 @@ def cmd_apply(args):
     from . import apply as apply_mod
 
     p = _load_plan(args.plan)
-    return apply_mod.run(
-        plan=p,
-        status_body_file=args.status_body,
-        section_body_file=args.section_body,
-        roadmap_dir=args.roadmap_dir,
-        dry_run=args.dry_run,
-        version=args.version,
-    )
+    from . import gh
+
+    try:
+        return apply_mod.run(
+            plan=p,
+            status_body_file=args.status_body,
+            section_body_file=args.section_body,
+            roadmap_dir=args.roadmap_dir,
+            dry_run=args.dry_run,
+            version=args.version,
+        )
+    except gh.PublicationRejected as exc:
+        print(f"publication needs recovery: {exc}", file=sys.stderr)
+        return 78
+    except (gh.GhError, apply_mod.RemoteUnavailable) as exc:
+        print(f"publication temporarily unavailable: {exc}", file=sys.stderr)
+        return 77
+    except (apply_mod.ApplyError, OSError) as exc:
+        print(f"local publication state needs recovery: {exc}", file=sys.stderr)
+        return 78
+
 
 
 def cmd_announce(args):
