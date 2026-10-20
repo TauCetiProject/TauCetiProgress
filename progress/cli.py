@@ -95,12 +95,16 @@ def cmd_plan(args):
 def cmd_facts(args):
     from . import facts
     from .docs import DocsGenerationChanged
+    from .immutable_docs import ArtifactError
 
     p = _load_plan(args.plan)
+    if "documentation" in p and p["documentation"] is None:
+        raise ArtifactError("saved documentation pin is null; replan the window")
     # The plan's PR list is the area filter. Without it `collect` would walk every merged PR in the
     # commit range, so a report on one roadmap would be grounded in every roadmap's work.
     try:
-        result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"])
+        result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"],
+                               documentation=p.get("documentation"))
     except DocsGenerationChanged as exc:
         return _generation_changed("facts", exc)
     except facts.FactsError as exc:
@@ -236,8 +240,13 @@ def main(argv=None):
         args.min_prs = plan_mod.MIN_PRS
     if getattr(args, "ref", None) is None:
         args.ref = plan_mod.CODE_REF
+    from .immutable_docs import ArtifactError
+
     try:
         return args.fn(args)
+    except ArtifactError as exc:
+        print(f"{args.cmd}: immutable documentation unavailable: {exc}", file=sys.stderr)
+        return 77  # retriable infrastructure wait; never EX_NOPROGRESS
     except KeyboardInterrupt:
         return 130
 

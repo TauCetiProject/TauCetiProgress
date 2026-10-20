@@ -124,7 +124,29 @@ def docstring_in(text, start_line, end_line):
     return _first_sentence(" ".join(body.split()))
 
 
-def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
+def pr_commits(repo_dir, from_sha, to_sha, numbers):
+    """The first-parent merge commits attributed to a selected set of PRs."""
+    wanted = set(numbers)
+    result = {}
+    log = window.git(["log", "--first-parent", "--format=%H%x09%s", f"{from_sha}..{to_sha}"],
+                     repo_dir)
+    for line in log.splitlines():
+        sha, _, subject = line.partition("\t")
+        number = window.pr_number_of_subject(subject.strip())
+        if number is not None and number in wanted:
+            result[sha.strip()] = number
+    return result
+
+
+def required_modules(repo_dir, from_sha, to_sha, numbers):
+    """Touched modules still present at the documented commit, including empty modules."""
+    touched = changed_lean_files(repo_dir, pr_commits(repo_dir, from_sha, to_sha, numbers))
+    present = set(window.git(["ls-tree", "-r", "--name-only", to_sha, "--", LEAN_PREFIX],
+                             repo_dir).splitlines())
+    return [path for path in touched if path in present]
+
+
+def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None):
     """The factual spine of a window.
 
     `to_sha` is the documented window end chosen by the plan. The documentation must still describe
@@ -132,33 +154,39 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     past pull requests whose declarations were never inspected.
     """
     from .docs import Docs, DocsError, DocsGenerationChanged, DocsNotFound
+    from .immutable_docs import ArtifactError, FactsDocs
 
-    docs = docs or Docs()
+    if documentation is not None:
+        if not isinstance(documentation, dict) or documentation.get("mode") != "immutable":
+            raise ArtifactError("invalid saved documentation pin; replan the window")
+        docs = FactsDocs(documentation)
+    docs = docs or Docs()  # saved legacy plans never discover a new source
+    immutable = isinstance(docs, FactsDocs)
+    if immutable:
+        if not window.has_commit(repo_dir, to_sha) or not window.has_commit(repo_dir, from_sha) \
+                or not window.is_ancestor(repo_dir, from_sha, to_sha):
+            raise ArtifactError("pinned facts source/window history mismatch; replan the window")
     try:
         docs_sha = docs.source_commit()
-    except DocsGenerationChanged:
+    except (DocsGenerationChanged, ArtifactError):
         raise
     except DocsError as exc:
         raise FactsError(f"could not determine the documented commit: {exc}") from exc
 
     if docs_sha != to_sha:
+        if immutable:
+            raise ArtifactError(f"pinned source {docs_sha} differs from plan {to_sha}; replan")
         raise DocsGenerationChanged(to_sha, docs_sha)
 
     numbers = (window.window_prs(repo_dir, from_sha, docs_sha)
                if pr_numbers is None else list(pr_numbers))
-    wanted = set(numbers)
-
     # Which commit belongs to which PR, so a blamed line can be attributed.
-    pr_of_commit = {}
-    log = window.git(["log", "--first-parent", "--format=%H%x09%s", f"{from_sha}..{docs_sha}"],
-                     repo_dir)
-    for line in log.splitlines():
-        sha, _, subject = line.partition("\t")
-        n = window.pr_number_of_subject(subject.strip())
-        if n is not None and n in wanted:
-            pr_of_commit[sha.strip()] = n
+    pr_of_commit = pr_commits(repo_dir, from_sha, docs_sha, numbers)
 
     files = changed_lean_files(repo_dir, pr_of_commit)
+    if immutable:
+        required = set(required_modules(repo_dir, from_sha, docs_sha, numbers))
+        docs.require_coverage(required)  # before presentation limits; no partial coverage accepted
     truncated_modules = 0
     if len(files) > MAX_MODULES:
         truncated_modules = len(files) - MAX_MODULES
@@ -171,8 +199,13 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
         page = module_page_for_file(path)
         if not page:
             continue
+        if immutable and path not in required:
+            unpublished += 1  # removed at this source commit; no declaration page is required
+            continue
         try:
             documented = docs.declarations(page)
+        except ArtifactError:
+            raise
         except DocsNotFound as exc:
             # The docs build imports every TauCeti module. A 404 for a file still present at its
             # source commit therefore came from a different build (or a broken deploy), even if
@@ -198,12 +231,16 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
         try:
             blame = blame_commits(repo_dir, docs_sha, path)
             source = window.git(["show", f"{docs_sha}:{path}"], repo_dir)
-        except window.GitError:
+        except window.GitError as exc:
+            if immutable:
+                raise ArtifactError(f"cannot attribute pinned module {path}: {exc}") from exc
             continue
 
         for name, info in documented.items():
             if info["file"] != path or info["start"] is None:
                 continue
+            if immutable and info["end"] > len(source.splitlines()):
+                raise ArtifactError(f"pinned source range for {name} exceeds {path}")
             span = [blame.get(n) for n in range(info["start"], info["end"] + 1)]
             span = [c for c in span if c]
             if not span:
@@ -219,7 +256,8 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
                 "kind": info["kind"],
                 "url": info["url"],
                 "file": path,
-                "doc": docstring_in(source, info["start"], info["end"])[:MAX_DOC_CHARS],
+                "doc": (_first_sentence(" ".join(info["doc"].split())) if immutable else
+                        docstring_in(source, info["start"], info["end"]))[:MAX_DOC_CHARS],
                 "pr": number,
                 # Every line written in this window means the declaration is new here; only some
                 # means it existed already and was revised.
@@ -252,6 +290,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
             f"changed, {unpublished} with no published page); refusing to report the window as empty"
         )
     return {
+        **({"documentation": docs.pin()} if immutable else {}),
         "from_sha": from_sha,
         "to_sha": to_sha,
         "docs_sha": docs_sha,
