@@ -17,8 +17,8 @@ provenance long before any content is parsed.
 
 What this gate proves is *shape*: which paths changed, that the cursor continues, that the window
 advances along real published history, that the append is byte-exact, and that the bytes validated are
-the bytes that will land (the head is pinned, and it already contains current `main`). What it cannot
-prove is that the prose is true. That limit is accepted deliberately and documented in README.md.
+the bytes that will land (the head is pinned, and what lands is current `main` with exactly the two
+validated blobs written into it). What it cannot prove is that the prose is true. That limit is accepted deliberately and documented in README.md.
 
 It proves nothing at all about *who* opened the pull request, and that is the design. Identity was
 never what made this safe; the shape checks are. Anyone may publish a report, from a fork or
@@ -33,6 +33,7 @@ radius and is named here so it is not overlooked.
 import os
 
 import datetime
+import hashlib
 import json
 import re
 
@@ -240,27 +241,14 @@ def check_content(area, old_status, new_status_bytes, old_progress, new_progress
         _refuse(str(exc))
 
 
-def check_up_to_date(compare_status, behind_by, head_sha, main_sha):
-    """The head must already contain current `main`.
+def git_blob_sha(data):
+    """The git object id of `data` as a blob, which is what landing names in the tree it writes.
 
-    This is what makes the merge safe to reason about. If the head is BEHIND main, merging it is a
-    three-way merge, and the resulting bytes are a combination of the head and whatever landed on
-    main since -- not the bytes that were validated. Requiring `ahead` with `behind_by == 0` means
-    the head's tree IS the post-merge tree for the paths in question, so validating the head's blobs
-    validates exactly what will land.
-
-    A head that has fallen behind is not an error; the worker simply rebuilds the report against the
-    newer main. Refusing is the correct outcome, not a failure.
+    Computed from the validated bytes themselves rather than taken from the comparison, so the blob
+    that lands is the one whose contents were checked by construction: a different blob cannot have
+    this id.
     """
-    if behind_by is None or compare_status is None:
-        _refuse("could not determine whether the head contains current main")
-    if int(behind_by) != 0 or compare_status != "ahead":
-        _refuse(
-            f"head {head_sha[:7]} is {compare_status} main {main_sha[:7]} and is behind by "
-            f"{behind_by}; rebuild the report on current main so the merged bytes are the "
-            f"validated bytes"
-        )
-    return True
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
 def check_window(code_window, section):
@@ -438,21 +426,27 @@ def check_baseline_paths(old_paths, parent, area):
 
 def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_progress,
            new_progress_bytes, check_runs, base_repo,
-           current_main_cursor=None, compare_status=None, behind_by=None, main_sha="",
+           current_main_cursor=None, main_sha="",
            old_paths=None, code_window=None, last_report_at=None, now=None,
            area_exists=None, expected_bootstrap_from_sha=None):
-    """Run the whole gate. Returns `{"area", "head_sha", "section"}` or raises `Refused`.
+    """Run the whole gate. Returns `{"area", "parent", "head_sha", "main_sha", "section", "blobs"}`
+    or raises `Refused`.
 
     `current_main_cursor` is the area's cursor read from **freshly fetched `main`**, not from the
     pull request's stale base. Passing it closes the window where `main` moved on (another report
     merged) after this pull request was opened.
+
+    The head does NOT have to contain current `main`. A report changes two files in one directory,
+    and the old contents it is checked against are read from current `main`, so landing writes
+    exactly the validated blobs into current `main` (`blobs` maps each path to its id) and nothing
+    else of the head is used. Requiring the head to be up to date instead made every report race
+    every other commit to `main` for the length of its build, which on a busy repository it loses.
     """
     prov = check_provenance(pr, base_repo)
     area, head_sha = prov["area"], prov["head_sha"]
     if not head_sha:
         _refuse("pull request has no head sha")
 
-    check_up_to_date(compare_status, behind_by, head_sha, main_sha)
     seen, parent = check_files(changed_files, area)
     check_area_exists(area_exists, parent, area)
     check_baseline_paths(old_paths or {}, parent, area)
@@ -516,7 +510,12 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
         )
     if pending is not None:
         raise pending
-    return {"area": area, "head_sha": head_sha, "main_sha": main_sha, "section": section}
+    blobs = {
+        f"{parent}/{area}/STATUS.md": git_blob_sha(new_status_bytes),
+        f"{parent}/{area}/PROGRESS.md": git_blob_sha(new_progress_bytes),
+    }
+    return {"area": area, "parent": parent, "head_sha": head_sha, "main_sha": main_sha,
+            "section": section, "blobs": blobs}
 
 
 def summary(result):
@@ -540,6 +539,7 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(description="Decide whether a progress PR may be merged.")
     ap.add_argument("--bundle", required=True, help="JSON file with the fetched pull-request data")
+    ap.add_argument("--result", help="on an allow, write what landing needs to this JSON file")
     args = ap.parse_args(argv)
 
     data = json.loads(pathlib.Path(args.bundle).read_text(encoding="utf-8"))
@@ -562,8 +562,6 @@ def main(argv=None):
             last_report_at=data.get("last_report_at"),
             now=data.get("collected_at"),
             current_main_cursor=data.get("current_main_cursor"),
-            compare_status=data.get("compare_status"),
-            behind_by=data.get("behind_by"),
             main_sha=data.get("main_sha") or "",
             old_paths=data.get("old_paths") or {},
         )
@@ -573,5 +571,10 @@ def main(argv=None):
     except Refused as exc:
         print(f"REFUSED: {exc}")
         return EX_REFUSED
+    if args.result:
+        pathlib.Path(args.result).write_text(json.dumps({
+            "area": result["area"], "parent": result["parent"], "head_sha": result["head_sha"],
+            "main_sha": result["main_sha"], "blobs": result["blobs"],
+        }, indent=2), encoding="utf-8")
     print(f"ALLOWED: {summary(result)}")
     return 0

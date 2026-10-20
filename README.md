@@ -216,7 +216,8 @@ once its roadmap's report carries a header.
 `STATUS.md` and `PROGRESS.md` are **machine-owned, and their prose is not security-validated**.
 
 The merge gate proves the *shape* of a generated update — its paths, its cursor, that it is a
-byte-exact append, and that the head being merged is the head that was validated. It cannot prove
+byte-exact append, and that what lands is exactly the validated bytes of those two files, written
+into current `main`. It cannot prove
 that the prose is true. Anyone may open a Tau Ceti PR whose description contains prompt-injection
 text; once that PR merges legitimately, its description reaches the writing model.
 

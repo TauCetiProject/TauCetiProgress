@@ -15,11 +15,10 @@ So the head SHA and the current `main` SHA are each read ONCE, and every later r
 them explicitly:
 
 * `GET /compare/{main_sha}...{head_sha}` gives the changed paths and their blob SHAs, computed
-  between exactly those two commits.
-* The comparison must be `ahead` with `behind_by == 0`. That means the head already contains current
-  `main`, so merging it is a fast-forward of content: the post-merge bytes are the head's bytes,
-  which are the bytes validated. A head *behind* main would be squashed by a three-way merge whose
-  result is not what was checked, so it is refused rather than merged.
+  between exactly those two commits. It is a three-dot comparison, so the paths are what the head
+  changed since it forked from `main`, whatever `main` has done since. The head need not contain
+  current `main`: landing writes the validated blobs into current `main` rather than taking the
+  head's tree, so nothing that landed in between is touched.
 * Blobs are fetched by the SHA the comparison reported.
 * Modes come from `GET /git/trees/{head_sha}?recursive=1`, which reports true git modes; the contents
   api reports only a coarse type, may dereference symlinks, and gives no mode at all.
