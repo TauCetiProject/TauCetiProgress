@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory() as tmp:
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(stdout):
             assert cli.main(argv) == cli.EX_DOCS_GENERATION_CHANGED
         assert "facts: documentation-generation-changed:" in err.getvalue()
-        assert OLD[:7] in err.getvalue() and NEW[:7] in err.getvalue()
+        assert f"expected={OLD}" in err.getvalue() and f"observed={NEW}" in err.getvalue()
         assert not out.exists() and not stdout.getvalue()
         git.assert_not_called()
 
@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert "plan: documentation-generation-changed:" in err.getvalue()
         assert not out.exists()
 
-    # Within-stage drift keeps full generation identities, including when probing the first page.
+    # Conflicting links in one response are a broken page, not evidence of a deploy between reads.
     mixed = (f'<p class="gh_nav_link"><a href="https://github.com/o/r/blob/{OLD}/'
              'TauCeti/A.lean">src</a></p>') + page(NEW)
     pages = {INDEX_PATH: json.dumps({"declarations": {"A.t": {"docLink": "./probe.html#A.t"}}}),
@@ -74,9 +74,37 @@ with tempfile.TemporaryDirectory() as tmp:
                   if not url.endswith(INDEX_PATH) else pages[INDEX_PATH])
     try:
         reader.source_commit()
-    except DocsGenerationChanged as exc:
-        assert exc.expected == OLD and exc.observed == NEW
+    except DocsGenerationChanged:
+        raise AssertionError("internally inconsistent markup is not a generation retry") from None
+    except DocsError as exc:
+        assert "probe.html" in str(exc)
     else:
         raise AssertionError("mixed source links must never choose a generation")
+
+    with patch("progress.docs.Docs", return_value=reader):
+        assert plan.docs_source_commit() is None
+    with patch.object(plan, "build_plan", side_effect=plan.NotDue("documentation could not be read")):
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert cli.main(["plan", "--code-dir", tmp, "--roadmap-dir", tmp]) == 75
+
+    # Real reader: probe picks OLD, then a different module remains NEW after the forced refetch.
+    pages["probe.html"] = page(OLD)
+    pages["other.html"] = page(NEW)
+    fetched = []
+    def fetch(url):
+        rel = INDEX_PATH if url.endswith(INDEX_PATH) else url.rsplit("/", 1)[-1]
+        fetched.append(rel)
+        return pages[rel]
+    reader = Docs(cache_dir=root / "new-cache", opener=fetch)
+    with (patch("progress.docs.Docs", return_value=reader),
+          patch.object(facts, "changed_lean_files", return_value=["TauCeti/other.lean"]),
+          patch("progress.window.git", return_value="")):
+        # The page path is case-sensitive, just as at the published site.
+        pages["TauCeti/other.html"] = pages["other.html"]
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            assert cli.main(argv) == cli.EX_DOCS_GENERATION_CHANGED
+        assert "page=TauCeti/other.html" in err.getvalue()
+        assert fetched.count("other.html") == 2
+        assert not out.exists()
 
 print("all generation-change tests passed")

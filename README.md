@@ -88,11 +88,14 @@ writing model until both succeed. Persistent churn is an infrastructure wait for
 report obligation, without spending a repair attempt or report cadence window. Never retry paid prose
 because facts changed. Keep prepared publication artifacts and the published cursor intact.
 
-Other failures retain their existing behavior: a missing extant module, unverifiable source links,
+Other failures retain their existing behavior: a missing extant module, unverifiable or internally
+conflicting source links,
 fetch failure, or invalid factual window is not this retry signal. Missing deleted modules remain
 allowed. The exact planned commit, history, declaration and publication guards still apply. Older
-releases report generation changes as ordinary errors, so consumers may recognize their specific
-generation-mismatch diagnostic during rollout while keeping other errors fatal.
+releases report facts generation changes as ordinary errors, so consumers may recognize the older
+facts diagnostics (`changed from planned commit …` or `was built from …, not …; the site is
+redeploying`) during rollout while keeping other errors fatal. Planning continues to report ordinary
+unreadable documentation as not due (75).
 
 ## The coverage header
 

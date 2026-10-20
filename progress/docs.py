@@ -85,7 +85,8 @@ class DocsGenerationChanged(DocsError):
         self.page = page
         super().__init__(
             f"{page or 'the documentation'} was built from {observed[:7]}, not {expected[:7]}; "
-            "the site is redeploying; replan the window before collecting facts"
+            "the site is redeploying; replan the window before collecting facts "
+            f"(expected={expected} observed={observed} page={page or '-'})"
         )
 
 
@@ -213,7 +214,7 @@ class Docs:
     # ----- module pages ----------------------------------------------------------------------
 
     @staticmethod
-    def _page_commit(html):
+    def _page_commit(html, module_page="a module page"):
         """The build commit named by a module page's source links, if any.
 
         doc-gen4 writes a source link in the navigation even when the page has no declarations.
@@ -222,7 +223,7 @@ class Docs:
         nav = _NAV_LINK_RE.search(html)
         decl = _GH_LINK_RE.search(html)
         if nav and decl and nav.group(1) != decl.group(1):
-            raise DocsGenerationChanged(nav.group(1), decl.group(1), "a module page")
+            raise DocsError(f"{module_page} has source links from different builds")
         link = nav or decl
         return link.group(1) if link else None
 
@@ -242,11 +243,11 @@ class Docs:
         it either way. A disagreeing page is re-fetched once; if the site is still moving, refuse.
         """
         html = self._get(module_page)
-        seen = self._page_commit(html)
+        seen = self._page_commit(html, module_page)
         if self._source_commit is not None:
             if seen != self._source_commit:
                 html = self._get(module_page, refetch=True)
-                seen = self._page_commit(html)
+                seen = self._page_commit(html, module_page)
                 if seen is None:
                     # A successful response can be an empty module page from a newer build. With
                     # no source link it cannot be tied to the build chosen by source_commit(), so
