@@ -290,6 +290,17 @@ def remote_branch_exists(roadmap_dir, branch, remote="origin"):
     return proc.returncode == 0
 
 
+def fork_args(repo):
+    """The `gh` arguments that create `repo`'s fork for the authenticated user, or find it if present.
+
+    `--clone=false` alone is what makes this noninteractive, and it is idempotent: the fork is
+    created if absent and left alone if it exists. Do not add `--remote=false`: current `gh` rejects
+    `--remote` whenever a repository argument is given, before making any request, so the whole
+    no-push-access path fails. `tests/test_apply_announce.py` runs the real CLI on these arguments.
+    """
+    return ["repo", "fork", repo, "--clone=false"]
+
+
 def push_target(roadmap_dir, repo=gh.ROADMAP_REPO):
     """Where to push the report branch: `(remote_name, head_ref_for_pr)`.
 
@@ -310,8 +321,7 @@ def push_target(roadmap_dir, repo=gh.ROADMAP_REPO):
     login = gh.gh(["api", "user", "--jq", ".login"]).strip()
     if not login:
         raise RuntimeError("could not determine the authenticated login, so no fork can be used")
-    # `--clone=false` is idempotent: it creates the fork if absent and is a no-op if it exists.
-    gh.gh(["repo", "fork", repo, "--clone=false", "--remote=false"])
+    gh.gh(fork_args(repo))
 
     # Identify the fork by ANCESTRY, never by name. Two guesses would both be wrong: a fork can be
     # renamed, so `<login>/<name>` may not exist; and `<login>/<name>` may exist while being an

@@ -5,8 +5,12 @@ is unit-tested is everything that decides *what* those paths will do.
 """
 
 import json
+import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -514,7 +518,36 @@ def test_push_target_falls_back_to_a_fork():
     finally:
         apply_mod.gh.gh, apply_mod._run = orig_gh, orig_run
     assert (remote, owner) == ("fork", "someone")
-    assert ["repo", "fork", "TauCetiProject/TauCetiRoadmap", "--clone=false", "--remote=false"] in calls
+    assert apply_mod.fork_args("TauCetiProject/TauCetiRoadmap") in calls
+
+
+def test_the_real_gh_accepts_the_fork_arguments():
+    """The argument contract is the installed `gh`'s, so a stub cannot check it; run the real CLI.
+
+    `gh` validates flags before it makes any request, and current versions reject `--remote` next
+    to a repository argument at exactly that stage. So run it with a bogus token and every request
+    routed to a refused local proxy: no fork can be created and nothing leaves the machine, and the
+    error then says whether `gh` got as far as the fork request (accepted) or stopped at the flags.
+    """
+    exe = shutil.which("gh")
+    if exe is None:
+        # CI must exercise this; a local checkout without `gh` cannot.
+        assert not os.environ.get("CI"), "gh is required in CI to check the fork arguments"
+        print("     (skipped: gh not installed)")
+        return
+    version = subprocess.run([exe, "--version"], capture_output=True, text=True).stdout
+    print(f"     {version.splitlines()[0] if version else 'gh version unknown'}")
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("GH_", "GITHUB_")) and k.lower() not in ("no_proxy",
+                                                                           "https_proxy")}
+        env.update(GH_TOKEN="not-a-real-token", GH_CONFIG_DIR=tmp, GH_PROMPT_DISABLED="1",
+                   HTTPS_PROXY="http://127.0.0.1:9", NO_PROXY="")
+        proc = subprocess.run([exe, *apply_mod.fork_args("TauCetiProject/TauCetiRoadmap")],
+                              capture_output=True, text=True, cwd=tmp, env=env, timeout=60)
+    err = proc.stderr
+    assert proc.returncode != 0, "the refused proxy must have stopped the request"
+    assert "failed to fork" in err and "127.0.0.1:9" in err, f"gh rejected the arguments: {err}"
 
 
 # ----- a stranger must not be able to lock a window ---------------------------------------------
