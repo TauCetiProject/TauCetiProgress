@@ -16,8 +16,8 @@ name: progress-merge
 #
 #   validate  default GITHUB_TOKEN (read-only org-wide). Collects the pull request pinned to two
 #             immutable SHAs and runs progress.gate. Never checks out or executes PR content.
-#   merge     needs: validate. Mints the App token and merges, bound to BOTH the validated head and
-#             the validated main.
+#   merge     needs: validate. Mints the App token and writes the two validated blobs into `main`,
+#             bound to the blob ids the gate computed and to the area's files on the validated main.
 #
 # Announcing is a *separate* workflow (announce.yml, triggered by the push to main), so the App token
 # and the Zulip key never live in the same job, and a lost announcement can be retried without
@@ -81,10 +81,10 @@ permissions:
 # reports an error.
 #
 # Concurrent runs are safe without it. The landing step is a compare-and-swap: the commit names the
-# validated `main` SHA as its only parent and the ref update sets `force=false`, so if another report
-# landed in between, this one's update is not a fast-forward and is rejected. The loser fails its
-# swap and the pull request is simply rebuilt on the newer `main` next round -- which is exactly what
-# the serialisation was there to prevent, achieved by the mechanism that was already doing the work.
+# `main` it was built on as its only parent and the ref update sets `force=false`, so if anything
+# landed in between, the update is rejected. The loser re-reads `main` and tries again only if this
+# area's files there are still the ones it validated against; if another report for the same area
+# got there first, it stops, and the sweep after that report's landing closes it.
 
 jobs:
   validate:
@@ -102,6 +102,8 @@ jobs:
       head_sha: ${{ steps.gate.outputs.head_sha }}
       main_sha: ${{ steps.gate.outputs.main_sha }}
       area: ${{ steps.gate.outputs.area }}
+      parent: ${{ steps.gate.outputs.parent }}
+      blobs: ${{ steps.gate.outputs.blobs }}
       roadmap_dir: ${{ steps.gate.outputs.roadmap_dir }}
       completed_dir: ${{ steps.gate.outputs.completed_dir }}
     steps:
@@ -163,7 +165,7 @@ jobs:
         run: |
           set +e
           python3 -c 'import sys; sys.path.insert(0, "validator"); from progress.gate import main; sys.exit(main())' \
-            --bundle bundle.json > gate.out 2>&1
+            --bundle bundle.json --result result.json > gate.out 2>&1
           rc=$?
           cat gate.out
           {
@@ -174,7 +176,11 @@ jobs:
             echo "completed_dir=${TAUCETI_COMPLETED_DIR:-Completed}"
           } >> "$GITHUB_OUTPUT"
           if [ "$rc" -eq 0 ]; then
-            echo "verdict=allow" >> "$GITHUB_OUTPUT"
+            {
+              echo "parent=$(jq -r .parent result.json)"
+              echo "blobs=$(jq -c .blobs result.json)"
+              echo "verdict=allow"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$rc" -eq 3 ] && head -n1 gate.out | grep -q '^REFUSED: '; then
@@ -249,14 +255,16 @@ jobs:
       #     bytes nobody validated.
       #
       # Constructing the commit explicitly removes both, because nothing about the pull request is
-      # consulted at write time. The gate established that the head is `ahead` of the validated main
-      # with `behind_by == 0` and differs in exactly the two generated files, so the head's TREE is
-      # already the intended post-merge tree. Committing that tree with the validated main as its only
-      # parent is precisely the squash that was wanted, and a non-forced ref update lands it only if
-      # `main` is still where it was: GitHub rejects a non-fast-forward, and our commit can only
-      # fast-forward a `main` that has not moved. If anything landed in between, the update fails and
-      # nothing happens.
-      - name: Land the validated tree by compare-and-swap on refs/heads/main
+      # consulted at write time. Nor is the head's tree: the gate validated two blobs against this
+      # area's files on `main`, and the commit is `main`'s own tree with exactly those two blobs
+      # written in, by the ids the gate computed from the bytes it checked. So the head does not need
+      # to contain current `main`, and nothing that landed since it was built is touched.
+      #
+      # `main` may move while this runs. The verdict depended on `main` only through this area's
+      # directory (the two files, which give the baseline, the cursor and the cadence, and README.md,
+      # which makes it a roadmap), so if those are byte-identical on the new `main` the verdict
+      # stands there too, and the commit is rebuilt on it and swapped again. If they changed, it stops.
+      - name: Land the validated blobs by compare-and-swap on refs/heads/main
         id: land
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
@@ -265,58 +273,87 @@ jobs:
           HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
           MAIN_SHA: ${{ needs.validate.outputs.main_sha }}
           AREA: ${{ needs.validate.outputs.area }}
+          PARENT: ${{ needs.validate.outputs.parent }}
+          BLOBS: ${{ needs.validate.outputs.blobs }}
         run: |
           set -euo pipefail
 
-          # The tree of the exact head that was validated. Named by SHA, so it cannot have changed.
-          tree="$(gh api "repos/$REPO/git/commits/$HEAD_SHA" --jq .tree.sha)"
-          printf 'validated head %s carries tree %s\n' "${HEAD_SHA:0:7}" "${tree:0:7}"
+          # Re-checked here rather than trusted, because this job holds the write token.
+          if ! [[ "$AREA" =~ ^[A-Za-z0-9]+$ && "$PARENT" =~ ^[A-Za-z0-9]+$ ]]; then
+            echo "::error title=bad validate outputs::area or parent is not alphanumeric"
+            exit 1
+          fi
+          dir="$PARENT/$AREA"
+          entries="$(jq -ec --arg dir "$dir" '
+            if (type == "object") and (keys == [$dir + "/PROGRESS.md", $dir + "/STATUS.md"])
+               and all(.[]; type == "string" and test("^[0-9a-f]{40}$"))
+            then [to_entries[] | {path: .key, mode: "100644", type: "blob", sha: .value}]
+            else error("the validated blobs are not exactly this area'"'"'s two files") end' <<< "$BLOBS")"
+
+          # This area's directory on a given commit, as `name=blobid` for the three files the verdict
+          # read. Fails rather than returning nothing, so an API error cannot look like "unchanged".
+          area_files() {
+            gh api "repos/$REPO/contents/$dir?ref=$1" --jq '
+              [.[] | select(.name == "STATUS.md" or .name == "PROGRESS.md" or .name == "README.md")
+               | .name + "=" + .sha] | sort | join(" ")'
+          }
+          validated="$(area_files "$MAIN_SHA")"
 
           # Message written here rather than taken from the pull request: the title is mutable and
           # attacker-influenced, and the `progress:` prefix is load-bearing (the daily cadence check
           # finds the last update by scanning commit subjects for it).
-          # `AREA` is re-validated as alphanumeric when it is exported, so it cannot inject here.
-          message="$(printf 'progress: %s report\n\nValidated head %s over main %s.\nCloses #%s.\n' \
+          message="$(printf 'progress: %s report\n\nValidated head %s against main %s.\nCloses #%s.\n' \
             "$AREA" "$HEAD_SHA" "$MAIN_SHA" "$PR")"
 
-          commit="$(gh api -X POST "repos/$REPO/git/commits" \
-            -f message="$message" \
-            -f tree="$tree" \
-            -f parents[]="$MAIN_SHA" \
-            --jq .sha)"
-          printf 'built %s (tree %s, parent %s)\n' "${commit:0:7}" "${tree:0:7}" "${MAIN_SHA:0:7}"
+          base="$MAIN_SHA"
+          landed=false
+          for _ in 1 2 3 4 5; do
+            base_tree="$(gh api "repos/$REPO/git/commits/$base" --jq .tree.sha)"
+            tree="$(jq -n --arg base "$base_tree" --argjson entries "$entries" \
+                      '{base_tree: $base, tree: $entries}' \
+                    | gh api -X POST "repos/$REPO/git/trees" --input - --jq .sha)"
+            commit="$(gh api -X POST "repos/$REPO/git/commits" \
+              -f message="$message" -f tree="$tree" -f parents[]="$base" --jq .sha)"
+            printf 'built %s (tree %s, parent %s)\n' "${commit:0:7}" "${tree:0:7}" "${base:0:7}"
 
-          # force=false is the compare-and-swap. It fails if main is no longer at MAIN_SHA, because
-          # then this commit is not a fast-forward of it.
-          #
-          # A failed PATCH is ambiguous on its own: the update may have been applied server-side and
-          # the response lost. Believing "it failed" in that case would leave the report on main with
-          # its pull request still open, which the planner then treats as permanently in flight. So on
-          # any error the ref is re-read and the three cases are distinguished explicitly.
-          if gh api -X PATCH "repos/$REPO/git/refs/heads/main" \
-               -f sha="$commit" -F force=false > /dev/null 2> update.err; then
-            landed=true
-          else
+            # force=false is the compare-and-swap. It fails if main is no longer at `base`, because
+            # then this commit is not a fast-forward of it.
+            #
+            # A failed PATCH is ambiguous on its own: the update may have been applied server-side
+            # and the response lost. Believing "it failed" in that case would leave the report on
+            # main with its pull request still open, which the planner then treats as permanently in
+            # flight. So on any error the ref is re-read and the cases are distinguished explicitly.
+            if gh api -X PATCH "repos/$REPO/git/refs/heads/main" \
+                 -f sha="$commit" -F force=false > /dev/null 2> update.err; then
+              landed=true
+              break
+            fi
             after="$(gh api "repos/$REPO/commits/main" --jq .sha || echo unknown)"
             if [ "$after" = "$commit" ]; then
               echo "::notice::the update landed despite the error response"
               landed=true
-            elif [ "$after" = "$MAIN_SHA" ]; then
-              echo "::warning title=not landed::main is unchanged at ${MAIN_SHA:0:7}"
-              cat update.err
-              landed=false
-            else
-              echo "::warning title=main moved::main is now ${after:0:7}; this report was not landed"
-              cat update.err
-              landed=false
+              break
             fi
-          fi
+            if ! [[ "$after" =~ ^[0-9a-f]{40}$ ]] || [ "$after" = "$base" ]; then
+              echo "::warning title=not landed::the update failed and main is ${after:0:7}"
+              cat update.err
+              break
+            fi
+            now="$(area_files "$after" || echo unreadable)"
+            if [ "$now" != "$validated" ]; then
+              echo "::warning title=area changed::$dir changed on main (now ${after:0:7}); this report was not landed"
+              break
+            fi
+            printf 'main moved %s -> %s without touching %s; rebuilding on it\n' \
+              "${base:0:7}" "${after:0:7}" "$dir"
+            base="$after"
+          done
           echo "landed=$landed" >> "$GITHUB_OUTPUT"
           if [ "$landed" != "true" ]; then
             exit 0
           fi
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          printf 'main advanced %s -> %s\n' "${MAIN_SHA:0:7}" "${commit:0:7}"
+          printf 'main advanced %s -> %s\n' "${base:0:7}" "${commit:0:7}"
 
       # The content is on main, but the pull request is not "merged" in GitHub's sense, so close it
       # explicitly. Leaving it open would make the next planning run treat the area as permanently in
@@ -350,7 +387,7 @@ jobs:
           fi
           # Best effort from here: neither of these affects correctness.
           gh pr comment "$PR" --repo "$REPO" \
-            --body "Landed on \`main\` as $COMMIT by compare-and-swap on the validated tree." || true
+            --body "Landed on \`main\` as $COMMIT by compare-and-swap of the validated files." || true
           # Delete the source branch ONLY when it is in this repository. Branch names are a pure
           # function of the window, so a fork's branch has the same name as the canonical one would:
           # deleting `repos/$REPO/git/refs/heads/<name>` after landing a FORK pull request would

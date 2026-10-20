@@ -121,7 +121,7 @@ NOW = "2026-07-30T12:00:00Z"
 
 
 def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FROM, window=-1,
-         compare_status="ahead", behind_by=0, old_paths=None, last_report_at=None, now=NOW,
+         old_paths=None, last_report_at=None, now=NOW,
          area_exists=True, expected_bootstrap=None):
     old_status, new_status, old_progress, new_progress = content or make_content()
     return gate.decide(
@@ -140,8 +140,6 @@ def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FRO
         area_exists=area_exists,
         expected_bootstrap_from_sha=expected_bootstrap,
         current_main_cursor=cursor,
-        compare_status=compare_status,
-        behind_by=behind_by,
         main_sha=MAIN,
         old_paths=old_paths if old_paths is not None else {
             n: f"TauCetiRoadmap/{AREA}/{n}" for n in ("STATUS.md", "PROGRESS.md")
@@ -286,15 +284,21 @@ def test_refuses_a_branch_whose_area_is_not_alphanumeric():
     refuses(lambda: call(pr=pr), "not a progress branch")
 
 
-def test_refuses_a_head_behind_main():
-    """If the head is behind main, merging is a three-way merge and the resulting bytes are NOT the
-    validated bytes. Refusing makes the worker rebuild on current main."""
-    refuses(lambda: call(compare_status="diverged", behind_by=3), "is behind by 3")
-    refuses(lambda: call(compare_status="behind", behind_by=1), "is behind by 1")
+def test_returns_the_ids_of_exactly_the_validated_blobs():
+    """Landing writes these ids into current `main`, so they must be the validated bytes' own."""
+    _, new_status, _, new_progress = make_content()
+    result = call()
+    assert result["parent"] == "TauCetiRoadmap"
+    assert result["blobs"] == {
+        f"TauCetiRoadmap/{AREA}/STATUS.md": gate.git_blob_sha(new_status.encode()),
+        f"TauCetiRoadmap/{AREA}/PROGRESS.md": gate.git_blob_sha(new_progress.encode()),
+    }
 
 
-def test_refuses_an_unknown_comparison():
-    refuses(lambda: call(compare_status=None, behind_by=None), "could not determine")
+def test_git_blob_sha_matches_git():
+    """`printf 'hello\\n' | git hash-object --stdin` and the empty blob."""
+    assert gate.git_blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
+    assert gate.git_blob_sha(b"") == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 
 
 # ----- diff shape ------------------------------------------------------------------------------
@@ -453,8 +457,7 @@ def test_refuses_invalid_utf8():
             old_status=old_status, new_status_bytes=new_status.encode(),
             old_progress=old_progress, new_progress_bytes=bad,
             check_runs=CHECKS_OK, base_repo=REPO, code_window=make_window(),
-            area_exists=True, now=NOW, current_main_cursor=FROM,
-            compare_status="ahead", behind_by=0, main_sha=MAIN,
+            area_exists=True, now=NOW, current_main_cursor=FROM, main_sha=MAIN,
         )
     except (Refused, files.FormatError) as exc:
         assert "UTF-8" in str(exc), str(exc)
@@ -684,7 +687,7 @@ def test_cli_exit_codes_distinguish_pending_from_refused():
         "old_status": old_status, "new_status": new_status, "old_progress": old_progress,
         "new_progress": new_progress, "base_repo": REPO, "code_window": make_window(),
         "area_exists": True, "collected_at": NOW, "current_main_cursor": FROM,
-        "compare_status": "ahead", "behind_by": 0, "main_sha": MAIN,
+        "main_sha": MAIN,
         "old_paths": {n: f"TauCetiRoadmap/{AREA}/{n}" for n in ("STATUS.md", "PROGRESS.md")},
     }
     for checks, rc, prefix in (
