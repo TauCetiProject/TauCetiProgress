@@ -45,6 +45,50 @@ def with_output(payload, rc=0):
         subprocess.run = orig
 
 
+class FakeBytesProc:
+    def __init__(self, out=b"", rc=0, err=b""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+def file_at_with(proc):
+    """Run file_at against a canned `gh` response, returning (result, argv)."""
+    seen = {}
+    orig = subprocess.run
+
+    def fake(argv, **kwargs):
+        seen["argv"] = argv
+        return proc
+
+    subprocess.run = fake
+    try:
+        return collect.file_at("o/r", "a" * 40, "TauCetiRoadmap/X/README.md"), seen["argv"]
+    finally:
+        subprocess.run = orig
+
+
+def test_file_at_reads_a_file_over_one_megabyte():
+    big = ("# A roadmap\n" + "x" * (1 << 21)).encode()
+    text, argv = file_at_with(FakeBytesProc(big))
+    assert text is not None and len(text) == len(big), "a 2 MB README must read as present"
+    assert "Accept: application/vnd.github.raw+json" in argv
+
+
+def test_file_at_reads_an_empty_file_as_present():
+    assert file_at_with(FakeBytesProc(b""))[0] == ""
+
+
+def test_file_at_missing_file_is_none():
+    assert file_at_with(FakeBytesProc(rc=1, err=b"gh: Not Found (HTTP 404)"))[0] is None
+
+
+def test_file_at_other_failures_fail_closed():
+    try:
+        file_at_with(FakeBytesProc(rc=1, err=b"gh: Bad credentials (HTTP 401)"))
+    except collect.CollectError:
+        return
+    raise AssertionError("a non-404 failure must raise")
+
+
 def test_single_page():
     assert with_output(json.dumps([{"filename": "a.md"}])) == [{"filename": "a.md"}]
 
