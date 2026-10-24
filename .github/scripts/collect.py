@@ -144,22 +144,20 @@ def blob_text(repo, sha):
 
 
 def file_at(repo, ref, path):
-    """A file's text at an exact ref, or None when it does not exist there."""
+    """A file's text at an exact ref, or None when it does not exist there.
+
+    Read with the raw media type: the JSON form leaves `content` empty (encoding `none`) for a file
+    over 1 MB, which read as absent and refused every report for a roadmap with a large README."""
     proc = subprocess.run(
-        ["gh", "api", f"repos/{repo}/contents/{path}?ref={ref}", "--jq", ".content,.encoding"],
-        capture_output=True, text=True,
+        ["gh", "api", "-H", "Accept: application/vnd.github.raw+json", f"repos/{repo}/contents/{path}?ref={ref}"],
+        capture_output=True,
     )
     if proc.returncode != 0:
-        if "Not Found" in (proc.stderr or ""):
+        stderr = (proc.stderr or b"").decode("utf-8", "replace")
+        if "Not Found" in stderr:
             return None
-        raise CollectError(f"reading {path} at {ref[:7]} failed: {proc.stderr.strip()}")
-    lines = proc.stdout.strip().splitlines()
-    if len(lines) < 2:
-        return None
-    content, encoding = "\n".join(lines[:-1]), lines[-1]
-    if encoding == "base64":
-        return base64.b64decode(content).decode("utf-8", "surrogateescape")
-    return content
+        raise CollectError(f"reading {path} at {ref[:7]} failed: {stderr.strip()}")
+    return proc.stdout.decode("utf-8", "surrogateescape")
 
 
 def last_commit_date(repo, ref, path):
