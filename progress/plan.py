@@ -27,7 +27,7 @@ IDLE_HOURS = 8.0
 MIN_PRS = 10
 # How long an open progress pull request keeps marking its area in flight. Past this it is assumed
 # stuck rather than pending: one full cadence period is long enough for any pull request that was
-# going to merge to have merged, and the merge check re-runs on every push and on CI completing.
+# going to merge to have merged, and the merge check runs on every push.
 STALE_PR_HOURS = 8.0
 
 # The commit-subject prefix that marks a merged progress update. `apply` uses it as the PR title

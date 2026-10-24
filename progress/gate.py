@@ -53,12 +53,6 @@ PATH_RE = re.compile(r"\A(" + "|".join(re.escape(x) for x in (os.environ.get("TA
 # path-restricted gate write outside its restriction, so modes are checked, not assumed.
 REGULAR_MODES = {"100644"}
 
-# The App permitted to report the required check. `build` in TauCetiRoadmap is a GitHub Actions
-# check-run (app id 15368); any repository WRITER can POST a commit status or create a check-run
-# under an arbitrary name, so an unauthenticated "something called build says success" is not
-# evidence. Legacy commit statuses are not accepted here at all -- the roadmap repo publishes none.
-GITHUB_ACTIONS_APP_ID = 15368
-
 # A considered refusal is exit 3, distinct from both an allow (0) and a crash (anything else). The
 # workflow relies on that distinction: a refusal is a normal outcome that leaves the pull request for
 # a human, while an unexpected failure must go red rather than reading as a quiet "did not merge".
@@ -67,16 +61,6 @@ GITHUB_ACTIONS_APP_ID = 15368
 # considered refusal. The workflow additionally requires the output to start with `REFUSED:`, so the
 # two signals have to agree.
 EX_REFUSED = 3
-
-# "Not yet", distinct from "no". A report usually opens before its `build` check finishes, and the
-# caller re-runs the gate when CI completes, so a build that has not finished is not a refusal: the
-# workflow posts nothing and leaves the run green. Exit 4, with output starting `PENDING:`, for the
-# same reasons a refusal is 3 and starts `REFUSED:`.
-EX_PENDING = 4
-
-# Check-run statuses GitHub uses for a run that has not finished. Anything else that is not
-# `completed` is not something GitHub wrote, and is refused like any other unknown provenance.
-UNFINISHED_STATUSES = {"queued", "in_progress", "waiting", "requested", "pending"}
 
 # The minimum gap between two reports for the SAME roadmap, enforced here rather than only in the
 # planner. Kept below `plan.IDLE_HOURS` so it never refuses a report the planner considered due,
@@ -94,14 +78,6 @@ class Refused(Exception):
 
 def _refuse(reason):
     raise Refused(reason)
-
-
-class Pending(Refused):
-    """The pull request cannot be merged YET: its `build` is running and has not finished.
-
-    A subclass of `Refused` on purpose, so that anything which only asks "may this merge?" treats it
-    as a refusal. Only `main` tells the two apart, to decide whether a human needs to hear about it.
-    """
 
 
 def check_provenance(pr, base_repo, base_branch="main"):
@@ -350,60 +326,6 @@ def check_rate(last_report_at, now, area, min_hours=MIN_REPORT_INTERVAL_HOURS):
     return True
 
 
-def check_build(check_runs, head_sha, required="build", app_id=GITHUB_ACTIONS_APP_ID):
-    """The `build` check must be a completed success, from the expected App, on the exact head.
-
-    The merging App bypasses required status checks, so this is asserted rather than relied upon --
-    the same reasoning as `decide_merge` in TauCetiReview.
-
-    Three things this is strict about, each a way the looser version could be fooled:
-
-    * **Provenance.** Any repository writer can create a check-run or POST a commit status under any
-      name, so a result is only evidence if it came from the App that actually runs CI. Legacy commit
-      statuses are refused outright -- the roadmap repo publishes none, and accepting them would open
-      exactly that forgery route.
-    * **Literal success.** `neutral` and `skipped` count as passing for ordinary branch protection,
-      which means a workflow that skipped the build entirely would have satisfied this.
-    * **No contradictions.** Every matching entry must agree; a success listed ahead of a failure
-      used to win because the first match returned.
-    """
-    matching = [r for r in check_runs if (r.get("name") or "") == required]
-    # Absent is a refusal, not pending. Pending is only safe to stay quiet about when a run exists,
-    # because then its completion re-runs this gate. A build that never started -- a `[skip ci]`
-    # head, or a first-time fork contributor's CI awaiting a maintainer's approval -- has no
-    # completion coming, and a human has to act.
-    if not matching:
-        _refuse(f"{required} has not reported on {head_sha[:7]}")
-    # An unfinished run is remembered rather than raised at once, so a contradicting entry that has
-    # already failed, or carries bad provenance, is still refused outright.
-    unfinished = None
-    for run in matching:
-        # Every field is REQUIRED. Defaulting a missing field to the acceptable value meant a bare
-        # {"name": "build", "conclusion": "SUCCESS"} passed: no app to check, status assumed
-        # completed, head assumed to match. An absent field is unknown provenance, which is exactly
-        # the thing this refuses.
-        if run.get("source") != "check_run":
-            _refuse(f"{required} on {head_sha[:7]} came from {run.get('source')!r}, not a check run")
-        if run.get("head_sha") != head_sha:
-            _refuse(f"{required} names head {run.get('head_sha')!r}, not {head_sha}")
-        got_app = run.get("app_id")
-        # Compared as an integer, not coerced into one: `int()` accepted "15368" and 15368.9 alike.
-        if isinstance(got_app, bool) or not isinstance(got_app, int) or got_app != app_id:
-            _refuse(f"{required} on {head_sha[:7]} was reported by app {got_app!r}, not {app_id}")
-        if run.get("status") in UNFINISHED_STATUSES:
-            unfinished = unfinished or run.get("status")
-            continue
-        if run.get("status") != "completed":
-            _refuse(f"{required} is {run.get('status')!r} on {head_sha[:7]}, not completed")
-        # Compared exactly, not case-folded: GitHub emits lowercase conclusions, so anything else is
-        # not something GitHub wrote.
-        if run.get("conclusion") != "success":
-            _refuse(f"{required} concluded {run.get('conclusion')!r} on {head_sha[:7]}")
-    if unfinished:
-        raise Pending(f"{required} is {unfinished!r} on {head_sha[:7]}, not completed")
-    return f"{len(matching)}x success"
-
-
 def check_baseline_paths(old_paths, parent, area):
     """The append-only baseline must come from the directory the diff actually touches.
 
@@ -425,7 +347,7 @@ def check_baseline_paths(old_paths, parent, area):
 
 
 def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_progress,
-           new_progress_bytes, check_runs, base_repo,
+           new_progress_bytes, base_repo,
            current_main_cursor=None, main_sha="",
            old_paths=None, code_window=None, last_report_at=None, now=None,
            area_exists=None, expected_bootstrap_from_sha=None):
@@ -441,6 +363,11 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     exactly the validated blobs into current `main` (`blobs` maps each path to its id) and nothing
     else of the head is used. Requiring the head to be up to date instead made every report race
     every other commit to `main` for the length of its build, which on a busy repository it loses.
+
+    Nor does the head's `build` check have to pass. The App bypasses the ruleset, so `build` was
+    asserted here, but it compiles the repository's Lean and checks roadmap metadata, and neither
+    reads the two files a report may change. On a head that is not what lands it is evidence of
+    nothing, and waiting for it held every report for the length of a full build.
     """
     prov = check_provenance(pr, base_repo)
     area, head_sha = prov["area"], prov["head_sha"]
@@ -480,13 +407,6 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
         area, old_status, new_status_bytes, old_progress, new_progress_bytes,
         expect_from_sha=current_main_cursor,
     )
-    # A build that has not finished is held back until every other check has run: a report that
-    # would be refused anyway should hear so now, not after CI.
-    try:
-        check_build(check_runs, head_sha)
-        pending = None
-    except Pending as exc:
-        pending = exc
     check_window(code_window, section)
     check_rate(last_report_at, now, area)
 
@@ -508,8 +428,6 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
             f"branch says the window ends at {prov['to_prefix']} but the section says "
             f"{section['to_sha'][:7]}"
         )
-    if pending is not None:
-        raise pending
     blobs = {
         f"{parent}/{area}/STATUS.md": git_blob_sha(new_status_bytes),
         f"{parent}/{area}/PROGRESS.md": git_blob_sha(new_progress_bytes),
@@ -528,7 +446,7 @@ def summary(result):
 
 def main(argv=None):
     """CLI used by the reusable workflow: reads a JSON bundle, prints a verdict, and exits 0 to allow,
-    `EX_REFUSED` to refuse, or `EX_PENDING` while the build has not finished.
+    `EX_REFUSED` to refuse.
 
     The workflow fetches every input with the read-only default token and hands them over as one
     file, so this process needs no credentials at all.
@@ -552,7 +470,6 @@ def main(argv=None):
             new_status_bytes=data["new_status"].encode("utf-8", "surrogateescape"),
             old_progress=data.get("old_progress"),
             new_progress_bytes=data["new_progress"].encode("utf-8", "surrogateescape"),
-            check_runs=data.get("check_runs") or [],
             base_repo=data["base_repo"],
             # `.get`, but the gate refuses when it is absent: a bundle from an older collector must
             # not silently skip the window check.
@@ -565,9 +482,6 @@ def main(argv=None):
             main_sha=data.get("main_sha") or "",
             old_paths=data.get("old_paths") or {},
         )
-    except Pending as exc:
-        print(f"PENDING: {exc}")
-        return EX_PENDING
     except Refused as exc:
         print(f"REFUSED: {exc}")
         return EX_REFUSED
