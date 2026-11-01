@@ -192,6 +192,15 @@ class BorsTests(unittest.TestCase):
             with self.assertRaises(plan.NotDue):
                 self.build()
 
+        current = self.roadmap / "TauCetiRoadmap/Algebra"
+        current.mkdir()
+        (current / "README.md").write_text("# Algebra\n")
+        (current / "PROGRESS.md").write_text((self.area / "PROGRESS.md").read_text())
+        (self.area / "PROGRESS.md").unlink()
+        with patch.object(gh, "closed_prs_for_areas", wraps=gh.closed_prs_for_areas) as histories:
+            self.assertEqual(self.build()["roadmap"], "PDE")
+        self.assertEqual(list(histories.call_args.args[0]), ["PDE"])
+
 
 if __name__ == "__main__":
     unittest.main()

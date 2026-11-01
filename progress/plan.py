@@ -367,7 +367,7 @@ def build_plan(
 
     candidates = []
     skipped = list(stale)
-    histories = None
+    eligible = {}
     for area, rel_dir in areas.items():
         if area in blocked:
             skipped.append(f"{area}: PR #{blocked[area]['number']} is still open")
@@ -382,10 +382,12 @@ def build_plan(
         if from_sha == to_sha:
             skipped.append(f"{area}: already at {to_sha[:7]}")
             continue
-        # Read each eligible area's full history once, batching connections
-        # without changing label attribution, pagination or Git-window rules.
-        if histories is None:
-            histories = gh.closed_prs_for_areas([name for name in areas if name not in blocked])
+        eligible[area] = (rel_dir, status_text, progress_text, from_sha)
+
+    # Only histories used below need reading. Current and malformed cursors
+    # must not turn a neighbour's useful plan into an all-area history scan.
+    histories = gh.closed_prs_for_areas(eligible) if eligible else {}
+    for area, (rel_dir, status_text, progress_text, from_sha) in eligible.items():
         area_prs = histories[area]
         if not area_prs:
             skipped.append(f"{area}: no merged PRs yet")
