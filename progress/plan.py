@@ -367,6 +367,7 @@ def build_plan(
 
     candidates = []
     skipped = list(stale)
+    histories = None
     for area, rel_dir in areas.items():
         if area in blocked:
             skipped.append(f"{area}: PR #{blocked[area]['number']} is still open")
@@ -378,9 +379,14 @@ def build_plan(
             skipped.append(f"{area}: unparseable PROGRESS.md ({exc})")
             continue
 
-        # One label query per area. See gh.closed_prs_for_area for why attribution is per-area
-        # rather than per-PR.
-        area_prs = gh.closed_prs_for_area(area)
+        if from_sha == to_sha:
+            skipped.append(f"{area}: already at {to_sha[:7]}")
+            continue
+        # Read each eligible area's full history once, batching connections
+        # without changing label attribution, pagination or Git-window rules.
+        if histories is None:
+            histories = gh.closed_prs_for_areas([name for name in areas if name not in blocked])
+        area_prs = histories[area]
         if not area_prs:
             skipped.append(f"{area}: no merged PRs yet")
             continue
