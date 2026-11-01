@@ -351,14 +351,14 @@ def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge
     from progress import gh as gh_mod, plan as plan_mod
     from progress import docs as docs_mod
     from types import SimpleNamespace
-    orig_docs, orig_labels = docs_mod.discover, gh_mod.closed_prs_for_area
+    orig_docs, orig_labels = docs_mod.discover, gh_mod.closed_prs_for_areas
     orig_login = plan_mod._own_login
     docs_mod.discover = lambda: SimpleNamespace(
         source_commit=lambda: docs_sha, generation=f"pages/{docs_sha}", require_coverage=lambda paths: None,
         pin=lambda: {"source_commit": docs_sha})
     plan_mod._own_login = lambda: "test-user"
-    gh_mod.closed_prs_for_area = lambda area, **_: {
-        n: (merge_shas or {}).get(n) for n in area_prs.get(area, [])}
+    gh_mod.closed_prs_for_areas = lambda areas, **_: {
+        area: {n: (merge_shas or {}).get(n) for n in area_prs.get(area, [])} for area in areas}
     try:
         return plan_mod.build_plan(
             roadmap_dir, code_dir,
@@ -366,7 +366,7 @@ def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge
                       "messageHeadline": "progress: X (2026-01-01)"}],
             open_prs=[], ref=ref, min_prs=1, **kw)
     finally:
-        docs_mod.discover, gh_mod.closed_prs_for_area = orig_docs, orig_labels
+        docs_mod.discover, gh_mod.closed_prs_for_areas = orig_docs, orig_labels
         plan_mod._own_login = orig_login
 
 

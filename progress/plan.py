@@ -367,6 +367,7 @@ def build_plan(
 
     candidates = []
     skipped = list(stale)
+    eligible = {}
     for area, rel_dir in areas.items():
         if area in blocked:
             skipped.append(f"{area}: PR #{blocked[area]['number']} is still open")
@@ -378,9 +379,16 @@ def build_plan(
             skipped.append(f"{area}: unparseable PROGRESS.md ({exc})")
             continue
 
-        # One label query per area. See gh.closed_prs_for_area for why attribution is per-area
-        # rather than per-PR.
-        area_prs = gh.closed_prs_for_area(area)
+        if from_sha == to_sha:
+            skipped.append(f"{area}: already at {to_sha[:7]}")
+            continue
+        eligible[area] = (rel_dir, status_text, progress_text, from_sha)
+
+    # Only histories used below need reading. Current and malformed cursors
+    # must not turn a neighbour's useful plan into an all-area history scan.
+    histories = gh.closed_prs_for_areas(eligible) if eligible else {}
+    for area, (rel_dir, status_text, progress_text, from_sha) in eligible.items():
+        area_prs = histories[area]
         if not area_prs:
             skipped.append(f"{area}: no merged PRs yet")
             continue

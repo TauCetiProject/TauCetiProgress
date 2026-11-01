@@ -237,6 +237,61 @@ def closed_prs_for_area(area, repo=CODE_REPO):
         raise GhError(f"could not parse closed PR query output: {exc}") from exc
 
 
+def closed_prs_for_areas(areas, repo=CODE_REPO):
+    """Read the same complete labelled histories in small GraphQL batches.
+
+    Each connection retains its own cursor. A missing/failed page raises, never
+    becomes an empty history that could move a report cursor past real work.
+    """
+    areas = list(dict.fromkeys(areas))
+    if len(areas) == 1:
+        return {areas[0]: closed_prs_for_area(areas[0], repo=repo)}
+    owner, name = repo.split("/", 1)
+    histories = {area: {} for area in areas}
+    for offset in range(0, len(areas), 10):
+        batch = dict(enumerate(areas[offset:offset + 10]))
+        cursors, seen = {}, {i: set() for i in batch}
+        while batch:
+            declarations = ["$owner:String!", "$name:String!"]
+            selections = []
+            args = ["api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}"]
+            for i, area in batch.items():
+                declarations += [f"$label{i}:[String!]", f"$cursor{i}:String"]
+                selections.append(
+                    f"q{i}:pullRequests(first:100,after:$cursor{i},labels:$label{i},"
+                    "states:[CLOSED,MERGED],orderBy:{field:CREATED_AT,direction:DESC})"
+                    "{nodes{number mergedAt mergeCommit{oid}} pageInfo{hasNextPage endCursor}}"
+                )
+                args += ["-f", f"label{i}[]={ROADMAP_LABEL_PREFIX}{area}"]
+                if i in cursors:
+                    args += ["-f", f"cursor{i}={cursors[i]}"]
+            query = "query(" + ",".join(declarations) + "){repository(owner:$owner,name:$name){" + " ".join(selections) + "}}"
+            try:
+                payload = json.loads(gh([*args, "-f", "query=" + query]))
+                if payload.get("errors"):
+                    raise ValueError("GraphQL returned errors")
+                repository = payload["data"]["repository"]
+                pending = {}
+                for i, area in batch.items():
+                    connection = repository[f"q{i}"]
+                    for row in connection["nodes"]:
+                        sha = (row.get("mergeCommit") or {}).get("oid") if row["mergedAt"] else None
+                        if row["mergedAt"] and not sha:
+                            raise ValueError("native merge SHA unavailable")
+                        histories[area][int(row["number"])] = sha
+                    page = connection["pageInfo"]
+                    if page["hasNextPage"]:
+                        cursor = page["endCursor"]
+                        if not isinstance(cursor, str) or not cursor or cursor in seen[i]:
+                            raise ValueError("invalid or repeated history cursor")
+                        seen[i].add(cursor)
+                        cursors[i], pending[i] = cursor, area
+                batch = pending
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                raise GhError(f"could not read complete closed PR histories: {exc}") from exc
+    return histories
+
+
 def pr_details(numbers, repo=CODE_REPO):
     """`[{number, title, body, merged_at, url}]` for an explicit set of PR numbers.
 

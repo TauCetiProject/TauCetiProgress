@@ -163,6 +163,44 @@ class BorsTests(unittest.TestCase):
                 gh.closed_prs_for_area("PDE")
             self.assertIsNone(collect.bootstrap_cursor("PDE"))
 
+    def test_batched_histories_keep_independent_complete_connections(self):
+        def connection(rows, more=False):
+            return {"nodes": rows, "pageInfo": {"hasNextPage": more, "endCursor": "next" if more else None}}
+
+        pages = [
+            {"data": {"repository": {"q0": connection([self.rows[0]], True), "q1": connection([self.rows[1]])}}},
+            {"data": {"repository": {"q0": connection([self.rows[2]])}}},
+        ]
+        with patch.object(gh, "gh", side_effect=[json.dumps(page) for page in pages]) as network:
+            histories = gh.closed_prs_for_areas(["PDE", "Algebra"])
+        self.assertEqual(histories, {"PDE": {100: self.native, 102: self.tip}, "Algebra": {101: None}})
+        self.assertEqual(network.call_count, 2)
+        second = network.call_args.args[0]
+        self.assertIn("cursor0=next", second)
+        self.assertNotIn("label1[]=roadmap/Algebra", second)
+
+        pages[1] = {"data": {"repository": {"q0": connection([])}}, "errors": [{"message": "incomplete"}]}
+        with patch.object(gh, "gh", side_effect=[json.dumps(page) for page in pages]):
+            with self.assertRaises(gh.GhError):
+                gh.closed_prs_for_areas(["PDE", "Algebra"])
+
+    def test_current_cursor_needs_no_label_history_query(self):
+        (self.area / "PROGRESS.md").write_text(
+            files.new_progress_file("PDE") + files.render_section(
+                "PDE", self.root, self.tip, [100, 101, 102], "2026-01-01", "prose " * 60))
+        with patch.object(gh, "closed_prs_for_areas", side_effect=AssertionError("unnecessary history scan")):
+            with self.assertRaises(plan.NotDue):
+                self.build()
+
+        current = self.roadmap / "TauCetiRoadmap/Algebra"
+        current.mkdir()
+        (current / "README.md").write_text("# Algebra\n")
+        (current / "PROGRESS.md").write_text((self.area / "PROGRESS.md").read_text())
+        (self.area / "PROGRESS.md").unlink()
+        with patch.object(gh, "closed_prs_for_areas", wraps=gh.closed_prs_for_areas) as histories:
+            self.assertEqual(self.build()["roadmap"], "PDE")
+        self.assertEqual(list(histories.call_args.args[0]), ["PDE"])
+
 
 if __name__ == "__main__":
     unittest.main()
