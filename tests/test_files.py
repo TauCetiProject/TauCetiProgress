@@ -334,6 +334,48 @@ def test_validate_rejects_unadvanced_status():
     raises(lambda: files.validate_update(area, old_status, status, log, new_log), "nothing advanced")
 
 
+def _legacy_status(to_sha=A):
+    # RepresentationTheory's published snapshot had a 201-character remaining note.
+    coverage = dict(COV, to_sha=to_sha,
+                    layers=[{"id": "Subroadmaps", "state": "partial", "remaining": "x" * 200}])
+    return files.render_status("PDE", to_sha, "t", PROSE, coverage).replace("x" * 200, "x" * 201, 1)
+
+
+def test_validate_can_replace_legacy_coverage():
+    old_status = _legacy_status()
+    raises(lambda: files.parse_status(old_status), "200")
+    status, log, new_log = good_update()
+    section = files.validate_update("PDE", old_status, status, log, new_log, expect_from_sha=A)
+    assert section["to_sha"] == B
+
+
+def test_validate_still_requires_legacy_status_to_advance():
+    status, log, new_log = good_update()
+    raises(lambda: files.validate_update("PDE", _legacy_status(B), status, log, new_log),
+           "nothing advanced")
+
+
+def test_validate_still_refuses_overlong_coverage_in_new_status():
+    _, log, new_log = good_update()
+    raises(lambda: files.validate_update("PDE", _legacy_status(), _legacy_status(B), log, new_log),
+           "200")
+
+
+def test_validate_still_requires_a_valid_old_status_header():
+    old_status = files.render_status("PDE", A, "t", PROSE)
+    status, log, new_log = good_update()
+    cases = [
+        ("", "exactly one"),
+        (old_status + old_status, "exactly one"),
+        (old_status.replace('"roadmap":"PDE",', '', 1), "missing field"),
+        (old_status.replace(A, "short", 1), "40-character"),
+        (old_status.replace('"ts":"t"', '"ts":0', 1), "ts"),
+        (old_status.replace('"ts":"t"', '"ts":"t","extra":true', 1), "unknown field"),
+    ]
+    for baseline, needle in cases:
+        raises(lambda: files.validate_update("PDE", baseline, status, log, new_log), needle)
+
+
 def test_validate_rejects_injected_marker_in_prose():
     area = "PDE"
     log = files.new_progress_file(area)

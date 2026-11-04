@@ -347,6 +347,20 @@ def render_status(area, to_sha, ts, body, coverage=None, sub_coverage=()):
     return f"{status_prefix(area, to_sha, ts, coverage, sub_coverage)}{body.strip()}\n"
 
 
+def _parse_status_header(text):
+    """Read the snapshot identity without interpreting optional coverage metadata."""
+    headers = parse_headers(text, STATUS_MARKER)
+    if len(headers) != 1:
+        raise FormatError(f"expected exactly one {STATUS_MARKER} header, found {len(headers)}")
+    h = headers[0]
+    _require_keys(h, STATUS_KEYS, STATUS_MARKER)
+    return {
+        "roadmap": _require_area(h.get("roadmap"), "roadmap"),
+        "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
+        "ts": _require_ts(h.get("ts")),
+    }
+
+
 def parse_status(text):
     """The headers of a `STATUS.md`. Raises unless there is exactly one status header.
 
@@ -356,15 +370,8 @@ def parse_status(text):
     (another roadmap, another commit, a malformed layer) fails the whole parse; the gate never
     merges a file it could not fully account for. Their order is the prefix check's business.
     """
-    headers = parse_headers(text, STATUS_MARKER)
-    if len(headers) != 1:
-        raise FormatError(f"expected exactly one {STATUS_MARKER} header, found {len(headers)}")
-    h = headers[0]
-    _require_keys(h, STATUS_KEYS, STATUS_MARKER)
     out = {
-        "roadmap": _require_area(h.get("roadmap"), "roadmap"),
-        "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
-        "ts": _require_ts(h.get("ts")),
+        **_parse_status_header(text),
         "coverage": None,
         "sub_coverage": [],
     }
@@ -704,7 +711,10 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
     check_no_reserved_markers(status_rest)
 
     if old_status is not None:
-        old = parse_status(old_status)
+        # Only the old snapshot's identity is needed to check advancement. Its optional
+        # coverage is being replaced, and legacy metadata (for example a 201-character note)
+        # must not block a valid replacement. The new snapshot was parsed in full above.
+        old = _parse_status_header(old_status)
         if old["to_sha"] == status["to_sha"]:
             raise FormatError(f"STATUS.md still describes {status['to_sha'][:7]}; nothing advanced")
 
