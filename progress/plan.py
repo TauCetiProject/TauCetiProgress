@@ -162,6 +162,19 @@ def check_cadence(commits, idle_hours=IDLE_HOURS, now=None):
     return f"last progress update landed {age:.1f}h ago"
 
 
+def roadmap_commits(roadmap_dir, ref):
+    """Read the caller's freshly fetched ref, never its unpublished worktree.
+
+    The worker already fetches a full Roadmap clone before planning. An explicit
+    ref opts into that observation; standalone callers retain the API check.
+    """
+    if window.git(["rev-parse", "--is-shallow-repository"], roadmap_dir).strip() != "false":
+        raise window.GitError("roadmap cadence requires complete Git history")
+    sha = window.git(["rev-parse", "--verify", "--end-of-options", ref + "^{commit}"], roadmap_dir).strip()
+    rows = window.git(["log", "--format=%cI%x09%s", sha, "--"], roadmap_dir)
+    return [tuple(line.split("\t", 1)) for line in rows.splitlines() if "\t" in line]
+
+
 def area_window(repo_dir, area_prs, from_sha, to_sha):
     """PR numbers in `(from_sha, to_sha]` that belong to an area, newest first.
 
@@ -326,6 +339,7 @@ def build_plan(
     now=None,
     only_area=None,
     docs=None,
+    roadmap_ref=None,
 ):
     """The whole decision. Returns a plan dict, or raises NotDue.
 
@@ -333,7 +347,9 @@ def build_plan(
     tests inject fixtures); otherwise they are fetched.
     """
     now = now or _utcnow()
-    commits = gh.recent_roadmap_commits() if commits is None else commits
+    if commits is None:
+        commits = (roadmap_commits(roadmap_dir, roadmap_ref) if roadmap_ref is not None
+                   else gh.recent_roadmap_commits())
     cadence_reason = check_cadence(commits, idle_hours=idle_hours, now=now)
 
     open_prs = gh.open_progress_prs() if open_prs is None else open_prs
