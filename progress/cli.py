@@ -78,6 +78,7 @@ def cmd_plan(args):
     try:
         result = plan.build_plan(
             roadmap_dir=args.roadmap_dir,
+            roadmap_ref=args.roadmap_ref,
             code_dir=args.code_dir,
             ref=args.ref,
             idle_hours=args.idle_hours,
@@ -201,6 +202,8 @@ def build_parser():
 
     p = sub.add_parser("plan", help="pick the roadmap and the PR window")
     p.add_argument("--roadmap-dir", required=True, help="a TauCetiRoadmap checkout")
+    p.add_argument("--roadmap-ref", default=None,
+                   help="freshly fetched full-history Roadmap ref for cadence (otherwise use GitHub)")
     p.add_argument("--code-dir", required=True, help="a full-history TauCeti checkout")
     p.add_argument("--ref", default=None,
                    help="the code ref to read (default: the docs-tracking branch, origin/docgen)")
