@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from progress import files, gate  # noqa: E402
-from progress.gate import Pending, Refused  # noqa: E402
+from progress.gate import Refused  # noqa: E402
 
 failures = []
 
@@ -34,18 +34,6 @@ def refuses(fn, needle=None):
             raise AssertionError(f"refused for the wrong reason: {str(exc)!r}") from None
         return str(exc)
     raise AssertionError("expected a refusal, the gate ALLOWED this")
-
-
-def waits(fn, needle=None):
-    try:
-        fn()
-    except Pending as exc:
-        if needle and needle not in str(exc):
-            raise AssertionError(f"pending for the wrong reason: {str(exc)!r}") from None
-        return str(exc)
-    except Refused as exc:
-        raise AssertionError(f"expected pending, the gate REFUSED this: {exc}") from None
-    raise AssertionError("expected pending, the gate ALLOWED this")
 
 
 REPO = "TauCetiProject/TauCetiRoadmap"
@@ -95,17 +83,6 @@ def make_content(from_sha=FROM, to_sha=TO, prs=(1, 2, 3), area=AREA, prose=None)
     return None, new_status, old_progress, new_progress
 
 
-def build_run(**over):
-    """A fully-specified check-run. Every field is required by the gate, so fixtures state them all."""
-    run = {"name": "build", "head_sha": HEAD, "conclusion": "success",
-           "status": "completed", "app_id": gate.GITHUB_ACTIONS_APP_ID, "source": "check_run"}
-    run.update(over)
-    return run
-
-
-CHECKS_OK = [build_run()]
-
-
 MAIN = "9a9a9a9" + "0" * 33
 
 
@@ -120,7 +97,7 @@ def make_window(**over):
 NOW = "2026-07-30T12:00:00Z"
 
 
-def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FROM, window=-1,
+def call(pr=None, changed=None, tree=None, content=None, cursor=FROM, window=-1,
          old_paths=None, last_report_at=None, now=NOW,
          area_exists=True, expected_bootstrap=None):
     old_status, new_status, old_progress, new_progress = content or make_content()
@@ -132,7 +109,6 @@ def call(pr=None, changed=None, tree=None, content=None, checks=None, cursor=FRO
         new_status_bytes=new_status.encode(),
         old_progress=old_progress,
         new_progress_bytes=new_progress.encode(),
-        check_runs=checks if checks is not None else CHECKS_OK,
         base_repo=REPO,
         code_window=make_window() if window == -1 else window,
         last_report_at=last_report_at,
@@ -198,17 +174,6 @@ def test_refuses_when_the_window_could_not_be_checked():
 def test_refuses_when_the_checked_window_is_not_the_reported_one():
     """The window is resolved from the same pinned blob the section is parsed from; they must agree."""
     refuses(lambda: call(window=make_window(to_sha="b" * 40)), "is not the section's to_sha")
-
-
-def test_a_fork_that_force_pushes_after_opening_gains_nothing():
-    """Now that fork heads are accepted, the head branch is under someone else's control.
-
-    That is fine, because every check reads one pinned SHA. Replacing the branch produces a different
-    head, and evidence gathered for the old one no longer applies: here the build success names a
-    commit that is not the pinned head, which is exactly what a force-push leaves behind.
-    """
-    pr = make_pr(head={"ref": BRANCH, "sha": HEAD, "repo": {"full_name": "someone/TauCetiRoadmap"}})
-    refuses(lambda: call(pr=pr, checks=[build_run(head_sha="0" * 40)]), "names head")
 
 
 def test_a_first_report_must_start_where_the_roadmap_starts():
@@ -456,7 +421,7 @@ def test_refuses_invalid_utf8():
             pr=make_pr(), changed_files=make_files(), tree_entries=make_tree(),
             old_status=old_status, new_status_bytes=new_status.encode(),
             old_progress=old_progress, new_progress_bytes=bad,
-            check_runs=CHECKS_OK, base_repo=REPO, code_window=make_window(),
+            base_repo=REPO, code_window=make_window(),
             area_exists=True, now=NOW, current_main_cursor=FROM, main_sha=MAIN,
         )
     except (Refused, files.FormatError) as exc:
@@ -599,12 +564,6 @@ def test_refuses_a_ts_that_could_open_a_comment():
     raise AssertionError("expected a FormatError")
 
 
-def test_refuses_a_string_app_id():
-    """`int()` coercion accepted "15368" and 15368.9 alike."""
-    refuses(lambda: call(checks=[build_run(app_id="15368")]), "reported by app")
-    refuses(lambda: call(checks=[build_run(app_id=15368.9)]), "reported by app")
-
-
 def test_refuses_unknown_header_fields():
     """Headers are a closed schema shared with the gate; an ignored field is a field a later reader
     might not ignore."""
@@ -615,68 +574,10 @@ def test_refuses_unknown_header_fields():
     refuses(lambda: call(content=(None, odd, old_progress, new_progress)), "unknown field")
 
 
-# ----- build ------------------------------------------------------------------------------------
+# ----- the command line -------------------------------------------------------------------------
 
 
-def test_refuses_a_failing_build():
-    checks = [build_run(conclusion="failure")]
-    refuses(lambda: call(checks=checks), "concluded 'failure'")
-
-
-def test_refuses_a_build_from_another_app():
-    """Any repository WRITER can create a check-run or POST a commit status under any name, so a
-    result is evidence only if it came from the App that actually runs CI."""
-    checks = [build_run(app_id=99999)]
-    refuses(lambda: call(checks=checks), "reported by app")
-
-
-def test_refuses_a_legacy_commit_status():
-    checks = [build_run(source="status")]
-    refuses(lambda: call(checks=checks), "not a check run")
-
-
-def test_refuses_a_skipped_or_neutral_build():
-    """Both count as passing for ordinary branch protection, so a workflow that skipped the build
-    entirely would otherwise have satisfied this."""
-    for concl in ("skipped", "neutral"):
-        refuses(lambda c=concl: call(checks=[build_run(conclusion=c)]), "concluded " + repr(concl))
-
-
-def test_waits_for_an_incomplete_build():
-    """Not a refusal: the report usually opens before CI finishes, and the gate re-runs when it does.
-    Still a `Refused`, so anything that only asks "may this merge?" gets no."""
-    for status in sorted(gate.UNFINISHED_STATUSES):
-        checks = [build_run(conclusion=None, status=status)]
-        waits(lambda c=checks: call(checks=c), repr(status))
-        refuses(lambda c=checks: call(checks=c))
-
-
-def test_a_failure_elsewhere_wins_over_waiting_for_the_build():
-    """A report that would be refused anyway should hear so now, not after CI."""
-    unfinished = [build_run(conclusion=None, status="in_progress")]
-    other = make_pr(head={"ref": f"progress/aaaaaaa-{TO[:7]}/{AREA}", "sha": HEAD,
-                          "repo": {"full_name": REPO}})
-    exc = refuses(lambda: call(pr=other, checks=unfinished), "branch says the window starts at")
-    assert "in_progress" not in exc
-    try:
-        call(pr=other, checks=unfinished)
-    except Pending:
-        raise AssertionError("a refusal was reported as pending") from None
-    except Refused:
-        pass
-
-
-def test_a_finished_failing_build_is_refused_even_while_another_runs():
-    checks = [build_run(conclusion=None, status="in_progress"), build_run(conclusion="failure")]
-    try:
-        call(checks=checks)
-    except Pending:
-        raise AssertionError("a failed build was reported as pending") from None
-    except Refused as exc:
-        assert "concluded 'failure'" in str(exc), exc
-
-
-def test_cli_exit_codes_distinguish_pending_from_refused():
+def test_cli_allows_with_a_result_and_refuses_with_exit_3():
     import contextlib
     import io
     import json as _json
@@ -690,18 +591,25 @@ def test_cli_exit_codes_distinguish_pending_from_refused():
         "main_sha": MAIN,
         "old_paths": {n: f"TauCetiRoadmap/{AREA}/{n}" for n in ("STATUS.md", "PROGRESS.md")},
     }
-    for checks, rc, prefix in (
-        (CHECKS_OK, 0, "ALLOWED: "),
-        ([build_run(conclusion=None, status="queued")], gate.EX_PENDING, "PENDING: "),
-        ([build_run(conclusion="failure")], gate.EX_REFUSED, "REFUSED: "),
+    for over, rc, prefix in (
+        ({}, 0, "ALLOWED: "),
+        ({"current_main_cursor": "e" * 40}, gate.EX_REFUSED, "REFUSED: "),
     ):
-        with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
-            _json.dump(dict(bundle, check_runs=checks), f)
-            f.flush()
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_path = pathlib.Path(tmp, "bundle.json")
+            result_path = pathlib.Path(tmp, "result.json")
+            bundle_path.write_text(_json.dumps(dict(bundle, **over)))
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                got = gate.main(["--bundle", f.name])
-        assert got == rc and out.getvalue().startswith(prefix), (got, out.getvalue())
+                got = gate.main(["--bundle", str(bundle_path), "--result", str(result_path)])
+            assert got == rc and out.getvalue().startswith(prefix), (got, out.getvalue())
+            if rc == 0:
+                result = _json.loads(result_path.read_text())
+                assert result["parent"] == "TauCetiRoadmap" and result["main_sha"] == MAIN
+                assert result["blobs"][f"TauCetiRoadmap/{AREA}/STATUS.md"] == \
+                    gate.git_blob_sha(new_status.encode())
+            else:
+                assert not result_path.exists()
 
 
 def test_refuses_a_branch_whose_window_disagrees_with_the_section():
@@ -713,50 +621,6 @@ def test_refuses_a_branch_whose_window_disagrees_with_the_section():
     other2 = make_pr(head={"ref": f"progress/{FROM[:7]}-bbbbbbb/{AREA}", "sha": HEAD,
                            "repo": {"full_name": REPO}})
     refuses(lambda: call(pr=other2), "branch says the window ends at")
-
-
-def test_refuses_a_completed_build_without_a_conclusion():
-    checks = [build_run(conclusion=None)]
-    refuses(lambda: call(checks=checks), "concluded None")
-
-
-def test_refuses_a_build_that_has_not_reported():
-    """No run means no completion event to re-run the gate (a `[skip ci]` head, or a fork's CI
-    awaiting approval), so staying quiet would leave the report silently stranded."""
-    exc = refuses(lambda: call(checks=[]), "has not reported")
-    try:
-        call(checks=[])
-    except Pending:
-        raise AssertionError(f"an absent build was reported as pending: {exc}") from None
-    except Refused:
-        pass
-
-
-def test_refuses_a_failing_build_listed_after_a_success():
-    """A head can carry BOTH a check-run and a commit status named `build` (the collector appends
-    check-runs, then statuses). Returning on the first match let a success hide a later failure."""
-    checks = [build_run(), build_run(conclusion="failure")]
-    refuses(lambda: call(checks=checks), "concluded 'failure'")
-
-
-def test_allows_when_every_build_entry_is_green():
-    checks = [build_run(), build_run()]
-    assert call(checks=checks)["area"] == AREA
-
-
-def test_refuses_a_build_for_another_commit():
-    """A green build on an earlier commit says nothing about the head being merged."""
-    refuses(lambda: call(checks=[build_run(head_sha="0" * 40)]), "names head")
-
-
-def test_refuses_a_build_with_missing_provenance():
-    """Defaulting an absent field to the acceptable value meant a bare
-    {"name": "build", "conclusion": "SUCCESS"} passed: no app to check, status assumed completed."""
-    refuses(lambda: call(checks=[{"name": "build", "conclusion": "SUCCESS"}]), "not a check run")
-    refuses(lambda: call(checks=[build_run(app_id=None)]), "reported by app")
-    refuses(lambda: call(checks=[build_run(status=None)]), "not completed")
-    # Case matters: GitHub emits lowercase, so anything else was not written by GitHub.
-    refuses(lambda: call(checks=[build_run(conclusion="SUCCESS")]), "concluded")
 
 
 for _name, _fn in sorted(globals().items()):

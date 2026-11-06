@@ -27,9 +27,9 @@ Anyone. There is no author allowlist, and pull requests opened from forks are ac
 What makes that safe is the shape of the diff rather than the identity behind it. A report may touch
 exactly one roadmap's `STATUS.md` and `PROGRESS.md` and nothing else; the log must grow only at its
 end, byte for byte; the window must continue from the area's current cursor and end at a commit
-actually reachable from TauCeti's `docgen` branch; and the `build` check must have succeeded on the
-exact head being merged. No pull-request content is ever checked out or executed, and no write token
-exists until every check has passed.
+actually reachable from TauCeti's `docgen` branch. What lands is current `main` with exactly the
+two validated files written into it. No pull-request content is ever checked out or executed, and no
+write token exists until every check has passed.
 
 That last condition on the window is what keeps an open door bounded rather than merely revertible.
 Cursor continuity pins where a report starts, but its end was otherwise free, so a chain of reports
@@ -91,8 +91,11 @@ repository rather than something the workflow can enforce.
 It proves the *shape* of an update: which paths changed, that both generated files are present, that
 the window continues the log with no gap, that `PROGRESS.md` grew only at the end, that no file is a
 symlink, that the head is a `progress/*` branch whose name matches the window it carries, that the
-window ends at a commit reachable from TauCeti's documentation branch, that `build` is green on that
-exact commit, and that the merge is bound to the head that was validated.
+window ends at a commit reachable from TauCeti's documentation branch, and that what lands is the
+validated bytes of those two files, written into current `main` and nothing else.
+
+It does not wait for `build`. That check compiles the roadmap repository's Lean and checks its
+metadata, neither of which reads the two files a report changes, so it says nothing about a report.
 
 It says nothing about *who* opened the pull request, on purpose.
 
