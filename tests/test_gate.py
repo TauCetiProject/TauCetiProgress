@@ -158,6 +158,21 @@ def test_allows_a_well_formed_update():
     assert AREA in gate.summary(result)
 
 
+def test_allows_replacing_legacy_coverage_but_refuses_it_in_new_status():
+    # An already-published 201-character note must not prevent a valid replacement,
+    # but the same note in a newly submitted snapshot must still be refused.
+    coverage = {"roadmap": AREA, "to_sha": FROM, "readme_sha": "0" * 64,
+                "layers": [{"id": "Subroadmaps", "state": "partial", "remaining": "x" * 200}]}
+    old_status = files.render_status(AREA, FROM, "t", PROSE, coverage)
+    old_status = old_status.replace("x" * 200, "x" * 201, 1)
+    _, new_status, old_progress, new_progress = make_content()
+    result = call(content=(old_status, new_status, old_progress, new_progress))
+    assert result["section"]["to_sha"] == TO
+
+    bad_status = old_status.replace(FROM, TO)
+    refuses(lambda: call(content=(old_status, bad_status, old_progress, new_progress)), "200")
+
+
 # ----- provenance ------------------------------------------------------------------------------
 
 
