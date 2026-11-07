@@ -26,9 +26,9 @@ from .window import CODE_REF
 IDLE_HOURS = 8.0
 MIN_PRS = 10
 # How long an open progress pull request keeps marking its area in flight; past this it is assumed
-# stuck and the area is reported again. Landing takes two passes through the Actions queue (CI, then
-# the gate that CI's completion triggers), and a replacement rejoins the back of that queue, so this
-# must outlast two congested passes. November 2026 saw 17 hours a pass and 29 hours of queued work.
+# stuck and the area is reported again. The gate's run waits in the roadmap repository's Actions
+# queue, which in November 2026 held 29 hours of work, and a replacement rejoins the back of it.
+# A caller still waiting for the roadmap `build` makes that two passes.
 STALE_PR_HOURS = 72.0
 
 # The commit-subject prefix that marks a merged progress update. `apply` uses it as the PR title

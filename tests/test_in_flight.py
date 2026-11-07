@@ -92,7 +92,7 @@ def test_only_the_stale_area_is_released():
 
 
 def test_the_default_cutoff_outlasts_two_congested_queue_passes():
-    """Landing takes two passes through the Actions queue; replaced sooner, a report never lands."""
+    """A caller waiting for `build` makes two queue passes; replaced sooner, a report never lands."""
     blocked, stale = plan.in_flight_areas([pr(hours_old=58)], now=NOW, owners={OURS})
     assert set(blocked) == {"PDE"} and stale == []
 
