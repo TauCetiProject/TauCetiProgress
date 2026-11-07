@@ -252,7 +252,8 @@ The `gh` transport retries only recognized reads. API flags are consumed with
 their values before classifying a request: fields switch REST requests to POST,
 and a GraphQL document starting with `query` may also contain a selected mutation.
 Retryable GraphQL uses the literal `graphql` endpoint and one raw query field,
-with no mutation/subscription text, file-based query, repository placeholder or
-extensions. This is a conservative retry guard, not a GraphQL parser. Unknown
+with no mutation/subscription text, file-based query or extensions. Typed query
+fields (including file and repository-placeholder expansion) are not classified
+as retryable reads. This is a conservative retry guard, not a GraphQL parser. Unknown
 forms retain the existing publication journal and reconciliation path. Commands
 and payloads passed to native gh remain unchanged.

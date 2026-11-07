@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from progress import gh  # noqa: E402
+from progress import apply, forks, gh  # noqa: E402
 
 
 class RetryClassification(unittest.TestCase):
@@ -42,6 +42,8 @@ class RetryClassification(unittest.TestCase):
             ["api", "graphql", "-f", "query=query Q { viewer{login} } mutation M { x }", "-f", "operationName=M"],
             ["api", "graphql", "-f", "query=query { viewer{login} }", "--input", "request.json"],
             ["api", "graphql", "-F", "query=@request.graphql"],
+            ["api", "graphql", "--field=query=@request.graphql"],
+            ["api", "graphql", "-Fquery=@request.graphql"],
             ["api", "graphql", "-F", "query={repo} X { x }"],
             ["api", "graphql", "-f", "query=query{viewer{login}}", "-f", "query=mutation{x}"],
             ["api", "graphql", "-f", "query=query{viewer{login}}", "-f", "query[operation]=mutation{x}"],
@@ -50,6 +52,7 @@ class RetryClassification(unittest.TestCase):
             ["api", "graphql", "-f", "query=subscription { updates }"],
             ["api", "https://api.github.com/graphql", "-f", "query=query{viewer{login}}"],
             ["api", "user", "--future-option"], ["api", "user", "--jq"],
+            ["api", "graphql", "-f"],
             ["pr", "create", "--title", "Progress"], ["repo", "fork", "one/Project"],
         ]:
             with self.subTest(args=args):
@@ -59,9 +62,12 @@ class RetryClassification(unittest.TestCase):
         for args in [
             ["api", "user", "--jq", ".login"],
             ["api", "repos/one/Project/pulls/12"],
+            ["api", "repos/one/graphql", "--jq", ".permissions.push"],
+            ["api", "repos/one/Project/contents/graphql"],
             ["api", "repos/one/Project/commits?per_page=30", "--jq", ".[].sha"],
             ["api", "graphql", "--paginate", "--slurp", "-f", "query=query($name:String!){repository(name:$name){id}}", "-f", "name=Project"],
             ["api", "graphql", "-fquery={ viewer{login} }", "--jq", "-XPOST"],
+            ["api", "graphql", "-f=query={ viewer{login} }"],
             ["api", "graphql", "--raw-field=query=query{viewer{login}}", "--jq=--input"],
             ["pr", "list", "--repo", gh.CODE_REPO, "--state", "open"],
         ]:
@@ -71,6 +77,27 @@ class RetryClassification(unittest.TestCase):
                 self.assertEqual(gh.gh(args), "{}")
                 self.assertEqual(native.call_count, 2)
                 sleep.assert_called_once_with(1)
+
+    def test_actual_read_builders_remain_retryable(self):
+        class Captured(RuntimeError):
+            pass
+
+        builders = [
+            ("area history", lambda: gh.closed_prs_for_area("Area")),
+            ("batched histories", lambda: gh.closed_prs_for_areas(["Area", "Other"])),
+            ("PR recovery", lambda: apply.reconcile_pr("progress/window/Area", "author")),
+            ("fork discovery", lambda: forks.discover(gh.gh, "one/Project")),
+            ("roadmap commits", gh.recent_roadmap_commits),
+            ("PR details", lambda: gh.pr_details([12])),
+            ("open progress PRs", gh.open_progress_prs),
+            ("push permission on repo named graphql", lambda: apply.push_target(pathlib.Path("/unused"), repo="one/graphql")),
+        ]
+        for name, build in builders:
+            with self.subTest(builder=name), patch.object(gh, "gh", side_effect=Captured) as transport:
+                with self.assertRaises(Captured):
+                    build()
+                transport.assert_called_once()
+                self.assertTrue(gh.readonly(transport.call_args.args[0]), transport.call_args.args[0])
 
     def test_known_graphql_partial_errors_still_raise(self):
         with patch.object(gh.subprocess, "run") as native:

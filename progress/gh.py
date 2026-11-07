@@ -18,7 +18,6 @@ import json
 import os
 import subprocess
 import time
-import urllib.parse
 from pathlib import Path
 
 ROADMAP_REPO = os.environ.get("TAUCETI_ROADMAP_REPO", "TauCetiProject/TauCetiRoadmap")
@@ -50,12 +49,6 @@ def readonly(args):
     if len(args) < 2 or args[0] != "api" or args[1].startswith("-"):
         return False
     graphql = args[1] == "graphql"
-    if not graphql:
-        try:
-            if urllib.parse.urlsplit(args[1]).path.strip("/").split("/")[-1] == "graphql":
-                return False  # Only the literal form has partial-error handling below.
-        except ValueError:
-            return False
     queries, index = [], 2
     while index < len(args):
         arg = args[index]
@@ -93,9 +86,7 @@ def readonly(args):
     if len(queries) != 1:
         return False
     query = queries[0].lstrip()
-    return (query.startswith(("query", "{"))
-            and "mutation" not in query and "subscription" not in query
-            and not any(placeholder in query for placeholder in ("{owner}", "{repo}", "{branch}")))
+    return query.startswith(("query", "{")) and "mutation" not in query and "subscription" not in query
 
 
 def _save_intent(path, value):
