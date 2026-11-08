@@ -29,6 +29,10 @@ name: progress-merge
 on:
   workflow_call:
     inputs:
+      runs_on:
+        description: JSON runner target for the caller's small automation jobs.
+        type: string
+        default: '"ubuntu-latest"'
       tools_repository:
         type: string
         default: TauCetiProject/TauCetiTools
@@ -88,7 +92,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     # `write` ONLY here, and only so a refusal can be explained on the pull request itself. Anyone
     # may publish a report now, so a contributor whose report is refused would otherwise get no
     # feedback at all: the reason would sit in the Actions log of a workflow in a repository they may
@@ -218,7 +222,7 @@ jobs:
   merge:
     needs: validate
     if: needs.validate.outputs.verdict == 'allow' && inputs.dry_run == false
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     steps:
       # Minted only after validation succeeded, and scoped to this repository.
       - name: Mint the App token
