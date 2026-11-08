@@ -18,6 +18,10 @@ name: progress-announce
 on:
   workflow_call:
     inputs:
+      runs_on:
+        description: JSON runner target for the caller's small automation jobs.
+        type: string
+        default: '"ubuntu-latest"'
       tools_repository:
         type: string
         default: TauCetiProject/TauCetiTools
@@ -61,7 +65,7 @@ concurrency:
 
 jobs:
   announce:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     steps:
       - name: Check out the announcer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
