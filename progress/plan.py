@@ -25,10 +25,11 @@ from .window import CODE_REF
 
 IDLE_HOURS = 8.0
 MIN_PRS = 10
-# How long an open progress pull request keeps marking its area in flight. Past this it is assumed
-# stuck rather than pending: one full cadence period is long enough for any pull request that was
-# going to merge to have merged, and the merge check runs on every push.
-STALE_PR_HOURS = 8.0
+# How long an open progress pull request keeps marking its area in flight; past this it is assumed
+# stuck and the area is reported again. The gate's run waits in the roadmap repository's Actions
+# queue, which in November 2026 held 29 hours of work, and a replacement rejoins the back of it.
+# A caller still waiting for the roadmap `build` makes that two passes.
+STALE_PR_HOURS = 72.0
 
 # The commit-subject prefix that marks a merged progress update. `apply` uses it as the PR title
 # prefix, and a squash merge carries the PR title into the commit subject, so this one string links
@@ -287,7 +288,7 @@ def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None)
     `owners` restricts whose pull requests may mark an area in flight, and defaults to the roadmap
     organisation plus this operator. Anyone may open a pull request on a `progress/*` branch, so
     without this a stranger could freeze a roadmap indefinitely by opening one a day -- staleness
-    expiry bounds a single one to a day, but not a stream of them. A stranger's report still merges
+    expiry bounds a single one, but not a stream of them. A stranger's report still merges
     on its own merits; it simply does not stop anyone else from writing one. The cost is that two
     operators publishing from their own forks may duplicate a window, which wastes a round; being
     unable to report at all is the worse failure.
