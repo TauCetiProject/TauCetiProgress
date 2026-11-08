@@ -11,16 +11,14 @@ Two design points worth stating, because both were defects in an earlier draft:
   right now".
 """
 
-import os
-
 import base64
 import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import time
+from pathlib import Path
 
 ROADMAP_REPO = os.environ.get("TAUCETI_ROADMAP_REPO", "TauCetiProject/TauCetiRoadmap")
 CODE_REPO = os.environ.get("TAUCETI_REPO", "TauCetiProject/TauCeti")
@@ -40,15 +38,55 @@ class PublicationRejected(GhError):
 
 
 def readonly(args):
+    """Conservatively identify the read forms used by Progress.
+
+    Unknown forms retain mutation journaling. This is retry policy, not a
+    GraphQL parser or an authorization boundary. In particular a query prefix
+    cannot prove that a document contains no selected mutation operation.
+    """
     if args[:2] in (["pr", "list"], ["pr", "view"], ["repo", "view"]):
         return True
-    if args[:1] != ["api"]:
+    if len(args) < 2 or args[0] != "api" or args[1].startswith("-"):
         return False
-    if "graphql" in args:
-        query = next((a[6:] for a in args if a.startswith("query=")), "").lstrip()
-        return query.startswith(("query", "{"))
-    return not any(a in ("-X", "--method", "-f", "-F", "--field", "--raw-field", "--input")
-                   or a.startswith(("-X", "-f", "-F", "--method=", "--field=", "--raw-field=", "--input=")) for a in args)
+    graphql = args[1] == "graphql"
+    queries, index = [], 2
+    while index < len(args):
+        arg = args[index]
+        if arg in {"--paginate", "--slurp"} or arg.startswith("--jq="):
+            index += 1
+            continue
+        if arg in {"--jq", "-q"}:
+            index += 2
+            if index > len(args):
+                return False
+            continue  # Payload text is never interpreted as another option.
+        flag, sep, value = arg.partition("=")
+        if flag not in {"-f", "-F", "--field", "--raw-field"}:
+            if arg.startswith(("-f", "-F")) and len(arg) > 2:
+                flag, sep, value = arg[:2], "=", arg[2:]
+            else:
+                return False  # Includes short boolean clusters hiding a field/method.
+        if not graphql:
+            return False  # Fields change gh api's default method to POST.
+        if not sep:
+            index += 1
+            if index >= len(args):
+                return False
+            value = args[index]
+        key, equals, field = value.partition("=")
+        if not equals or key == "extensions" or key.startswith(("query[", "extensions[")):
+            return False
+        if key == "query":
+            if flag in {"-F", "--field"}:
+                return False  # Typed fields can read query text from a file.
+            queries.append(field)
+        index += 1
+    if not graphql:
+        return True
+    if len(queries) != 1:
+        return False
+    query = queries[0].lstrip()
+    return query.startswith(("query", "{")) and "mutation" not in query and "subscription" not in query
 
 
 def _save_intent(path, value):

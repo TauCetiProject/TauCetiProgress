@@ -247,3 +247,13 @@ tauceti-progress due --conf ./tauceti.toml
 The [manual setup](https://github.com/TauCetiProject/TauCetiTools/blob/main/docs/project-setup.md)
 documents credentials and generated workflow callers. An absent optional destination in a configured
 project stays disabled. Invocations without configuration retain the Tau Ceti defaults.
+
+The `gh` transport retries only recognized reads. API flags are consumed with
+their values before classifying a request: fields switch REST requests to POST,
+and a GraphQL document starting with `query` may also contain a selected mutation.
+Retryable GraphQL uses the literal `graphql` endpoint and one raw query field,
+with no mutation/subscription text, file-based query or extensions. Typed query
+fields (including file and repository-placeholder expansion) are not classified
+as retryable reads. This is a conservative retry guard, not a GraphQL parser. Unknown
+forms retain the existing publication journal and reconciliation path. Commands
+and payloads passed to native gh remain unchanged.
