@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 
 from tauceti_tools.forge import GITHUB, Forge, RepositoryRef
 
+_TRAILER_RE = re.compile(r"^(?P<token>[A-Za-z][A-Za-z0-9-]*):[ \t]+(?P<value>\S.*?)\s*$")
+
 
 class ProvenanceError(ValueError):
     """Commit attribution is ambiguous; no report cursor may advance."""
@@ -49,7 +51,7 @@ class PullSource:
             if repository.startswith(("github:", "forgejo:")):
                 kind, _, location = repository.partition(":")
                 parsed = urlsplit(location)
-                if parsed.query or parsed.fragment or parsed.path.count("/") != 2:
+                if "?" in location or "#" in location or parsed.path.count("/") != 2:
                     raise ValueError
                 forge = Forge(kind, parsed.scheme + "://" + parsed.netloc)
                 reference = RepositoryRef(forge, parsed.path.removeprefix("/"))
@@ -66,7 +68,7 @@ def subject_number(subject):
     return int(match.group(1)) if match else None
 
 
-def commit_source(message, *, legacy_repository=None):
+def commit_source(message, *, legacy_repository=None, subject=None):
     """One source citation, preserving repaired messages whose trailers precede notes.
 
     Queue messages retain their Source-PR line when repair notes are appended, so
@@ -74,14 +76,18 @@ def commit_source(message, *, legacy_repository=None):
     rather than falling back to the unqualified subject. Identical duplicates
     retain the queue chain reader's semantics.
     """
-    lines = [line for line in message.splitlines() if re.match(r"Source-PR\b", line, re.IGNORECASE)]
-    number = subject_number(message.splitlines()[0] if message.splitlines() else "")
-    if lines:
+    values = []
+    lines = message.splitlines()
+    for line in lines:
+        match = _TRAILER_RE.match(line)
+        if match and match["token"].lower() == "source-pr":
+            values.append(match["value"])
+    # Real history callers supply git's %s: it joins the entire first paragraph.
+    number = subject_number(subject if subject is not None else lines[0] if lines else "")
+    if values:
         citations = set()
-        for line in lines:
-            if (match := re.fullmatch(r"Source-PR:[ \t]*(\S+)[ \t]*", line, re.IGNORECASE)) is None:
-                raise ProvenanceError("ambiguous Source-PR citation")
-            citations.add(PullSource.parse(match.group(1)))
+        for value in values:
+            citations.add(PullSource.parse(value))
         if len(citations) != 1:
             raise ProvenanceError("ambiguous Source-PR citation")
         citation = citations.pop()
@@ -106,8 +112,12 @@ class MigrationMap:
                 raise ProvenanceError("migration entries must be qualified source citations")
             if before in self._mapping or after in targets:
                 raise ProvenanceError("migration map contains duplicate source or destination citations")
+            if before.repository.key == after.repository.key:
+                raise ProvenanceError("migration entries must cross repository namespaces")
             self._mapping[before] = after
             targets.add(after)
+        if set(self._mapping) & targets:
+            raise ProvenanceError("migration destinations must not be migration sources")
 
     @classmethod
     def parse(cls, row):

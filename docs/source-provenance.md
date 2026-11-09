@@ -13,8 +13,10 @@ Source-PR: forgejo:https://forge.example/team/Math#7
 ```
 
 The forge kind, origin and repository name remain part of the citation. PR 7 on
-GitHub and PR 7 on two Forgejo origins are three different objects. Malformed or
-conflicting citations, or disagreement with the subject number, abort the read.
+GitHub and PR 7 on two Forgejo origins are three different objects. Only complete
+trailers matching the queue's grammar count; prose and empty or lookalike fields
+are ignored. Malformed or conflicting recognized citations, or disagreement with
+the subject number, abort the read.
 Identical duplicate citations retain the queue chain reader's behavior.
 
 `window.first_parent_sources()` returns qualified citations without converting
@@ -40,8 +42,9 @@ they never become matching current PR numbers by coincidence.
 ```
 
 Supply mappings from trusted migration configuration, not PR prose. Duplicate
-sources or destinations are rejected. A map to another report repository cannot
-authorize attribution. These citations describe source history; they grant no
+sources or destinations, same-repository renumbering and mapping chains are
+rejected. Distinct citations cannot collapse onto one current number. A map to
+another report repository cannot authorize attribution. These citations describe source history; they grant no
 review, permission or merge authority.
 
 The existing GitHub planner, bootstrap checks and factual line attribution use

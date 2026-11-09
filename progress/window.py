@@ -128,32 +128,31 @@ def first_parent_sources(repo_dir, revision, *, legacy_repository=None):
     NUL framing preserves body lines; a repair may have appended notes after its
     provenance trailers. A qualified native citation never loses its origin.
     """
+    # Use the same revision contract with or without the round cache.
+    parts = revision.split("..")
+    if len(parts) not in (1, 2) or any(not part for part in parts):
+        raise GitError("history requires a commit or a two-commit range")
+    revision = "..".join(git(["rev-parse", "--verify", "--end-of-options", part + "^{commit}"], repo_dir).strip()
+                        for part in parts)
     cache = _HISTORY_ROUND.get()
     cache_key = None
     if cache is not None and git(["rev-parse", "--is-shallow-repository"], repo_dir).strip() == "false":
-        # Resolve mutable refs before memoizing; a ref move during a round must
-        # select new history. Shallow reads are not memoized across deepening.
-        parts = revision.split("..")
-        if len(parts) not in (1, 2) or any(not part for part in parts):
-            raise GitError("history requires a commit or a two-commit range")
-        revision = "..".join(git(["rev-parse", "--verify", "--end-of-options", part + "^{commit}"], repo_dir).strip()
-                            for part in parts)
         cache_key = (os.path.abspath(repo_dir), revision, legacy_repository)
         if cache_key in cache:
             saved = cache.pop(cache_key)
             cache[cache_key] = saved
             return list(saved)
-    log = git(["log", "--first-parent", "--format=%H%x00%B%x00", "--end-of-options", revision, "--"], repo_dir)
+    log = git(["log", "--first-parent", "--format=%H%x00%s%x00%B%x00", "--end-of-options", revision, "--"], repo_dir)
     parts = log.split("\0")
-    if len(parts) % 2 != 1 or parts[-1].strip():
+    if len(parts) % 3 != 1 or parts[-1].strip():
         raise GitError("unframed first-parent commit history")
     out = []
-    for index in range(0, len(parts) - 1, 2):
-        sha, message = parts[index].strip(), parts[index + 1]
+    for index in range(0, len(parts) - 1, 3):
+        sha, subject, message = parts[index].strip(), parts[index + 1], parts[index + 2]
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) is None:
             raise GitError("invalid first-parent commit identity")
         try:
-            citation = commit_source(message, legacy_repository=legacy_repository)
+            citation = commit_source(message, legacy_repository=legacy_repository, subject=subject)
         except ProvenanceError as error:
             raise GitError(f"commit {sha[:12]}: {error}") from None
         if citation is not None:
@@ -167,7 +166,12 @@ def first_parent_sources(repo_dir, revision, *, legacy_repository=None):
 
 def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=None, migration=None):
     """Current-source numbers only after origin checking or an explicit import map."""
-    repository = repository or RepositoryRef(GITHUB, os.environ.get("TAUCETI_REPO", "TauCetiProject/TauCeti"))
+    if repository is None:
+        from .gh import CODE_REPO
+        try:
+            repository = RepositoryRef(GITHUB, CODE_REPO)
+        except ValueError:
+            raise GitError("configured report repository is invalid") from None
     if not isinstance(repository, RepositoryRef):
         raise GitError("report repository must be qualified")
     if legacy_repository is None and repository.forge == GITHUB:
@@ -176,9 +180,14 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
     if not isinstance(migration, MigrationMap):
         raise GitError("report migration must be an explicit source map")
     out = []
+    seen = {}
     for sha, citation in first_parent_sources(repo_dir, revision, legacy_repository=legacy_repository):
         try:
-            out.append((sha, migration.number(citation, repository)))
+            number = migration.number(citation, repository)
+            if number in seen and seen[number] != citation:
+                raise ProvenanceError("distinct source citations map to the same report PR number")
+            seen[number] = citation
+            out.append((sha, number))
         except ProvenanceError as error:
             raise GitError(f"commit {sha[:12]}: {error}") from None
     return out

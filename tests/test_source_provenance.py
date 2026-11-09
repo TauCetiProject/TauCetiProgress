@@ -99,8 +99,6 @@ class SourceWindows(unittest.TestCase):
         messages = [
             f"landed (#7)\n\nSource-PR: {source}\nSource-PR: {PullSource(self.other, 7).key}",
             "landed (#7)\n\nSource-PR: invalid",
-            "landed (#7)\n\nSource-PR: ",
-            "landed (#7)\n\nSource-PR invalid",
             f"landed (#8)\n\nSource-PR: {source}",
         ]
         for message in messages:
@@ -109,6 +107,43 @@ class SourceWindows(unittest.TestCase):
         self.assertEqual(
             commit_source(f"landed (#7)\n\nSource-PR: {source}\nSource-PR: {source}"), PullSource(self.native, 7)
         )
+
+    def test_queue_trailer_lookalikes_are_prose_and_do_not_block_history(self):
+        for line in (
+            "Source-PR trailers now carry identity",
+            "Source-PR-Notes: x",
+            "Source-PR : x",
+            "Source-PR:",
+            "Source-PR: ",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    commit_source("landed (#7)\n\n" + line, legacy_repository=self.github), PullSource(self.github, 7)
+                )
+        tip = self.commit("landed (#7)\n\nSource-PR trailers now carry identity\nSource-PR-Notes: x")
+        self.assertEqual(window.window_prs(self.root, self.initial, tip), [7])
+
+    def test_git_multiline_subject_paragraph_retains_its_original_number(self):
+        tip = self.commit("A long title\ncontinued (#7)\n\nBody without trailers")
+        self.assertEqual(window.window_prs(self.root, self.initial, tip), [7])
+
+    def test_distinct_citations_cannot_collapse_onto_one_current_number(self):
+        old, new = PullSource(self.github, 7), PullSource(self.native, 103)
+        self.commit("old merge (#7)")
+        tip = self.commit(f"native merge (#103)\n\nSource-PR: {new.key}")
+        with self.assertRaisesRegex(window.GitError, "distinct source citations"):
+            window.window_prs(
+                self.root,
+                self.initial,
+                tip,
+                repository=self.native,
+                legacy_repository=self.github,
+                migration=MigrationMap([(old, new)]),
+            )
+        with self.assertRaises(ProvenanceError):
+            MigrationMap([(old, PullSource(self.github, 8))])
+        with self.assertRaises(ProvenanceError):
+            MigrationMap([(old, new), (new, PullSource(self.other, 9))])
 
     def test_migration_duplicate_sources_destinations_and_wrong_target_refuse(self):
         old = PullSource(self.github, 7)
