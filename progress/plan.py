@@ -183,6 +183,15 @@ def area_window(repo_dir, area_prs, from_sha, to_sha, **history):
     which PRs belong to the area. Order comes from git (newest first).
     """
     numbers = window.window_prs(repo_dir, from_sha, to_sha, **history)
+    # Native API merge SHAs must agree with the actual first-parent attribution
+    # in this window, including after an area has already acquired its cursor.
+    # Otherwise a later recognized PR could advance past an invisible merge.
+    if isinstance(area_prs, dict) and any(area_prs.values()):
+        rows = dict(window.first_parent_prs(repo_dir, f"{from_sha}..{to_sha}", include_uncited=True, **history))
+        unaccounted = _unaccounted_merges(area_prs, rows, migration=history.get("migration"))
+        if unaccounted:
+            raise window.GitError("native merge has no matching source provenance in this window: "
+                                  + ", ".join(f"#{n}" for n in unaccounted[:5]))
     wanted = set(area_prs)
     return [n for n in numbers if n in wanted]
 
@@ -205,17 +214,15 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF, **history):
     than guessing a cursor. Bors squash merges rely on bors's guaranteed numbered commit subjects;
     GitHub does not provide a trustworthy landed SHA for those closures.
     """
-    seen = {number for _sha, number in window.first_parent_prs(repo_dir, ref, **history)}
-    out = []
-    for number in sorted(set(area_prs) - seen):
-        raw = area_prs[number]
-        # `has_commit` first: a pull request that merged since the last fetch has a merge commit this
-        # checkout has never seen, and asking `merge-base` about it fails rather than answering "no" --
-        # which aborted the entire plan, for every area, over one freshly merged pull request. Absent
-        # from the checkout means absent from this history, which is the benign case documented above.
-        if raw and window.has_commit(repo_dir, raw) and window.is_ancestor(repo_dir, raw, ref):
-            out.append(number)
-    return out
+    rows = dict(window.first_parent_prs(repo_dir, ref, include_uncited=True, **history))
+    return _unaccounted_merges(area_prs, rows, migration=history.get("migration"))
+
+
+def _unaccounted_merges(area_prs, rows, *, migration=None):
+    migration = migration if migration is not None else window.current_migration()
+    return [number for number, sha in sorted(area_prs.items())
+            if sha in rows and rows[sha] != number
+            and not (sha in migration.commits and migration.commits[sha] is None)]
 
 
 def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF, **history):
@@ -291,6 +298,8 @@ def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None,
     operators publishing from their own forks may duplicate a window, which wastes a round; being
     unable to report at all is the worse failure.
     """
+    if owners is not None and owner_filter is not None:
+        raise ValueError("choose either owner names or a qualified owner filter")
     now = now or _utcnow()
     if owners is None and owner_filter is None:
         # Only non-empty logins. A pull request whose `headRepositoryOwner` is absent -- a deleted
@@ -410,7 +419,7 @@ def build_plan(
 
     # Only histories used below need reading. Current and malformed cursors
     # must not turn a neighbour's useful plan into an all-area history scan.
-    histories = (source.content.closed_histories(eligible) if source else gh.closed_prs_for_areas(eligible)) if eligible else {}
+    histories = (source.content.labelled_histories(eligible) if source else gh.closed_prs_for_areas(eligible)) if eligible else {}
     for area, (rel_dir, status_text, progress_text, from_sha) in eligible.items():
         area_prs = histories[area]
         if not area_prs:

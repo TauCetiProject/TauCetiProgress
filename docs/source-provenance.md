@@ -113,15 +113,32 @@ No persistent state store is added.
 `native_source.NativeRepository` binds each direct Forgejo API client to an
 explicit repository and snapshots its native repository ID. `NativeSource`
 provides content and roadmap bindings to `plan.build_plan(source=...)`. Its
-closed-history reader streams the complete native closed collection once for
-all relevant areas, including closed queue contributions and native merges.
+history reader resolves relevant label IDs and streams their union from all PR
+states, including closed queue contributions, native merges, and reopened work
+already present on main. Git decides which candidates actually landed. Repository/shared labels are resolved with complete pagination, including
+identically named labels with distinct IDs. When the shared catalog is hidden or
+forbidden, the reader uses the complete authorized repository history instead of
+assuming the roadmap has no labels. Large unions use bounded batches rather
+than repeating the full repository history for each roadmap.
 Missing merge metadata, labels, permissions or incomplete pages abort planning.
+Reading every state prevents close/reopen events from changing scan membership.
+Counted pagination refuses changing totals when other membership changes would
+shift pages. Forgejo 17's creation-order sort breaks timestamp ties by issue ID.
+These are bounded observations, not an atomic snapshot of concurrently edited
+labels. Every native merge SHA on the selected first-parent window must match
+its PR attribution even after an area has a cursor; an unrecognized merge needs
+an approved commit override before another report can advance past it.
 Native in-flight ownership uses authenticated user and repository IDs rather
-than display logins. Clients never select credentials or shared-service fallbacks.
+than display logins. It trusts the canonical roadmap repository or a fork owned
+by the authenticated user; another organization-owned repository is not inferred
+to be the canonical source. Clients never select credentials or shared-service fallbacks.
 
 Native plans retain the qualified content/roadmap identities and an explicit
 legacy-history namespace in `source` (`tauceti-progress.source/v1`). Facts restores
-that binding through `source_record`, including the source origin in its output.
+that binding through `source_record`, including the source origin in its output. This retained metadata identifies the
+namespace used for the calculation; it does not independently prove the origin
+of a caller-supplied checkout. Trusted callers remain responsible for fetching the
+configured repository and immutable source objects.
 Current numbers are still selected through qualified Git citations and the
 approved migration policy. Git blame follows the first-parent chain so lines
 introduced through a native merge are credited to the merge that landed on main,
@@ -130,7 +147,9 @@ recognizable source citation remains subject to the existing refusal/explicit
 commit-override rule.
 
 The command-line entry points still use the legacy bootstrap and reject native
-project configurations. Native publication/fork handling, trusted runtime binding, announcements and
+project configurations. Apply also refuses qualified saved plans before any
+legacy GitHub operation, including direct library calls or a lost `--conf`;
+prepared prose remains available for the qualified publisher. Native publication/fork handling, trusted runtime binding, announcements and
 workflow integration must be completed before enabling that bootstrap. Retained
 local and remote publication commits must be checked against the policy that
 produced them before a nonempty policy is enabled; a new PR body must not relabel

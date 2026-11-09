@@ -57,7 +57,7 @@ class NativeRepository:
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("commit prefix must be between 1 and 1000")
         rows = []
-        for page in self.api.pages(self.path + "/commits"):
+        for page in self.api.pages(self.path + "/commits?stat=false&verification=false&files=false"):
             for row in page:
                 try:
                     date = row["commit"]["committer"]["date"]
@@ -68,15 +68,48 @@ class NativeRepository:
                     raise Incomplete("Progress source commit metadata is unavailable") from None
                 rows.append((date, message.split("\n", 1)[0]))
                 if len(rows) == limit:
+                    self.revalidate()
                     return rows
+        self.revalidate()
         return rows
 
-    def closed_histories(self, areas):
-        """All closed candidates, including native merges, in one paginated scan.
+    def _area_label_ids(self, labels):
+        """Resolve repository/shared label names before asking for their union."""
+        catalog = self.api.collection(self.path + "/labels", counted=True)
+        wanted = set(labels)
+        by_id = {}
 
-        The gh-compatible API intentionally excludes merged PRs from `closed`.
-        This consumer needs the raw native closed collection and uses local Git
-        provenance, rather than closure or editable PR titles, as landing evidence.
+        def include(rows):
+            for row in rows:
+                if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                    raise Incomplete("Progress label catalog is unavailable")
+                name = row["name"].casefold()
+                native_id = _number(row.get("id"), "label ID")
+                if native_id in by_id and by_id[native_id] != name:
+                    raise Incomplete("Progress label catalog changed during pagination")
+                by_id[native_id] = name
+
+        include(catalog)
+        owner = quote(self.repository.name.split("/")[0], safe="")
+        try:
+            # Shared and repository labels can have the same name but distinct
+            # IDs. Both catalogs are needed even if every name has a local match.
+            include(self.api.collection("orgs/" + owner + "/labels", counted=True))
+        except ForgeError as error:
+            if error.status not in {403, 404}:
+                raise
+            # A hidden/inaccessible org catalog cannot prove a complete ID union.
+            # Read the complete authorized repository history instead; never
+            # turn this catalog failure into an empty roadmap history.
+            return None
+        return sorted(native_id for native_id, name in by_id.items() if name in wanted)
+
+    def labelled_histories(self, areas):
+        """Labelled candidates in every state; local Git decides which landed.
+
+        A landed queue PR may have been reopened. Reading all states also keeps
+        close/reopen events from shifting the membership of a paginated scan.
+        Labels narrow the read; closure and editable titles never prove landing.
         """
         histories = {area: {} for area in dict.fromkeys(areas)}
         if not histories:
@@ -84,32 +117,49 @@ class NativeRepository:
         labels = {("roadmap/" + area).casefold(): area for area in histories}
         if len(labels) != len(histories):
             raise ValueError("roadmap areas have ambiguous case-insensitive labels")
+        label_ids = self._area_label_ids(labels)
+        if label_ids == []:
+            self.revalidate()
+            return histories
         seen = {}
-        for page in self.api.pages(self.path + "/pulls?state=closed"):
+        for page in self._history_pages(label_ids):
             for row in page:
                 if not isinstance(row, dict):
-                    raise Incomplete("Progress closed history contains a non-object")
+                    raise Incomplete("Progress labelled history contains a non-object")
                 number = _number(row.get("number"), "PR number")
-                if row.get("state") != "closed" or type(row.get("merged")) is not bool:
-                    raise Incomplete("Progress closed history has an unavailable closure or merge state")
+                if row.get("state") not in {"open", "closed"} or type(row.get("merged")) is not bool:
+                    raise Incomplete("Progress labelled history has an unavailable closure or merge state")
                 if "labels" not in row:
-                    raise Incomplete("Progress closed history labels are unavailable")
+                    raise Incomplete("Progress labelled history labels are unavailable")
                 raw_labels = row["labels"]
                 if raw_labels is None:
                     raw_labels = []
                 if not isinstance(raw_labels, list) or any(
                     not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in raw_labels
                 ):
-                    raise Incomplete("Progress closed history labels are unavailable")
+                    raise Incomplete("Progress labelled history labels are unavailable")
                 sha = _sha(row.get("merge_commit_sha")) if row["merged"] else None
                 signature = (sha, frozenset(label["name"].casefold() for label in raw_labels))
                 if number in seen and seen[number] != signature:
-                    raise Incomplete("Progress closed history changed during pagination")
+                    raise Incomplete("Progress labelled history changed during pagination")
                 seen[number] = signature
                 for label in signature[1]:
                     if label in labels:
                         histories[labels[label]][number] = sha
+        self.revalidate()
         return histories
+
+    def _history_pages(self, label_ids):
+        # Forgejo 17's repeated label-ID filter is OR, which is exactly the
+        # requested union. Keep URLs bounded and split large unions, not one
+        # full repository history read per roadmap. Client-side grouping still
+        # checks the returned names and deduplicates PRs shared across batches.
+        if label_ids is None:
+            yield from self.api.pages(self.path + "/pulls?state=all", counted=True)
+            return
+        for offset in range(0, len(label_ids), 50):
+            query = urlencode([("state", "all"), *[("labels", str(n)) for n in label_ids[offset : offset + 50]]])
+            yield from self.api.pages(self.path + "/pulls?" + query, counted=True)
 
     def pr_details(self, numbers):
         self._check_binding()
@@ -135,6 +185,7 @@ class NativeRepository:
                     "repository": self.identity.record(),
                 }
             )
+        self.revalidate()
         return result
 
     def open_reports(self):
@@ -155,15 +206,19 @@ class NativeRepository:
                 ).record()
             )
             result.append(row)
+        self.revalidate()
         return result
 
     def report_owner_filter(self):
         self._check_binding()
         actor = SourceActor.from_native(self.repository.forge, self.api.current_user())
         actor_id = f"{actor.principal.forge.key}/users/{actor.principal.native_id}"
+        self.revalidate()
 
         def owns(row):
-            head = row.get("source_head_repository")
+            if "source_head_repository" not in row:
+                raise Incomplete("Progress open report lacks a qualified head repository")
+            head = row["source_head_repository"]
             if head is None:
                 return False
             identity = RepositoryIdentity.parse(head)
@@ -181,9 +236,13 @@ class NativeRepository:
             raise ValueError("source file path must stay inside the repository")
         if not isinstance(ref, str) or not ref or any(c in ref for c in "\0\r\n"):
             raise ValueError("source file ref is invalid")
+        commit = self.api.request("GET", self.path + "/commits/" + quote(ref, safe=""))
+        if not isinstance(commit, dict):
+            raise Incomplete("Progress cursor ref is unavailable")
+        revision = _sha(commit.get("sha"))
         try:
             row = self.api.request(
-                "GET", self.path + "/contents/" + quote(path, safe="/") + "?" + urlencode({"ref": ref})
+                "GET", self.path + "/contents/" + quote(path, safe="/") + "?" + urlencode({"ref": revision})
             )
         except ForgeError as error:
             if error.status == 404:
@@ -194,9 +253,11 @@ class NativeRepository:
         if not isinstance(row, dict) or row.get("type") != "file" or row.get("encoding") != "base64":
             raise Incomplete("Progress source file content is unavailable")
         try:
-            return base64.b64decode("".join(row["content"].split()), validate=True).decode("utf-8")
+            text = base64.b64decode("".join(row["content"].split()), validate=True).decode("utf-8")
         except (KeyError, ValueError, UnicodeError, AttributeError):
             raise Incomplete("Progress source file encoding is invalid") from None
+        self.revalidate()
+        return text
 
 
 @dataclass(frozen=True)
@@ -243,6 +304,8 @@ def history_options_from_record(value):
         if not isinstance(legacy, dict) or set(legacy) != {"forge", "name"}:
             raise ValueError("invalid saved legacy source namespace")
         if not isinstance(legacy["forge"], dict) or set(legacy["forge"]) != {"kind", "url"}:
+            raise ValueError("invalid saved legacy source origin")
+        if not all(isinstance(value, str) for value in legacy["forge"].values()):
             raise ValueError("invalid saved legacy source origin")
         legacy = RepositoryRef(Forge(**legacy["forge"]), legacy["name"])
     return {"repository": content.repository, "legacy_repository": legacy}

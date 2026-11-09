@@ -1,7 +1,9 @@
 """Direct native planning and factual attribution; no gh or shared-state fallback."""
 
 import base64
+import contextlib
 import gzip
+import io
 import json
 import os
 import pathlib
@@ -18,9 +20,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from tauceti_tools.forge import GITHUB, Forge, ForgeError, Forgejo, Incomplete, RepositoryRef  # noqa: E402
 
-from progress import facts, gh, plan, window  # noqa: E402
+from progress import apply, cli, facts, files, gh, plan, window  # noqa: E402
 from progress.docs import Docs, ReplanRequired  # noqa: E402
 from progress.native_source import NativeRepository, NativeSource, history_options_from_record  # noqa: E402
+from progress.provenance import MigrationMap, PullSource  # noqa: E402
 
 
 class NativePlanning(unittest.TestCase):
@@ -30,6 +33,10 @@ class NativePlanning(unittest.TestCase):
         self.root = pathlib.Path(temporary.name)
         self.requests, self.failures = [], {}
         self.closed, self.open = [], []
+        self.label_ids = {"roadmap/Area": 1, "roadmap/Other": 2}
+        self.org_labels = []
+        self.pull_counts = {}
+        self.omit_pull_count = False
         self.repository_ids = {"team/Code": 11, "team/Roadmap": 12}
         outer = self
 
@@ -42,9 +49,18 @@ class NativePlanning(unittest.TestCase):
                 path = urlsplit(self.path)
                 name = path.path.removeprefix("/api/v1/")
                 query = parse_qs(path.query)
-                status, body = 200, None
+                status, body, total = 200, None, None
                 if name in outer.failures:
                     status, body = outer.failures[name], {"message": "fixture refusal"}
+                elif name == "settings/api":
+                    body = {"max_response_items": 2}
+                elif name == "orgs/team/labels":
+                    if outer.org_labels is None:
+                        status, body = 404, {"message": "unknown organization"}
+                    else:
+                        page = int(query.get("page", ["1"])[0])
+                        body = outer.org_labels[(page - 1) * 2 : page * 2]
+                        total = len(outer.org_labels)
                 elif name == "user":
                     body = {"id": 21, "login": "operator"}
                 elif name.startswith("repos/"):
@@ -54,13 +70,32 @@ class NativePlanning(unittest.TestCase):
                     endpoint = "/".join(tail)
                     if not endpoint:
                         body = {"full_name": repository, "id": outer.repository_ids[repository]}
-                    elif endpoint == "pulls":
-                        rows = outer.closed if query.get("state") == ["closed"] else outer.open
+                    elif endpoint == "labels":
+                        total = len(outer.label_ids)
+                        catalog = [{"name": name, "id": native_id} for name, native_id in outer.label_ids.items()]
                         page = int(query.get("page", ["1"])[0])
+                        body = catalog[(page - 1) * 2 : page * 2]
+                    elif endpoint == "pulls":
+                        rows = outer.open if query.get("state") == ["open"] else outer.closed + outer.open
+                        if query.get("labels"):
+                            requested = set(map(int, query["labels"]))
+                            rows = [
+                                row
+                                for row in rows
+                                if "labels" not in row
+                                or any(
+                                    label.get("id", outer.label_ids.get(label["name"])) in requested
+                                    for label in row.get("labels") or []
+                                )
+                            ]
+                        page = int(query.get("page", ["1"])[0])
+                        total = None if outer.omit_pull_count else outer.pull_counts.get(page, len(rows))
                         body = rows[(page - 1) * 2 : page * 2]  # server cap below requested limit
                     elif endpoint.startswith("pulls/"):
                         number = int(endpoint.split("/")[1])
                         body = next((row for row in outer.closed + outer.open if row["number"] == number), None)
+                    elif endpoint.startswith("commits/"):
+                        body = {"sha": "a" * 40}
                     elif endpoint == "commits":
                         body = (
                             [{"commit": {"committer": {"date": "2020-01-01T00:00:00Z"}, "message": "initial"}}]
@@ -79,6 +114,8 @@ class NativePlanning(unittest.TestCase):
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
+                if total is not None:
+                    self.send_header("X-Total-Count", str(total))
                 self.end_headers()
                 self.wfile.write(data)
 
@@ -152,13 +189,60 @@ class NativePlanning(unittest.TestCase):
     def test_one_complete_scan_combines_closed_unmerged_and_native_merges_for_all_areas(self):
         self.closed = [self.row(5, "Other"), self.row(4, merged=True, sha="a" * 40), self.row(3), self.row(2, "Other")]
         self.assertEqual(
-            self.content.closed_histories(["Area", "Other"]),
+            self.content.labelled_histories(["Area", "Other"]),
             {"Area": {4: "a" * 40, 3: None}, "Other": {5: None, 2: None}},
         )
-        paths = [path for path, _ in self.requests]
-        self.assertEqual(len(paths), 3)  # two data pages and the empty page, independent of area count
-        self.assertTrue(all("state=closed" in path for path in paths))
+        paths = [path for path, _ in self.requests if "/pulls?" in path]
+        self.assertEqual(len(paths), 2)  # both counted data pages, independent of area count
+        self.assertTrue(all("state=all" in path for path in paths))
         self.assertTrue(all(token == "token fixture-native-token" for _, token in self.requests))
+
+    def test_targeted_history_does_not_fetch_unrelated_closed_prs(self):
+        self.closed = [self.row(99, "Other"), self.row(7), self.row(98, "Other")]
+        self.assertEqual(self.content.labelled_histories(["Area"]), {"Area": {7: None}})
+        requests = [path for path, _ in self.requests if "/pulls?" in path]
+        self.assertEqual(len(requests), 1)
+        self.assertTrue(all(parse_qs(urlsplit(path).query)["labels"] == ["1"] for path in requests))
+
+    def test_large_label_union_is_batched_and_shared_pr_is_deduplicated(self):
+        areas = [f"Area{n}" for n in range(52)]
+        self.label_ids = {"roadmap/" + area: n + 1 for n, area in enumerate(areas)}
+        row = self.row(7, "Area0")
+        row["labels"].append({"name": "roadmap/Area51"})
+        self.closed = [row]
+        histories = self.content.labelled_histories(areas)
+        self.assertEqual(histories["Area0"], {7: None})
+        self.assertEqual(histories["Area51"], {7: None})
+        self.assertEqual(sum(bool(value) for value in histories.values()), 2)
+        requests = [path for path, _ in self.requests if "/pulls?" in path]
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(len(parse_qs(urlsplit(path).query)["labels"]) <= 50 for path in requests))
+
+    def test_shared_and_repository_labels_with_same_name_are_both_included(self):
+        self.org_labels = [{"id": 3, "name": "ROADMAP/AREA"}]
+        shared = self.row(7)
+        shared["labels"] = [{"id": 3, "name": "ROADMAP/AREA"}]
+        self.closed = [shared, self.row(6)]
+        self.assertEqual(self.content.labelled_histories(["Area"]), {"Area": {7: None, 6: None}})
+        requests = [path for path, _ in self.requests if "/pulls?" in path]
+        self.assertTrue(all(parse_qs(urlsplit(path).query)["labels"] == ["1", "3"] for path in requests))
+
+    def test_unknown_shared_catalog_uses_complete_authorized_history_not_empty(self):
+        self.closed = [self.row(7)]
+        for status in (403, 404):
+            self.requests.clear()
+            self.failures["orgs/team/labels"] = status
+            self.assertEqual(self.content.labelled_histories(["Area"]), {"Area": {7: None}})
+            requests = [path for path, _ in self.requests if "/pulls?" in path]
+            self.assertTrue(requests)
+            self.assertTrue(all("labels" not in parse_qs(urlsplit(path).query) for path in requests))
+
+    def test_missing_label_catalog_has_no_pr_scan_but_forbidden_catalog_refuses(self):
+        self.assertEqual(self.content.labelled_histories(["Unlabelled"]), {"Unlabelled": {}})
+        self.assertFalse(any("/pulls?" in path for path, _ in self.requests))
+        self.failures["repos/team/Code/labels"] = 403
+        with self.assertRaises(ForgeError):
+            self.content.labelled_histories(["Area"])
 
     def test_real_git_plan_and_facts_keep_native_identity_when_github_has_same_number(self):
         sha = self.commit("Queue accepted\n\nSource-PR: " + self.content.repository.key + "#7", "TauCeti/A.lean")
@@ -258,21 +342,109 @@ class NativePlanning(unittest.TestCase):
     def test_unavailable_or_partial_history_never_becomes_empty(self):
         self.failures["repos/team/Code/pulls"] = 403
         with self.assertRaises(ForgeError):
-            self.content.closed_histories(["Area"])
+            self.content.labelled_histories(["Area"])
         self.failures.clear()
         self.closed = [self.row(7, merged=True)]
         with self.assertRaises(Incomplete):
-            self.content.closed_histories(["Area"])
+            self.content.labelled_histories(["Area"])
         self.closed = [{"number": 7, "state": "closed", "merged": False}]
         with self.assertRaises(Incomplete):
-            self.content.closed_histories(["Area"])
+            self.content.labelled_histories(["Area"])
 
     def test_duplicate_changed_pages_and_ambiguous_area_labels_refuse(self):
         self.closed = [self.row(7), self.row(6), self.row(7, merged=True, sha="a" * 40)]
         with self.assertRaisesRegex(Incomplete, "changed during pagination"):
-            self.content.closed_histories(["Area"])
+            self.content.labelled_histories(["Area"])
         with self.assertRaisesRegex(ValueError, "ambiguous"):
-            self.content.closed_histories(["Area", "area"])
+            self.content.labelled_histories(["Area", "area"])
+
+    def test_changed_membership_at_page_boundary_refuses_instead_of_skipping_work(self):
+        self.closed = [self.row(9), self.row(8), self.row(7)]
+        self.pull_counts = {1: 3, 2: 2}
+        with self.assertRaisesRegex(Incomplete, "count changed"):
+            self.content.labelled_histories(["Area"])
+        self.pull_counts.clear()
+        self.omit_pull_count = True
+        with self.assertRaisesRegex(Incomplete, "count is unavailable"):
+            self.content.labelled_histories(["Area"])
+
+    def test_reopened_landed_queue_pr_remains_in_the_native_history(self):
+        self.closed = [self.row(9), self.row(8)]
+        reopened = {**self.row(7), "state": "open"}
+        self.open = [reopened]
+        histories = self.content.labelled_histories(["Area"])
+        self.assertEqual(histories, {"Area": {9: None, 8: None, 7: None}})
+        self.assertTrue(all("state=all" in path for path, _ in self.requests if "/pulls?" in path))
+
+    def test_steady_state_cursor_cannot_advance_past_unrecognized_native_merge(self):
+        before = self.commit("First accepted\n\nSource-PR: " + self.content.repository.key + "#7")
+        missing = self.commit("Merge pull request 'Missing proof' (#8) from member:proof into main")
+        tip = self.commit("Queue accepted\n\nSource-PR: " + self.content.repository.key + "#9", "TauCeti/A.lean")
+        self.closed = [self.row(9), self.row(8, merged=True, sha=missing), self.row(7)]
+        roadmap = self.root / "roadmap"
+        area = roadmap / "TauCetiRoadmap/Area"
+        area.mkdir(parents=True)
+        (area / "README.md").write_text("# Area\n")
+        (area / "PROGRESS.md").write_text(
+            files.new_progress_file("Area")
+            + files.render_section("Area", self.initial, before, [7], "earlier", "Earlier report.")
+        )
+        docs = self.docs(tip)
+        with self.assertRaisesRegex(window.GitError, "no matching source provenance"):
+            plan.build_plan(roadmap, self.code, source=self.source, ref="main", min_prs=1, docs=docs)
+        repaired = MigrationMap(commits={missing: PullSource(self.content.repository, 8)})
+        with window.using_migration(repaired):
+            result = plan.build_plan(roadmap, self.code, source=self.source, ref="main", min_prs=1, docs=docs)
+        self.assertEqual(result["prs"], [9, 8])
+        with window.using_migration(MigrationMap(commits={missing: None})):
+            result = plan.build_plan(roadmap, self.code, source=self.source, ref="main", min_prs=1, docs=docs)
+        self.assertEqual(result["prs"], [9])  # explicit operator exclusion is respected
+
+    def test_native_injected_legacy_open_rows_refuse_before_plan_selection(self):
+        row = {"headRefName": "progress/aaaaaaa-bbbbbbb/Area", "headRepositoryOwner": {"login": "operator"}}
+        with self.assertRaisesRegex(Incomplete, "qualified head"):
+            plan.build_plan(self.root, self.code, source=self.source, commits=[], open_prs=[row])
+        with self.assertRaisesRegex(ValueError, "either"):
+            plan.in_flight_areas([], owners=set(), owner_filter=lambda _: True)
+
+    def test_github_native_merge_also_credits_the_mainline_landing(self):
+        subprocess.run(["git", "-C", str(self.code), "checkout", "-qb", "proof"], check=True, capture_output=True)
+        self.commit("Feature commit", "TauCeti/A.lean")
+        subprocess.run(["git", "-C", str(self.code), "checkout", "-q", "main"], check=True, capture_output=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.code),
+                "merge",
+                "--no-ff",
+                "-qm",
+                "Merge pull request #7 from member/proof",
+                "proof",
+            ],
+            env=self.git_env,
+            check=True,
+            capture_output=True,
+        )
+        sha = window.git(["rev-parse", "HEAD"], self.code).strip()
+        collected = facts.collect(self.code, self.initial, sha, pr_numbers=[7], docs=self.docs(sha))
+        self.assertEqual([(d["name"], d["pr"]) for d in collected["declarations"]], [("alpha", 7)])
+
+    def test_imported_github_history_needs_explicit_namespace_and_number_mapping(self):
+        sha = self.commit("Imported proof (#7)", "TauCeti/A.lean")
+        self.closed = [self.row(103)]
+        old = RepositoryRef(GITHUB, "old/Math")
+        source = NativeSource(self.content, self.roadmap, legacy_content=old)
+        mapping = MigrationMap([(PullSource(old, 7), PullSource(self.content.repository, 103))])
+        with window.using_migration(mapping):
+            collected = facts.collect(
+                self.code, self.initial, sha, pr_numbers=[103], docs=self.docs(sha), source_record=source.record()
+            )
+        self.assertEqual([(d["name"], d["pr"]) for d in collected["declarations"]], [("alpha", 103)])
+        bad = source.record()
+        bad["legacy_content"]["forge"]["url"] = 123
+        with self.assertRaises(ReplanRequired):
+            facts.collect(self.code, self.initial, sha, docs=self.docs(sha), source_record=bad)
 
     def test_repository_replacement_and_client_origin_change_refuse(self):
         self.repository_ids["team/Code"] = 99
@@ -281,16 +453,49 @@ class NativePlanning(unittest.TestCase):
         before = len(self.requests)
         self.api.forge = Forge("forgejo", "https://other.example")
         with self.assertRaisesRegex(Incomplete, "origin changed"):
-            self.content.closed_histories(["Area"])
+            self.content.labelled_histories(["Area"])
         self.assertEqual(len(self.requests), before)
 
     def test_empty_content_and_missing_repository_are_distinct(self):
         self.assertEqual(self.content.file_at("Area/PROGRESS.md"), "saved cursor")
+        content_requests = [url for url, _ in self.requests if "/contents/" in url]
+        self.assertEqual(parse_qs(urlsplit(content_requests[-1]).query)["ref"], ["a" * 40])
+        self.failures["repos/team/Code/commits/gone"] = 404
+        with self.assertRaises(ForgeError):
+            self.content.file_at("Area/PROGRESS.md", ref="gone")
         self.failures["repos/team/Code/contents/Area/PROGRESS.md"] = 404
         self.assertIsNone(self.content.file_at("Area/PROGRESS.md"))
         self.failures["repos/team/Code"] = 403
         with self.assertRaises(ForgeError):
             self.content.file_at("Area/PROGRESS.md")
+
+    def test_qualified_saved_plan_never_routes_to_legacy_github_publication(self):
+        saved = self.root / "native-plan.json"
+        native_plan = {"source": self.source.record()}
+        saved.write_text(json.dumps(native_plan))
+        with (
+            patch.object(gh, "gh", side_effect=AssertionError("qualified publication reached legacy gh")),
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            with self.assertRaisesRegex(apply.ApplyError, "qualified source publisher"):
+                apply.run(native_plan, "paid-status", "paid-section", self.root)
+            self.assertEqual(
+                cli.main(
+                    [
+                        "apply",
+                        "--plan",
+                        str(saved),
+                        "--status-body",
+                        "paid-status",
+                        "--section-body",
+                        "paid-section",
+                        "--roadmap-dir",
+                        str(self.root),
+                    ]
+                ),
+                78,
+            )
+        self.assertIn("preserve the prepared report", errors.getvalue())
 
     def test_saved_source_schema_and_legacy_namespace_are_explicit(self):
         record = self.source.record()

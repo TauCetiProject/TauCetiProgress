@@ -145,7 +145,7 @@ def has_commit(repo_dir, sha):
     ).returncode == 0
 
 
-def first_parent_sources(repo_dir, revision, *, legacy_repository=None, migration=None):
+def first_parent_sources(repo_dir, revision, *, legacy_repository=None, migration=None, include_uncited=False):
     """Qualified citations from complete commit messages, newest first.
 
     NUL framing preserves body lines; a repair may have appended notes after its
@@ -164,7 +164,7 @@ def first_parent_sources(repo_dir, revision, *, legacy_repository=None, migratio
         if cache_key in cache:
             saved = cache.pop(cache_key)
             cache[cache_key] = saved
-            return _sources(saved, legacy_repository, migration)
+            return _sources(saved, legacy_repository, migration, include_uncited=include_uncited)
     try:
         rows = git_history.read(repo_dir, revision)
     except (git_history.HistoryReadError, OSError) as error:
@@ -173,10 +173,10 @@ def first_parent_sources(repo_dir, revision, *, legacy_repository=None, migratio
         while cache and (len(cache) >= MAX_HISTORY_ENTRIES or sum(map(len, cache.values())) + len(rows) > MAX_HISTORY_ROWS):
             del cache[next(iter(cache))]
         cache[cache_key] = tuple(rows)
-    return _sources(rows, legacy_repository, migration)
+    return _sources(rows, legacy_repository, migration, include_uncited=include_uncited)
 
 
-def _sources(rows, legacy_repository, migration=None):
+def _sources(rows, legacy_repository, migration=None, *, include_uncited=False):
     out = []
     migration = migration if migration is not None else current_migration()
     for row in rows:
@@ -189,12 +189,12 @@ def _sources(rows, legacy_repository, migration=None):
                 citation = resolve_source(row.citation, row.number, legacy_repository)
         except ProvenanceError as error:
             raise GitError(f"commit {row.sha[:12]}: {error}") from None
-        if citation is not None:
+        if citation is not None or include_uncited:
             out.append((row.sha, citation))
     return out
 
 
-def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=None, migration=None):
+def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=None, migration=None, include_uncited=False):
     """Current-source numbers only after origin checking or an explicit import map."""
     if repository is None:
         from .gh import CODE_REPO
@@ -211,7 +211,11 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
         raise GitError("report migration must be an explicit source map")
     out = []
     seen = {}
-    for sha, citation in first_parent_sources(repo_dir, revision, legacy_repository=legacy_repository, migration=migration):
+    for sha, citation in first_parent_sources(repo_dir, revision, legacy_repository=legacy_repository,
+                                               migration=migration, include_uncited=include_uncited):
+        if citation is None:
+            out.append((sha, None))
+            continue
         try:
             number = migration.number(citation, repository)
             if number in seen and seen[number] != citation:
