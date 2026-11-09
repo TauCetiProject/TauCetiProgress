@@ -96,11 +96,7 @@ def pr_commits(repo_dir, from_sha, to_sha, numbers):
     """The first-parent merge commits attributed to a selected set of PRs."""
     wanted = set(numbers)
     result = {}
-    log = window.git(["log", "--first-parent", "--format=%H%x09%s", f"{from_sha}..{to_sha}"],
-                     repo_dir)
-    for line in log.splitlines():
-        sha, _, subject = line.partition("\t")
-        number = window.pr_number_of_subject(subject.strip())
+    for sha, number in window.first_parent_prs(repo_dir, f"{from_sha}..{to_sha}"):
         if number is not None and number in wanted:
             result[sha.strip()] = number
     return result

@@ -205,9 +205,7 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
     than guessing a cursor. Bors squash merges rely on bors's guaranteed numbered commit subjects;
     GitHub does not provide a trustworthy landed SHA for those closures.
     """
-    log = window.git(["log", "--first-parent", "--format=%s", ref], repo_dir)
-    seen = {window.pr_number_of_subject(s) for s in log.splitlines()}
-    seen.discard(None)
+    seen = {number for _sha, number in window.first_parent_prs(repo_dir, ref)}
     out = []
     for number in sorted(set(area_prs) - seen):
         raw = area_prs[number]
@@ -328,6 +326,7 @@ def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None)
     return blocked, stale
 
 
+@window.history_round
 def build_plan(
     roadmap_dir,
     code_dir,
