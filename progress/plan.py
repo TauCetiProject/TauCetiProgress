@@ -176,18 +176,18 @@ def roadmap_commits(roadmap_dir, ref):
     return [tuple(line.split("\t", 1)) for line in rows.splitlines() if "\t" in line]
 
 
-def area_window(repo_dir, area_prs, from_sha, to_sha):
+def area_window(repo_dir, area_prs, from_sha, to_sha, **history):
     """PR numbers in `(from_sha, to_sha]` that belong to an area, newest first.
 
     Attribution is an intersection: git says which PRs are in the range, one label query says
     which PRs belong to the area. Order comes from git (newest first).
     """
-    numbers = window.window_prs(repo_dir, from_sha, to_sha)
+    numbers = window.window_prs(repo_dir, from_sha, to_sha, **history)
     wanted = set(area_prs)
     return [n for n in numbers if n in wanted]
 
 
-def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
+def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF, **history):
     """Labelled pull requests that are in `ref`'s history but were not recognised in it.
 
     `earliest_merged` finds pull requests by matching their number in commit subjects, so one whose
@@ -205,7 +205,7 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
     than guessing a cursor. Bors squash merges rely on bors's guaranteed numbered commit subjects;
     GitHub does not provide a trustworthy landed SHA for those closures.
     """
-    seen = {number for _sha, number in window.first_parent_prs(repo_dir, ref)}
+    seen = {number for _sha, number in window.first_parent_prs(repo_dir, ref, **history)}
     out = []
     for number in sorted(set(area_prs) - seen):
         raw = area_prs[number]
@@ -218,7 +218,7 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
     return out
 
 
-def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
+def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF, **history):
     """A `from_sha` for an unreported area, or None if no labelled merge is in `ref` yet.
 
     The window is half-open, so the cursor must be the *parent* of the area's earliest labelled
@@ -238,14 +238,14 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF):
     # shape when this was written.
     # Refuse rather than guess if any labelled pull request is in this history but was not recognised
     # in it: the cursor would then be computed from a later merge and skip it, permanently.
-    unaccounted = unaccounted_prs(repo_dir, area_prs, ref=ref)
+    unaccounted = unaccounted_prs(repo_dir, area_prs, ref=ref, **history)
     if unaccounted:
         raise window.GitError(
             f"{area} has labelled pull requests in {ref} whose merge commits carry no pull request "
             f"number ({', '.join(f'#{n}' for n in unaccounted[:5])}); the start of its history "
             f"cannot be determined from commit subjects"
         )
-    found = window.earliest_merged(repo_dir, numbers, ref=ref)
+    found = window.earliest_merged(repo_dir, numbers, ref=ref, **history)
     if found is None:
         # GitHub's label query follows merges before docgen necessarily reaches them. In a complete
         # checkout, unaccounted_prs already ruled out an unrecognised merge in this history. Defer
@@ -267,7 +267,7 @@ def _pr_owner(pr):
     return ((pr.get("headRepositoryOwner") or {}).get("login") or "")
 
 
-def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None):
+def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None, owner_filter=None):
     """`({area: pr}, [stale_note])` from the open progress pull requests.
 
     The branch is `progress/<from7>-<to7>/<Area>`, so the area is the last segment.
@@ -292,12 +292,12 @@ def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None)
     unable to report at all is the worse failure.
     """
     now = now or _utcnow()
-    if owners is None:
+    if owners is None and owner_filter is None:
         # Only non-empty logins. A pull request whose `headRepositoryOwner` is absent -- a deleted
         # fork, say -- reads as `""`, so putting `""` in the trusted set (which is what an
         # unreadable `/user` would do) would let exactly those block an area.
         owners = {gh.ROADMAP_REPO.split("/")[0]} | {x for x in (_own_login(),) if x}
-    else:
+    elif owners is not None:
         owners = {x for x in owners if x}
     blocked, stale = {}, []
     for pr in open_prs:
@@ -305,7 +305,7 @@ def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None)
         if len(parts) < 3:
             continue
         area_name = parts[-1]
-        if _pr_owner(pr) not in owners:
+        if not (owner_filter(pr) if owner_filter is not None else _pr_owner(pr) in owners):
             # Not ours and not the organisation's: it may well be a genuine report from another
             # contributor, and it can merge, but it does not get to stop us writing one.
             continue
@@ -340,20 +340,28 @@ def build_plan(
     only_area=None,
     docs=None,
     roadmap_ref=None,
+    source=None,
 ):
     """The whole decision. Returns a plan dict, or raises NotDue.
 
     `commits` and `open_prs` may be supplied by the caller (the worker already holds them, and the
     tests inject fixtures); otherwise they are fetched.
     """
+    if source is not None:
+        from .native_source import NativeSource
+        if not isinstance(source, NativeSource):
+            raise ValueError("planning source must be explicitly bound")
+    history = source.history_options if source else {}
     now = now or _utcnow()
     if commits is None:
         commits = (roadmap_commits(roadmap_dir, roadmap_ref) if roadmap_ref is not None
-                   else gh.recent_roadmap_commits())
+                   else source.roadmap.recent_commits() if source else gh.recent_roadmap_commits())
     cadence_reason = check_cadence(commits, idle_hours=idle_hours, now=now)
 
-    open_prs = gh.open_progress_prs() if open_prs is None else open_prs
-    blocked, stale = in_flight_areas(open_prs, now=now, stale_hours=stale_hours)
+    if open_prs is None:
+        open_prs = source.roadmap.open_reports() if source else gh.open_progress_prs()
+    blocked, stale = in_flight_areas(open_prs, now=now, stale_hours=stale_hours,
+                                   owner_filter=source.roadmap.report_owner_filter() if source else None)
 
     areas = discover_areas(roadmap_dir)
     if only_area:
@@ -402,7 +410,7 @@ def build_plan(
 
     # Only histories used below need reading. Current and malformed cursors
     # must not turn a neighbour's useful plan into an all-area history scan.
-    histories = gh.closed_prs_for_areas(eligible) if eligible else {}
+    histories = (source.content.closed_histories(eligible) if source else gh.closed_prs_for_areas(eligible)) if eligible else {}
     for area, (rel_dir, status_text, progress_text, from_sha) in eligible.items():
         area_prs = histories[area]
         if not area_prs:
@@ -411,7 +419,7 @@ def build_plan(
 
         bootstrapped = False
         if from_sha is None:
-            from_sha = bootstrap_from_sha(code_dir, area, area_prs, ref=ref)
+            from_sha = bootstrap_from_sha(code_dir, area, area_prs, ref=ref, **history)
             bootstrapped = True
             if from_sha is None:
                 skipped.append(f"{area}: no labelled merges in {ref} yet; waiting for documentation")
@@ -460,7 +468,7 @@ def build_plan(
         # The failure it guarded against is a PR appearing in two reports after someone changed its
         # label. That is cosmetic. Silently unreportable history is not, so the trade goes the other
         # way.
-        fresh = area_window(code_dir, area_prs, from_sha, to_sha)
+        fresh = area_window(code_dir, area_prs, from_sha, to_sha, **history)
         if not fresh:
             skipped.append(f"{area}: nothing new since {from_sha[:7]}")
             continue
@@ -495,9 +503,13 @@ def build_plan(
 
     from .facts import required_modules
 
-    docs.require_coverage(required_modules(code_dir, best["from_sha"], to_sha, best["prs"]))
+    docs.require_coverage(required_modules(code_dir, best["from_sha"], to_sha, best["prs"], **history))
 
+    if source:
+        source.content.revalidate()
+        source.roadmap.revalidate()
     return {
+        **({"source": source.record()} if source else {}),
         "documentation": docs.pin(),
         "history_migration_sha256": window.current_migration().digest,
         "roadmap": best["area"],

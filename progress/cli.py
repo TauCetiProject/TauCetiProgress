@@ -138,7 +138,8 @@ def cmd_facts(args):
         migration = saved_migration(p, args.plan)
         with window.using_migration(migration):
             result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"],
-                                   documentation=pin, bundle_path=bundle_path)
+                                   documentation=pin, bundle_path=bundle_path,
+                                   **({"source_record": p["source"]} if "source" in p else {}))
     except DocsGenerationChanged as exc:
         return _generation_changed("facts", exc)
     except facts.FactsError as exc:

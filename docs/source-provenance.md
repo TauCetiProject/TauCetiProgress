@@ -87,8 +87,9 @@ use an empty policy and need no extra checkout. This supports large migration
 tables without putting their JSON into a process environment variable.
 
 Coordinate the worker and merge-workflow policy pins before using a nonempty
-map. Worker saved-plan and parked-work identities must include the policy
-digest before its Progress pin is upgraded for that use. Existing paid outputs
+map. Worker active preparation and writer-input identities include the policy
+digest. A parked window stays blocked across policy changes to avoid paying for
+it again; this does not reuse its facts under the new policy. Existing paid outputs
 must not be reinterpreted under another map. After coordinating policy pins,
 close and mechanically replan reports still in flight under the previous digest;
 otherwise the gate refuses them until normal stale-report recovery runs. Preserve
@@ -109,8 +110,30 @@ characters; separator whitespace is discarded. Invalid encoding names the
 affected commit. Local replacement refs and grafts do not alter attribution.
 No persistent state store is added.
 
+`native_source.NativeRepository` binds each direct Forgejo API client to an
+explicit repository and snapshots its native repository ID. `NativeSource`
+provides content and roadmap bindings to `plan.build_plan(source=...)`. Its
+closed-history reader streams the complete native closed collection once for
+all relevant areas, including closed queue contributions and native merges.
+Missing merge metadata, labels, permissions or incomplete pages abort planning.
+Native in-flight ownership uses authenticated user and repository IDs rather
+than display logins. Clients never select credentials or shared-service fallbacks.
+
+Native plans retain the qualified content/roadmap identities and an explicit
+legacy-history namespace in `source` (`tauceti-progress.source/v1`). Facts restores
+that binding through `source_record`, including the source origin in its output.
+Current numbers are still selected through qualified Git citations and the
+approved migration policy. Git blame follows the first-parent chain so lines
+introduced through a native merge are credited to the merge that landed on main,
+rather than to an unlabelled feature-branch commit. A native merge with no
+recognizable source citation remains subject to the existing refusal/explicit
+commit-override rule.
+
 The command-line entry points still use the legacy bootstrap and reject native
-project configurations. Native API history collection, qualified repository metadata in plans/facts,
-publication/fork handling, announcements and workflow integration must be ported
-before enabling that bootstrap. The explicit reader interfaces prepare that
+project configurations. Native publication/fork handling, trusted runtime binding, announcements and
+workflow integration must be completed before enabling that bootstrap. Retained
+local and remote publication commits must be checked against the policy that
+produced them before a nonempty policy is enabled; a new PR body must not relabel
+old prose under another digest. Worker integration must also compare the source
+binding in a facts result with the plan before its Progress pin is upgraded. The explicit reader interfaces prepare that
 integration without routing current operations to a GitHub mirror.
