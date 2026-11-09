@@ -80,6 +80,28 @@ def _refuse(reason):
     raise Refused(reason)
 
 
+def check_history_policy(pr, expected, *, empty):
+    """PR metadata can only match the independently collected protected policy."""
+    if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None or type(empty) is not bool:
+        _refuse("protected history policy evidence is invalid")
+    matches = re.findall(r"<!--tauceti-progress-pr:v1 (.*?)-->", pr.get("body") or "", flags=re.S)
+    claimed = None
+    if len(matches) > 1:
+        _refuse("ambiguous progress history policy metadata")
+    if matches:
+        try:
+            metadata = json.loads(matches[0])
+            if not isinstance(metadata, dict):
+                raise ValueError
+            claimed = metadata.get("history_migration_sha256")
+        except (ValueError, TypeError):
+            _refuse("invalid progress history policy metadata")
+    if claimed is None and empty:
+        return  # Historical reports remain readable under the empty policy.
+    if claimed != expected:
+        _refuse("history policy differs from the protected merge configuration; replan after aligning its digest")
+
+
 def check_provenance(pr, base_repo, base_branch="main"):
     """Provenance first: is this pull request even a candidate?
 
@@ -350,7 +372,8 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
            new_progress_bytes, base_repo,
            current_main_cursor=None, main_sha="",
            old_paths=None, code_window=None, last_report_at=None, now=None,
-           area_exists=None, expected_bootstrap_from_sha=None):
+           area_exists=None, expected_bootstrap_from_sha=None,
+           history_migration_sha256=None, history_migration_empty=True):
     """Run the whole gate. Returns `{"area", "parent", "head_sha", "main_sha", "section", "blobs"}`
     or raises `Refused`.
 
@@ -370,6 +393,10 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
     nothing, and waiting for it held every report for the length of a full build.
     """
     prov = check_provenance(pr, base_repo)
+    if history_migration_sha256 is None:
+        from .provenance import MigrationMap
+        history_migration_sha256 = MigrationMap().digest
+    check_history_policy(pr, history_migration_sha256, empty=history_migration_empty)
     area, head_sha = prov["area"], prov["head_sha"]
     if not head_sha:
         _refuse("pull request has no head sha")
@@ -481,6 +508,8 @@ def main(argv=None):
             current_main_cursor=data.get("current_main_cursor"),
             main_sha=data.get("main_sha") or "",
             old_paths=data.get("old_paths") or {},
+            history_migration_sha256=data.get("history_migration_sha256"),
+            history_migration_empty=data.get("history_migration_empty", True),
         )
     except Refused as exc:
         print(f"REFUSED: {exc}")

@@ -42,6 +42,18 @@ on:
       project_conf:
         type: string
         default: ''
+      history_migration_repository:
+        description: Trusted GitHub policy repository from the protected caller; never derive from PR data.
+        type: string
+        default: ''
+      history_migration_ref:
+        description: Immutable 40-hex policy commit; required with history_migration_repository.
+        type: string
+        default: ''
+      history_migration_path:
+        description: Relative JSON policy path inside that trusted checkout.
+        type: string
+        default: progress-history.json
       pr:
         description: The pull request number to consider.
         required: true
@@ -123,12 +135,20 @@ jobs:
 
       - name: Checkout configured shared tools
         if: inputs.tools_ref != ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.tools_repository }}
           ref: ${{ inputs.tools_ref }}
           path: .tauceti-tools
           persist-credentials: false
+      - name: Install pinned validator dependencies in a job-private environment
+        run: |
+          set -euo pipefail
+          validator_env="$(mktemp -d "$RUNNER_TEMP/progress-validator.XXXXXX")"
+          python3 -m venv "$validator_env"
+          "$validator_env/bin/python" -m pip install ./validator
+          echo "PROGRESS_VALIDATOR_PYTHON=$validator_env/bin/python" >> "$GITHUB_ENV"
+
       - name: Load project configuration
         env:
           PYTHONPATH: ${{ github.workspace }}/.tauceti-tools
@@ -136,12 +156,37 @@ jobs:
         run: |
           if [ -n "$PROJECT_CONF" ]; then
             test -n '${{ inputs.tools_ref }}'
-            python3 -m tauceti_tools config environment --conf "$PROJECT_CONF" --github-env "$GITHUB_ENV"
-          else
-            # Legacy callers still need the pinned package dependency.
-            python3 -m pip install ./validator
+            "$PROGRESS_VALIDATOR_PYTHON" -m tauceti_tools config environment --conf "$PROJECT_CONF" --github-env "$GITHUB_ENV"
           fi
-          echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
+
+      - name: Validate trusted history policy source
+        env:
+          HISTORY_REPOSITORY: ${{ inputs.history_migration_repository }}
+          HISTORY_REF: ${{ inputs.history_migration_ref }}
+          HISTORY_PATH: ${{ inputs.history_migration_path }}
+        run: |
+          "$PROGRESS_VALIDATOR_PYTHON" validator/.github/scripts/history_policy.py --validate-source \
+            --repository "$HISTORY_REPOSITORY" --ref "$HISTORY_REF" --path "$HISTORY_PATH"
+
+      - name: Check out trusted history policy
+        if: inputs.history_migration_repository != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.history_migration_repository }}
+          ref: ${{ inputs.history_migration_ref }}
+          path: .tauceti-history-policy
+          persist-credentials: false
+
+      - name: Prepare trusted history policy snapshot
+        env:
+          HISTORY_REPOSITORY: ${{ inputs.history_migration_repository }}
+          HISTORY_REF: ${{ inputs.history_migration_ref }}
+          HISTORY_PATH: ${{ inputs.history_migration_path }}
+        run: |
+          "$PROGRESS_VALIDATOR_PYTHON" validator/.github/scripts/history_policy.py \
+            --repository "$HISTORY_REPOSITORY" --ref "$HISTORY_REF" --path "$HISTORY_PATH" \
+            --root .tauceti-history-policy --output "$RUNNER_TEMP/tauceti-progress-history.json" \
+            --github-env "$GITHUB_ENV"
 
       # No checkout of the roadmap repository at all. The collector reads current `main` and the head
       # through the API at pinned SHAs, so there is no working tree that could drift from what is
@@ -154,7 +199,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          python3 validator/.github/scripts/collect.py \
+          "$PROGRESS_VALIDATOR_PYTHON" validator/.github/scripts/collect.py \
             --repo "$REPO" --pr "$PR" --out bundle.json
 
       # The gate. Exit 0 allows, exit 3 is a considered refusal, anything else is a crash. A crash
@@ -167,14 +212,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set +e
-          python3 -c 'import sys; sys.path.insert(0, "validator"); from progress.gate import main; sys.exit(main())' \
+          "$PROGRESS_VALIDATOR_PYTHON" -c 'import sys; sys.path.insert(0, "validator"); from progress.gate import main; sys.exit(main())' \
             --bundle bundle.json --result result.json > gate.out 2>&1
           rc=$?
           cat gate.out
           {
-            echo "head_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("head_sha",""))')"
-            echo "main_sha=$(python3 -c 'import json;print(json.load(open("bundle.json")).get("main_sha",""))')"
-            echo "area=$(python3 -c 'import json,re;a=json.load(open("bundle.json")).get("area","");print(a if re.fullmatch(r"[A-Za-z0-9]+", a or "") else "")')"
+            echo "head_sha=$("$PROGRESS_VALIDATOR_PYTHON" -c 'import json;print(json.load(open("bundle.json")).get("head_sha",""))')"
+            echo "main_sha=$("$PROGRESS_VALIDATOR_PYTHON" -c 'import json;print(json.load(open("bundle.json")).get("main_sha",""))')"
+            echo "area=$("$PROGRESS_VALIDATOR_PYTHON" -c 'import json,re;a=json.load(open("bundle.json")).get("area","");print(a if re.fullmatch(r"[A-Za-z0-9]+", a or "") else "")')"
             echo "roadmap_dir=${TAUCETI_ROADMAP_DIR:-TauCetiRoadmap}"
             echo "completed_dir=${TAUCETI_COMPLETED_DIR:-Completed}"
           } >> "$GITHUB_OUTPUT"

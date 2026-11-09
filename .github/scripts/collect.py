@@ -157,8 +157,11 @@ def rev_parse(repo, ref):
     return proc.stdout.strip() or None if proc.returncode == 0 else None
 
 
+@window.history_round
 def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
-    """The one legitimate `from_sha` for a roadmap's FIRST report, or None if it cannot be computed.
+    """The legitimate first-report cursor, or None when source history is unavailable.
+
+    Invalid protected history configuration is fatal; it must not produce an empty bundle.
 
     A first report has no cursor on `main` to continue from, so its starting point has to be pinned
     some other way, or whoever files it also decides where that roadmap's history begins -- and
@@ -173,8 +176,8 @@ def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
     the SAME functions over the same data -- so the two agree by construction rather than by luck,
     which is what the previous attempts got wrong.
 
-    `--filter=blob:none --no-checkout` fetches commits without file contents: about a second and three
-    megabytes, since only commit subjects are read. This is not a checkout of pull-request content --
+    `--filter=blob:none --no-checkout` fetches commits without file contents. Commit provenance is
+    streamed and memoized for this call; unrelated message bodies are discarded. This is not a checkout of pull-request content --
     it is the upstream code repository, nothing from the pull request reaches it, and nothing in it is
     executed.
     """
@@ -274,6 +277,7 @@ def resolve_window(new_progress, repo=CODE_REPO, ref=CODE_REF):
             "to_reachable": to_reachable, "advances": advances}
 
 
+@window.history_round
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
@@ -371,10 +375,17 @@ def main(argv=None):
                 current_cursor = None
         if current_cursor is None and area_exists:
             # Only for a first report, so at most once per roadmap ever.
-            expected_bootstrap = bootstrap_cursor(area)
+            try:
+                gate.check_history_policy(pr, window.current_migration().digest, empty=window.current_migration().empty)
+            except gate.Refused:
+                pass  # The pure gate reports the policy mismatch before checking the cursor.
+            else:
+                expected_bootstrap = bootstrap_cursor(area)
 
     bundle = {
         "base_repo": args.repo,
+        "history_migration_sha256": window.current_migration().digest,
+        "history_migration_empty": window.current_migration().empty,
         "code_window": resolve_window(new_progress),
         "area_exists": area_exists,
         "expected_bootstrap_from_sha": expected_bootstrap,
