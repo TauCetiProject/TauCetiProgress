@@ -528,6 +528,19 @@ class NativePlanning(unittest.TestCase):
             return [window.window_prs(self.code, self.initial, tip, migration=mapping, **history)
                     for tip in (native, boundary, earlier, native)]
         self.assertEqual(observations(), [[200, 7, 6], [7, 6], [6], [200, 7, 6]])
+        @window.history_round
+        def bootstrap_reads():
+            for _ in range(3):
+                self.assertEqual(plan.unaccounted_prs(self.code, {6: None, 7: None, 200: None}, ref=native,
+                                                     migration=mapping, **history), [])
+                self.assertEqual(window.earliest_merged(self.code, [6, 7, 200], ref=native,
+                                                        migration=mapping, **history), (6, earlier))
+        # Scaled analogue of the 29k history: one chain, messages and reachable
+        # ancestry fit; retaining a second full chain would evict the messages.
+        with patch.object(window, "MAX_HISTORY_ROWS", 12), \
+                patch.object(window.git_history, "read", wraps=window.git_history.read) as reads:
+            bootstrap_reads()
+            self.assertEqual(reads.call_count, 1)
         self.assertEqual(window.window_prs(self.code, boundary, native, migration=mapping, **history), [200])
         with self.assertRaises(window.GitError):
             window.window_prs(self.code, boundary, native, repository=self.content.repository)

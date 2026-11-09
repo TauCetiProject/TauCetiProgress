@@ -182,7 +182,7 @@ def first_parent_sources(repo_dir, revision, *, repository=None, legacy_reposito
     """
     # Use the same revision contract with or without the round cache.
     revision = immutable_revision(repo_dir, revision)
-    legacy_shas = None
+    legacy_tip = None
     if legacy_through is not None:
         if not isinstance(repository, RepositoryRef) or not isinstance(legacy_repository, RepositoryRef):
             raise GitError("cutover history needs both qualified repository namespaces")
@@ -191,9 +191,13 @@ def first_parent_sources(repo_dir, revision, *, repository=None, legacy_reposito
         boundary = immutable_revision(repo_dir, legacy_through)
         if boundary != legacy_through:
             raise GitError("cutover requires an immutable commit SHA")
-        legacy_shas = reachable_commits(repo_dir, boundary, first_parent=True)
         tip = revision.split("..")[-1]
-        if tip not in legacy_shas and boundary not in reachable_commits(repo_dir, tip, first_parent=True):
+        # One chain suffices: either this is an older retained tip, or the
+        # cutover must occur on its first-parent chain. Avoid retaining both
+        # full ancestry sets alongside the message rows and merge guard set.
+        legacy_tip = is_ancestor(repo_dir, tip, boundary)
+        chain_tip, required = (boundary, tip) if legacy_tip else (tip, boundary)
+        if required not in reachable_commits(repo_dir, chain_tip, first_parent=True):
             raise GitError("cutover commit does not belong to this first-parent history")
     cache = _HISTORY_ROUND.get()
     cache_key = None
@@ -203,7 +207,7 @@ def first_parent_sources(repo_dir, revision, *, repository=None, legacy_reposito
             saved = cache.pop(cache_key)
             cache[cache_key] = saved
             return _sources(saved, legacy_repository, migration, include_uncited=include_uncited,
-                            repository=repository, legacy_shas=legacy_shas)
+                            repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip)
     try:
         rows = git_history.read(repo_dir, revision)
     except (git_history.HistoryReadError, OSError) as error:
@@ -213,20 +217,27 @@ def first_parent_sources(repo_dir, revision, *, repository=None, legacy_reposito
             del cache[next(iter(cache))]
         cache[cache_key] = tuple(rows)
     return _sources(rows, legacy_repository, migration, include_uncited=include_uncited,
-                    repository=repository, legacy_shas=legacy_shas)
+                    repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip)
 
 
-def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, repository=None, legacy_shas=None):
+def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, repository=None,
+             legacy_through=None, legacy_tip=None):
     out = []
     migration = migration if migration is not None else current_migration()
+    legacy = legacy_through is None or legacy_tip
     for row in rows:
+        # Rows are newest first. If a newer window excludes the boundary,
+        # every remaining first-parent row is native. Otherwise the boundary
+        # itself and all following rows belong to the legacy namespace.
+        if row.sha == legacy_through:
+            legacy = True
         try:
             if row.sha in migration.commits:
                 citation = migration.commits[row.sha]
             else:
                 if row.error:
                     raise ProvenanceError(row.error)
-                namespace = repository if legacy_shas is not None and row.sha not in legacy_shas else legacy_repository
+                namespace = legacy_repository if legacy else repository
                 citation = resolve_source(row.citation, row.number, namespace)
         except ProvenanceError as error:
             raise GitError(f"commit {row.sha[:12]}: {error}") from None
