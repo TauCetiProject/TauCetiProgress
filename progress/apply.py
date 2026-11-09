@@ -325,6 +325,8 @@ def sweep(plan, keep_branch, replacement_url):
 
     Only `gh` failures are caught. A parsing or programming error here is a bug and must surface.
     """
+    if "source" in plan:
+        raise ApplyError("qualified source publisher is required; preserve the prepared report")
     live = files.cursor(gh.file_on_default_branch(plan["progress_path"]) or "") or ""
     rows = superseded_prs(
         gh.open_progress_prs(), plan["roadmap"], live, plan["from_sha"], keep_branch,
@@ -457,6 +459,10 @@ def render_update(plan, status_body, section_body, old_status, old_progress):
 
 def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, version=None):
     """Write, commit, push and open the PR. Returns a process exit code."""
+    if "source" in plan:
+        # Qualified plans must never fall through to legacy GitHub constants,
+        # even when a caller lost its --conf or invokes this library directly.
+        raise ApplyError("this plan requires its qualified source publisher; preserve the prepared report")
     roadmap_dir = pathlib.Path(roadmap_dir)
     branch = branch_name(plan)
 

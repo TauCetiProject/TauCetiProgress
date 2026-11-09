@@ -123,6 +123,8 @@ def cmd_facts(args):
     from .docs import DocsGenerationChanged, ReplanRequired
 
     p = _load_plan(args.plan)
+    if "source" in p and p["source"] is None:
+        raise ReplanRequired("invalid saved source repository binding; replan")
     pin = p.get("documentation")
     if pin is None:
         raise ReplanRequired("the plan pins no documentation facts; replan the window")
@@ -138,7 +140,8 @@ def cmd_facts(args):
         migration = saved_migration(p, args.plan)
         with window.using_migration(migration):
             result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"],
-                                   documentation=pin, bundle_path=bundle_path)
+                                   documentation=pin, bundle_path=bundle_path,
+                                   **({"source_record": p["source"]} if "source" in p else {}))
     except DocsGenerationChanged as exc:
         return _generation_changed("facts", exc)
     except facts.FactsError as exc:

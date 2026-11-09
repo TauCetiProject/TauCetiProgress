@@ -54,6 +54,40 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
 
     `pr_details` is `[{number,title,body,url,merged_at}]`, newest first.
     """
+    if "source" in plan or "source" in fact_data:
+        from tauceti_tools.ci_candidate import RepositoryIdentity
+        from .docs import ReplanRequired
+        from .native_source import history_options_from_record
+
+        source = plan.get("source")
+        try:
+            history_options_from_record(source)
+            if fact_data.get("source") != source:
+                raise ValueError("facts source differs from plan")
+            for key in ("from_sha", "to_sha"):
+                if fact_data[key] != plan[key]:
+                    raise ValueError("facts window differs from plan")
+            def documentation(value):
+                if not isinstance(value, dict):
+                    raise ValueError("documentation binding is missing")
+                return {key: item for key, item in value.items() if key != "bundle_file"}
+
+            if documentation(fact_data["documentation"]) != documentation(plan["documentation"]):
+                raise ValueError("facts documentation differs from plan")
+            numbers = plan["prs"]
+            factual = [row["number"] for row in fact_data["prs"]]
+            commentary = [row["number"] for row in pr_details]
+            for observed in (numbers, factual, commentary):
+                if any(type(number) is not int or number < 1 for number in observed) \
+                        or len(set(observed)) != len(observed) or set(observed) != set(numbers):
+                    raise ValueError("facts or commentary PRs differ from plan")
+            expected = RepositoryIdentity.parse(source["content"])
+            for row in pr_details:
+                actual = RepositoryIdentity.parse(row.get("repository"))
+                if actual != expected or row.get("number") not in plan["prs"]:
+                    raise ValueError("PR commentary belongs to another source or window")
+        except (ValueError, TypeError, KeyError):
+            raise ReplanRequired("writing context source binding mismatch; preserve prepared artifacts") from None
     counts = fact_data["counts"]
     notes = []
 

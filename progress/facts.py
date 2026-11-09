@@ -35,6 +35,7 @@ MAX_DOC_CHARS = 400
 # Each module costs a git blame, so a window touching an enormous number of modules is capped rather
 # than left to run away. The cap is reported when it bites.
 MAX_MODULES = 200
+_UNSET_SOURCE = object()
 
 _BLAME_LINE_RE = re.compile(r"\A([0-9a-f]{40}) \d+ (\d+)")
 
@@ -71,10 +72,11 @@ def changed_lean_files(repo_dir, commits):
 def blame_commits(repo_dir, sha, path):
     """`{line_number: commit}` for a file at a commit.
 
-    One blame per file rather than one per declaration: a window can carry hundreds of declarations
+    Follow the mainline so a native merge is credited for lines that entered
+    through its feature branch. One blame per file rather than one per declaration: a window can carry hundreds of declarations
     across a few dozen files, and the per-line answer is the same either way.
     """
-    out = window.git(["blame", "--line-porcelain", "-l", sha, "--", path], repo_dir)
+    out = window.git(["blame", "--first-parent", "--line-porcelain", "-l", sha, "--", path], repo_dir)
     lines = {}
     for line in out.splitlines():
         m = _BLAME_LINE_RE.match(line)
@@ -92,27 +94,28 @@ def _first_sentence(flat):
     return (flat[: m.end()] if m else flat).strip()
 
 
-def pr_commits(repo_dir, from_sha, to_sha, numbers):
+def pr_commits(repo_dir, from_sha, to_sha, numbers, **history):
     """The first-parent merge commits attributed to a selected set of PRs."""
     wanted = set(numbers)
     result = {}
-    for sha, number in window.first_parent_prs(repo_dir, f"{from_sha}..{to_sha}"):
+    for sha, number in window.first_parent_prs(repo_dir, f"{from_sha}..{to_sha}", **history):
         if number is not None and number in wanted:
             result[sha.strip()] = number
     return result
 
 
-def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None):
+def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None, **history):
     """Touched modules still present at the documented commit, including empty modules."""
     if touched is None:
-        touched = changed_lean_files(repo_dir, pr_commits(repo_dir, from_sha, to_sha, numbers))
+        touched = changed_lean_files(repo_dir, pr_commits(repo_dir, from_sha, to_sha, numbers, **history))
     present = set(window.git(["ls-tree", "-r", "-z", "--name-only", to_sha, "--", LEAN_PREFIX],
                              repo_dir).split("\0"))
     return [path for path in touched if path in present]
 
 
 @window.history_round
-def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None, bundle_path=None):
+def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None, bundle_path=None,
+            source_record=_UNSET_SOURCE):
     """The factual spine of a window.
 
     `to_sha` is the documented window end chosen by the plan, and `documentation` the plan's pin of
@@ -122,6 +125,13 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
     """
     from .docs import ArtifactError, Docs, ReplanRequired
 
+    history = {}
+    if source_record is not _UNSET_SOURCE:
+        from .native_source import history_options_from_record
+        try:
+            history = history_options_from_record(source_record)
+        except (ValueError, TypeError):
+            raise ReplanRequired("invalid saved source repository binding; replan") from None
     if documentation is None and docs is None:
         raise ReplanRequired("the plan pins no documentation facts; replan the window")
     if documentation is not None and not isinstance(documentation, dict):
@@ -138,13 +148,13 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
     if docs_sha != to_sha:
         raise ReplanRequired(f"pinned source {docs_sha} differs from plan {to_sha}; replan")
 
-    numbers = (window.window_prs(repo_dir, from_sha, docs_sha)
+    numbers = (window.window_prs(repo_dir, from_sha, docs_sha, **history)
                if pr_numbers is None else list(pr_numbers))
     # Which commit belongs to which PR, so a blamed line can be attributed.
-    pr_of_commit = pr_commits(repo_dir, from_sha, docs_sha, numbers)
+    pr_of_commit = pr_commits(repo_dir, from_sha, docs_sha, numbers, **history)
 
     files = changed_lean_files(repo_dir, pr_of_commit)
-    required = set(required_modules(repo_dir, from_sha, docs_sha, numbers, touched=files))
+    required = set(required_modules(repo_dir, from_sha, docs_sha, numbers, touched=files, **history))
     docs.require_coverage(required)  # before presentation limits; no partial coverage accepted
     truncated_modules = 0
     if len(files) > MAX_MODULES:
@@ -223,6 +233,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
             f"changed, {removed} removed by the documented commit); refusing to report the window as empty"
         )
     return {
+        **({"source": source_record} if source_record is not _UNSET_SOURCE else {}),
         "documentation": docs.pin(),
         "from_sha": from_sha,
         "to_sha": to_sha,

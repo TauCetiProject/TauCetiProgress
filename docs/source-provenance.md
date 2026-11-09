@@ -87,8 +87,9 @@ use an empty policy and need no extra checkout. This supports large migration
 tables without putting their JSON into a process environment variable.
 
 Coordinate the worker and merge-workflow policy pins before using a nonempty
-map. Worker saved-plan and parked-work identities must include the policy
-digest before its Progress pin is upgraded for that use. Existing paid outputs
+map. Worker active preparation and writer-input identities include the policy
+digest. A parked window stays blocked across policy changes to avoid paying for
+it again; this does not reuse its facts under the new policy. Existing paid outputs
 must not be reinterpreted under another map. After coordinating policy pins,
 close and mechanically replan reports still in flight under the previous digest;
 otherwise the gate refuses them until normal stale-report recovery runs. Preserve
@@ -109,8 +110,74 @@ characters; separator whitespace is discarded. Invalid encoding names the
 affected commit. Local replacement refs and grafts do not alter attribution.
 No persistent state store is added.
 
+`native_source.NativeRepository` binds each direct Forgejo API client to an
+explicit repository and snapshots its native repository ID. `NativeSource`
+provides content and roadmap bindings to `plan.build_plan(source=...)`. Its
+history reader resolves relevant label IDs and streams their union from all PR
+states, including closed queue contributions, native merges, and reopened work
+already present on main. Git decides which candidates actually landed. Repository/shared labels are resolved with complete pagination, including
+identically named labels with distinct IDs. When the shared catalog is hidden or
+forbidden, the reader uses the complete authorized repository history instead of
+assuming the roadmap has no labels. Large unions use bounded batches rather
+than repeating the full repository history for each roadmap.
+Missing merge metadata, labels, permissions or incomplete pages abort planning.
+Reading every state prevents close/reopen events from changing scan membership.
+Counted pagination refuses changing totals when other membership changes would
+shift pages. Forgejo 17's creation-order sort breaks timestamp ties by issue ID.
+These are bounded observations, not an atomic snapshot of concurrently edited
+labels. API merge SHAs reachable in the selected window must have corresponding
+first-parent PR attribution, including merges nested on a side branch. A merge
+SHA on the first-parent chain must match that exact commit's attribution.
+This applies to GitHub and Forgejo, even after an area has a cursor; an unrecognized merge needs
+an approved commit override before another report can advance past it.
+An affected area aborts planning for all areas rather than advancing its cursor. Before upgrading
+the production Progress pin, audit current windows and the complete bootstrap
+histories of never-reported areas for this refusal and recover
+ambiguous commits through reviewed policy; the planner never rewinds existing cursors.
+An override on a nested, off-first-parent SHA can explicitly exclude that commit;
+it cannot credit it as a separate first-parent contribution. Do not exclude valid
+contributions merely to clear the refusal without deciding how they should be reported.
+Native in-flight ownership uses authenticated user and repository IDs rather
+than display logins. It trusts the canonical roadmap repository or a fork owned
+by the authenticated user; another organization-owned repository is not inferred
+to be the canonical source. Clients never select credentials or shared-service fallbacks.
+
+Native plans retain the qualified content/roadmap identities and an explicit
+legacy-history namespace in `source` (`tauceti-progress.source/v1`). A legacy
+namespace requires `legacy_through`, the full immutable last imported commit SHA.
+Bare subjects on that commit's first-parent history use the legacy namespace;
+bare subjects after it use the current native repository. This prevents a newly
+allocated native number from being interpreted through an old renumbering map.
+The cutover must belong to the observed first-parent history; incomplete or
+divergent histories refuse. Older retained windows before cutover remain valid.
+Without an explicit legacy namespace and cutover, bare native subjects remain
+ambiguous and refuse; qualified `Source-PR` citations work without that configuration.
+The configured cutover explicitly authorizes the namespace of later bare subjects.
+Facts restores that binding through `source_record`, including the source origin in its output. This retained metadata identifies the
+namespace used for the calculation; it does not independently prove the origin
+of a caller-supplied checkout. Trusted callers remain responsible for fetching the
+configured repository and immutable source objects.
+Current numbers are still selected through qualified Git citations and the
+approved migration policy. Git blame follows the first-parent chain so lines
+introduced through a native merge are credited to the merge that landed on main,
+rather than to an unlabelled feature-branch commit. A native merge with no
+recognizable source citation remains subject to the existing refusal/explicit
+commit-override rule.
+First-parent blame also changes GitHub merge attribution. Before a production
+pin upgrade, mechanically regenerate facts for unfinished windows under the new
+version and retain existing paid prose for inspection; do not silently reuse old
+facts as if calculated by the new version. Qualified writer context requires the
+same plan/facts source binding, window endpoints, documentation pin and PR set,
+plus complete, non-duplicated qualified commentary from its content repository.
+
 The command-line entry points still use the legacy bootstrap and reject native
-project configurations. Native API history collection, qualified repository metadata in plans/facts,
-publication/fork handling, announcements and workflow integration must be ported
-before enabling that bootstrap. The explicit reader interfaces prepare that
+project configurations. Apply also refuses qualified saved plans before any
+legacy GitHub operation, including direct library calls, superseded-report cleanup,
+or a lost `--conf`; an explicit null source binding also refuses factual collection;
+prepared prose remains available for the qualified publisher. Native publication/fork handling, trusted runtime binding, announcements and
+workflow integration must be completed before enabling that bootstrap. Retained
+local and remote publication commits must be checked against the policy that
+produced them before a nonempty policy is enabled; a new PR body must not relabel
+old prose under another digest. Worker integration must also compare the source
+binding in a facts result with the plan before its Progress pin is upgraded. The explicit reader interfaces prepare that
 integration without routing current operations to a GitHub mirror.

@@ -145,18 +145,60 @@ def has_commit(repo_dir, sha):
     ).returncode == 0
 
 
-def first_parent_sources(repo_dir, revision, *, legacy_repository=None, migration=None):
+def immutable_revision(repo_dir, revision):
+    """Resolve each endpoint once before combining different history observations."""
+    parts = revision.split("..")
+    if len(parts) not in (1, 2) or any(not part for part in parts):
+        raise GitError("history requires a commit or a two-commit range")
+    return "..".join(git(["rev-parse", "--verify", "--end-of-options", part + "^{commit}"], repo_dir).strip()
+                    for part in parts)
+
+
+def reachable_commits(repo_dir, revision, *, first_parent=False):
+    """Immutable ancestry, sharing the existing bounded round cache."""
+    revision = immutable_revision(repo_dir, revision)
+    cache = _HISTORY_ROUND.get()
+    key = ("reachable", os.path.abspath(repo_dir), revision, first_parent)
+    if cache is not None and key in cache:
+        saved = cache.pop(key)
+        cache[key] = saved
+        return saved
+    rows = frozenset(git(["rev-list", *(["--first-parent"] if first_parent else []), revision, "--"],
+                         repo_dir).splitlines())
+    if cache is not None and len(rows) <= MAX_HISTORY_ROWS \
+            and git(["rev-parse", "--is-shallow-repository"], repo_dir).strip() == "false":
+        while cache and (len(cache) >= MAX_HISTORY_ENTRIES or sum(map(len, cache.values())) + len(rows) > MAX_HISTORY_ROWS):
+            del cache[next(iter(cache))]
+        cache[key] = rows
+    return rows
+
+
+def first_parent_sources(repo_dir, revision, *, repository=None, legacy_repository=None, legacy_through=None,
+                         migration=None, include_uncited=False):
     """Qualified citations from complete commit messages, newest first.
 
     NUL framing preserves body lines; a repair may have appended notes after its
     provenance trailers. A qualified native citation never loses its origin.
     """
     # Use the same revision contract with or without the round cache.
-    parts = revision.split("..")
-    if len(parts) not in (1, 2) or any(not part for part in parts):
-        raise GitError("history requires a commit or a two-commit range")
-    revision = "..".join(git(["rev-parse", "--verify", "--end-of-options", part + "^{commit}"], repo_dir).strip()
-                        for part in parts)
+    revision = immutable_revision(repo_dir, revision)
+    legacy_tip = None
+    if legacy_through is not None:
+        if not isinstance(repository, RepositoryRef) or not isinstance(legacy_repository, RepositoryRef):
+            raise GitError("cutover history needs both qualified repository namespaces")
+        if git(["rev-parse", "--is-shallow-repository"], repo_dir).strip() != "false":
+            raise GitError("cutover history requires a full-history checkout")
+        boundary = immutable_revision(repo_dir, legacy_through)
+        if boundary != legacy_through:
+            raise GitError("cutover requires an immutable commit SHA")
+        tip = revision.split("..")[-1]
+        # One chain suffices: either this is an older retained tip, or the
+        # cutover must occur on its first-parent chain. Avoid retaining both
+        # full ancestry sets alongside the message rows and merge guard set.
+        legacy_tip = is_ancestor(repo_dir, tip, boundary)
+        chain_tip, required = (boundary, tip) if legacy_tip else (tip, boundary)
+        if required not in reachable_commits(repo_dir, chain_tip, first_parent=True):
+            raise GitError("cutover commit does not belong to this first-parent history")
     cache = _HISTORY_ROUND.get()
     cache_key = None
     if cache is not None and git(["rev-parse", "--is-shallow-repository"], repo_dir).strip() == "false":
@@ -164,7 +206,8 @@ def first_parent_sources(repo_dir, revision, *, legacy_repository=None, migratio
         if cache_key in cache:
             saved = cache.pop(cache_key)
             cache[cache_key] = saved
-            return _sources(saved, legacy_repository, migration)
+            return _sources(saved, legacy_repository, migration, include_uncited=include_uncited,
+                            repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip)
     try:
         rows = git_history.read(repo_dir, revision)
     except (git_history.HistoryReadError, OSError) as error:
@@ -173,28 +216,38 @@ def first_parent_sources(repo_dir, revision, *, legacy_repository=None, migratio
         while cache and (len(cache) >= MAX_HISTORY_ENTRIES or sum(map(len, cache.values())) + len(rows) > MAX_HISTORY_ROWS):
             del cache[next(iter(cache))]
         cache[cache_key] = tuple(rows)
-    return _sources(rows, legacy_repository, migration)
+    return _sources(rows, legacy_repository, migration, include_uncited=include_uncited,
+                    repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip)
 
 
-def _sources(rows, legacy_repository, migration=None):
+def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, repository=None,
+             legacy_through=None, legacy_tip=None):
     out = []
     migration = migration if migration is not None else current_migration()
+    legacy = legacy_through is None or legacy_tip
     for row in rows:
+        # Rows are newest first. If a newer window excludes the boundary,
+        # every remaining first-parent row is native. Otherwise the boundary
+        # itself and all following rows belong to the legacy namespace.
+        if row.sha == legacy_through:
+            legacy = True
         try:
             if row.sha in migration.commits:
                 citation = migration.commits[row.sha]
             else:
                 if row.error:
                     raise ProvenanceError(row.error)
-                citation = resolve_source(row.citation, row.number, legacy_repository)
+                namespace = legacy_repository if legacy else repository
+                citation = resolve_source(row.citation, row.number, namespace)
         except ProvenanceError as error:
             raise GitError(f"commit {row.sha[:12]}: {error}") from None
-        if citation is not None:
+        if citation is not None or include_uncited:
             out.append((row.sha, citation))
     return out
 
 
-def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=None, migration=None):
+def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=None, legacy_through=None,
+                     migration=None, include_uncited=False):
     """Current-source numbers only after origin checking or an explicit import map."""
     if repository is None:
         from .gh import CODE_REPO
@@ -211,7 +264,12 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
         raise GitError("report migration must be an explicit source map")
     out = []
     seen = {}
-    for sha, citation in first_parent_sources(repo_dir, revision, legacy_repository=legacy_repository, migration=migration):
+    for sha, citation in first_parent_sources(repo_dir, revision, repository=repository,
+                                               legacy_repository=legacy_repository, legacy_through=legacy_through,
+                                               migration=migration, include_uncited=include_uncited):
+        if citation is None:
+            out.append((sha, None))
+            continue
         try:
             number = migration.number(citation, repository)
             if number in seen and seen[number] != citation:
@@ -223,7 +281,7 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
     return out
 
 
-def window_prs(repo_dir, from_sha, to_sha, *, repository=None, legacy_repository=None, migration=None):
+def window_prs(repo_dir, from_sha, to_sha, *, repository=None, legacy_repository=None, legacy_through=None, migration=None):
     """PR numbers merged in `(from_sha, to_sha]`, newest first.
 
     `--first-parent` is deliberate: it walks the mainline only, so a PR's own internal commits
@@ -235,7 +293,7 @@ def window_prs(repo_dir, from_sha, to_sha, *, repository=None, legacy_repository
             f"this history (rewritten branch, or a cursor from another repository)"
         )
     rows = first_parent_prs(repo_dir, f"{from_sha}..{to_sha}", repository=repository,
-                           legacy_repository=legacy_repository, migration=migration)
+                           legacy_repository=legacy_repository, legacy_through=legacy_through, migration=migration)
     return list(dict.fromkeys(number for _sha, number in rows))
 
 
@@ -261,7 +319,8 @@ def commit_date(repo_dir, sha):
     return git(["log", "-1", "--format=%cI", sha], repo_dir).strip()
 
 
-def earliest_merged(repo_dir, pr_numbers, ref=CODE_REF, *, repository=None, legacy_repository=None, migration=None):
+def earliest_merged(repo_dir, pr_numbers, ref=CODE_REF, *, repository=None, legacy_repository=None,
+                    legacy_through=None, migration=None):
     """`(pr_number, merge_sha)` for whichever of `pr_numbers` merged EARLIEST, or None.
 
     Earliest by position on the first-parent chain, which is the only ordering that matters here.
@@ -280,20 +339,21 @@ def earliest_merged(repo_dir, pr_numbers, ref=CODE_REF, *, repository=None, lega
         return None
     found = None
     for sha, number in first_parent_prs(repo_dir, ref, repository=repository,
-                                       legacy_repository=legacy_repository, migration=migration):
+                                       legacy_repository=legacy_repository, legacy_through=legacy_through, migration=migration):
         if number in wanted:
             found = (number, sha)  # keep overwriting: git emits newest first, so the last is oldest
     return found
 
 
-def find_merge_commit(repo_dir, pr_number, ref=CODE_REF, *, repository=None, legacy_repository=None, migration=None):
+def find_merge_commit(repo_dir, pr_number, ref=CODE_REF, *, repository=None, legacy_repository=None,
+                      legacy_through=None, migration=None):
     """The mainline commit that merged `pr_number`, or None.
 
     Used only for bootstrap, where an area's earliest labelled PR must be located in history.
     Qualified provenance and historical subjects use the same attribution as window and facts reads.
     """
     for sha, number in first_parent_prs(repo_dir, ref, repository=repository,
-                                       legacy_repository=legacy_repository, migration=migration):
+                                       legacy_repository=legacy_repository, legacy_through=legacy_through, migration=migration):
         if number == pr_number:
             return sha
     return None
