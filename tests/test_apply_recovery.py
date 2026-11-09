@@ -27,6 +27,8 @@ with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROG
     git("add", ".")
     git("commit", "-qm", "base")
     git("update-ref", "refs/remotes/origin/main", "HEAD")
+    git("init", "--bare", "-q", str(root / "remote.git"))
+    git("remote", "add", "fork", str(root / "remote.git"))
     status, section = root / "status-body.md", root / "section-body.md"
     status.write_text(prose)
     section.write_text(prose)
@@ -50,7 +52,6 @@ with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TAUCETI_PROG
     with patch.object(apply, "existing_pr", return_value=None), \
          patch.object(apply, "own_pr", side_effect=lambda *a, **kw: published[0] if published and kw.get("states") != ("closed",) else None), \
          patch.object(apply, "push_target", return_value=("fork", "author")), \
-         patch.object(apply, "remote_branch_exists", return_value=True), \
          patch.object(apply, "sweep", return_value=0), patch.object(gh.subprocess, "run", side_effect=run):
         assert apply.run(plan, status, section, repo) == 0
         branch = git("branch", "--show-current")

@@ -127,20 +127,29 @@ def _require_sha(value, field):
     return value
 
 
-def _require_keys(obj, allowed, marker):
+def _require_keys(obj, allowed, marker, optional=()):
     """A header carries exactly the fields this version knows about.
 
     Unknown keys are refused rather than ignored: a header is a wire format shared with the merge
     gate, and silently tolerating extra fields lets prose smuggle data past a reader that does look
     at them.
     """
-    extra = sorted(set(obj) - set(allowed))
+    extra = sorted(set(obj) - set(allowed) - set(optional))
     if extra:
         raise FormatError(f"{marker} header has unknown field(s): {', '.join(extra)}")
     missing = sorted(set(allowed) - set(obj) - {"ts"})   # `ts` is display-only and optional
     if missing:
         raise FormatError(f"{marker} header is missing field(s): {', '.join(missing)}")
     return obj
+
+
+def _source(value):
+    from .native_source import history_options_from_record
+    try:
+        history_options_from_record(value)
+    except (ValueError, TypeError):
+        raise FormatError("invalid qualified report source binding") from None
+    return value
 
 
 def _require_pr_numbers(value):
@@ -307,7 +316,7 @@ def _coverage_lines(area, to_sha, coverage, sub_coverage):
     return "".join(f"<!--{COVERAGE_MARKER} {coverage_header(c)}-->\n" for c in lines)
 
 
-def status_prefix(area, to_sha, ts, coverage=None, sub_coverage=()):
+def status_prefix(area, to_sha, ts, coverage=None, sub_coverage=(), *, source=None):
     """The exact bytes a `STATUS.md` must begin with, given its own header values.
 
     Shared by the renderer and the validator so there is one definition. Checking a PREFIX rather
@@ -322,7 +331,7 @@ def status_prefix(area, to_sha, ts, coverage=None, sub_coverage=()):
     """
     header = json.dumps(
         {"roadmap": _require_area(area, "roadmap"), "to_sha": _require_sha(to_sha, "to_sha"),
-         "ts": _require_ts(ts)},
+         "ts": _require_ts(ts), **({"source": _source(source)} if source is not None else {})},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -337,14 +346,14 @@ def status_prefix(area, to_sha, ts, coverage=None, sub_coverage=()):
     )
 
 
-def render_status(area, to_sha, ts, body, coverage=None, sub_coverage=()):
+def render_status(area, to_sha, ts, body, coverage=None, sub_coverage=(), *, source=None):
     """A whole `STATUS.md`. `body` is the model's prose, without any heading of its own.
 
     The prose is deliberately preceded by a standing note that the file may be out of date: it is
     updated asynchronously from the PRs it describes, so a reader must never take it as
     authoritative about the current tip.
     """
-    return f"{status_prefix(area, to_sha, ts, coverage, sub_coverage)}{body.strip()}\n"
+    return f"{status_prefix(area, to_sha, ts, coverage, sub_coverage, source=source)}{body.strip()}\n"
 
 
 def _parse_status_header(text):
@@ -353,11 +362,12 @@ def _parse_status_header(text):
     if len(headers) != 1:
         raise FormatError(f"expected exactly one {STATUS_MARKER} header, found {len(headers)}")
     h = headers[0]
-    _require_keys(h, STATUS_KEYS, STATUS_MARKER)
+    _require_keys(h, STATUS_KEYS, STATUS_MARKER, optional={"source"})
     return {
         "roadmap": _require_area(h.get("roadmap"), "roadmap"),
         "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
         "ts": _require_ts(h.get("ts")),
+        **({"source": _source(h["source"])} if "source" in h else {}),
     }
 
 
@@ -393,7 +403,7 @@ def parse_status(text):
 # ----- PROGRESS.md -----------------------------------------------------------------------------
 
 
-def render_section(area, from_sha, to_sha, prs, window_label, body):
+def render_section(area, from_sha, to_sha, prs, window_label, body, *, source=None):
     """One `PROGRESS.md` section, ready to append.
 
     `prs` is the full PR-number list for the window. It is recorded so that a later run can refuse
@@ -409,6 +419,7 @@ def render_section(area, from_sha, to_sha, prs, window_label, body):
             "from_sha": _require_sha(from_sha, "from_sha"),
             "to_sha": _require_sha(to_sha, "to_sha"),
             "prs": nums,
+            **({"source": _source(source)} if source is not None else {}),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -438,13 +449,14 @@ def parse_sections(text):
     """Every section header of a `PROGRESS.md`, oldest first."""
     out = []
     for h in parse_headers(text, PROGRESS_MARKER):
-        _require_keys(h, SECTION_KEYS, PROGRESS_MARKER)
+        _require_keys(h, SECTION_KEYS, PROGRESS_MARKER, optional={"source"})
         out.append(
             {
                 "roadmap": _require_area(h.get("roadmap"), "roadmap"),
                 "from_sha": _require_sha(h.get("from_sha"), "from_sha"),
                 "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
                 "prs": _require_pr_numbers(h.get("prs")),
+                **({"source": _source(h["source"])} if "source" in h else {}),
             }
         )
     return out
@@ -528,7 +540,7 @@ def check_no_reserved_markers(body):
         raise FormatError(f"prose contains a reserved marker at offset {m.start()}: {m.group(0)!r}")
 
 
-def check_status_shape(text, area, to_sha, ts, coverage=None, sub_coverage=()):
+def check_status_shape(text, area, to_sha, ts, coverage=None, sub_coverage=(), *, source=None):
     """`STATUS.md` must begin with EXACTLY the canonical prefix for its own header values.
 
     A prefix comparison, not a set of substring searches. The looser version could be satisfied with
@@ -537,7 +549,7 @@ def check_status_shape(text, area, to_sha, ts, coverage=None, sub_coverage=()):
     The coverage headers, when the file has them, are part of that prefix: they sit on the lines
     after the status header, in canonical order, and nowhere else.
     """
-    expected = status_prefix(area, to_sha, ts, coverage, sub_coverage)
+    expected = status_prefix(area, to_sha, ts, coverage, sub_coverage, source=source)
     if not text.startswith(expected):
         # Say which part diverges; the whole prefix is too long to quote usefully.
         for label, probe in (
@@ -670,6 +682,14 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
         )
     section = after[-1]
 
+    if section.get("source") != status.get("source"):
+        raise FormatError("status and progress section belong to different source bindings")
+    if before and before[-1].get("source") != section.get("source"):
+        # An imported legacy log needs an explicit migration namespace. Once
+        # qualified, its history cannot silently switch repositories or origins.
+        if before[-1].get("source") is not None or section.get("source", {}).get("legacy_content") is None:
+            raise FormatError("progress log source changed without an explicit legacy migration")
+
     if section["roadmap"] != area:
         raise FormatError(f"new section is for {section['roadmap']}, expected {area}")
     if section["to_sha"] != status["to_sha"]:
@@ -698,7 +718,8 @@ def validate_update(area, old_status, new_status, old_progress, new_progress, ex
     # Shape before content: both files must carry their canonical framing, so a generation cannot
     # drop the heading or the disclaimer and still parse. Each returns the body that follows it.
     status_body = check_status_shape(
-        new_status, area, status["to_sha"], status["ts"], status["coverage"], status["sub_coverage"]
+        new_status, area, status["to_sha"], status["ts"], status["coverage"], status["sub_coverage"],
+        source=status.get("source"),
     )
     section_body = check_section_shape(added, area, section["from_sha"], section["to_sha"])
 
