@@ -53,7 +53,7 @@ class NativePublisher:
         self._check(identity)
         return result
 
-    def _write(self, operation, path, data, reconcile, context):
+    def _write(self, operation, path, data, reconcile, context, *, reconcile_only=False):
         self._check()
         actor = f"{self.api.forge.key}/users/{self.actor_id}"
         args = ["POST" if operation[0] in {"fork", "create-report", "supersede-comment"} else "PATCH", path,
@@ -77,7 +77,34 @@ class NativePublisher:
         return gh.retained_write(args, origin=self.api.forge.key, actor=actor,
                                  operation=[self.roadmap.identity.record(), *operation], send=send,
                                  reconcile=observe, context={"source": self.roadmap.identity.record(), **context},
-                                 verified=lambda _: False)
+                                 verified=lambda _: False, reconcile_first=True, reconcile_only=reconcile_only)
+
+    def _ack_existing(self, plan, row, branch, directory, version):
+        """A process may have died after native creation but before local acknowledgement."""
+        raw = row["head"]["repo"]
+        target = RepositoryIdentity(RepositoryRef(self.api.forge, raw.get("full_name")),
+                                    _number(raw.get("id"), "report head repository ID"))
+        candidate = _sha(row["head"].get("sha"))
+        if self._git(directory, target, "fetch", "--no-tags", target.repository.clone_url, candidate).returncode:
+            raise apply.RemoteUnavailable("existing native report candidate could not be fetched")
+        try:
+            header = apply.validate_retained_report(plan, candidate, directory)
+        except publication_input.InputMismatch as exc:
+            raise apply.ApplyError(str(exc)) from None
+
+        def observe():
+            for current in self._reports(branch):
+                if current["head"]["repo"]["id"] == target.native_id:
+                    if current["head"].get("sha") != candidate:
+                        raise gh.PublicationRejected("existing native report candidate changed")
+                    return self.roadmap.repository.pull_url(current["number"])
+            return False
+
+        data = {"base": "main", "head": target.repository.name.split("/")[0] + ":" + branch,
+                "title": apply.pr_title(plan), "body": apply.pr_body(plan, header, version)}
+        return self._write(["create-report", target.native_id, branch, "main"], self.roadmap.path + "/pulls", data,
+                           observe, {"candidate": candidate, "target": target.record(),
+                                     "input": publication_input.digest(plan)}, reconcile_only=True)
 
     def _fork(self):
         """Discover owned forks by native ancestry IDs, including renamed forks."""
@@ -201,7 +228,9 @@ class NativePublisher:
         apply._run(["git", "update-ref", "refs/remotes/origin/main", revision], directory)
         branch = apply.branch_name(plan)
         existing = self._reports(branch)
-        if any(row["state"] == "open" or not row["merged"] for row in existing):
+        if existing:
+            for row in existing:
+                self._ack_existing(plan, row, branch, directory, version)
             opened = next((row for row in existing if row["state"] == "open"), None)
             if opened is not None and not dry_run:
                 self._sweep_after_publication(plan, branch, self.roadmap.repository.pull_url(opened["number"]))

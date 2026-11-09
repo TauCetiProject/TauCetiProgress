@@ -103,7 +103,8 @@ def _save_intent(path, value):
         os.close(directory)
 
 
-def retained_write(args, *, origin, actor, operation, send, reconcile=None, context=None, verified=None):
+def retained_write(args, *, origin, actor, operation, send, reconcile=None, context=None, verified=None,
+                   reconcile_first=False, reconcile_only=False):
     """Use the existing private outbox for an origin/actor-bound mutation.
 
     Native transports supply a verification callback; only authoritative reads
@@ -123,6 +124,8 @@ def retained_write(args, *, origin, actor, operation, send, reconcile=None, cont
             if isinstance(outcome, str):
                 path.unlink()
                 return outcome
+            if reconcile_only:
+                raise GhError("retained publication still needs authoritative reconciliation")
             if outcome is False and "absent_since" not in value:
                 value["absent_since"] = time.time()
                 _save_intent(path, value)
@@ -131,6 +134,12 @@ def retained_write(args, *, origin, actor, operation, send, reconcile=None, cont
                     or value["attempts"] >= 2) or value["argv"] != args):
                 raise GhError("publication retained; uncertain outcome must reconcile before replay")
         else:
+            if reconcile_first or reconcile_only:
+                outcome = reconcile() if reconcile else None
+                if isinstance(outcome, str):
+                    return outcome
+                if reconcile_only or outcome is not False:
+                    raise GhError("publication absence is not authoritative; no mutation was sent")
             value = {"actor": actor, "argv": args, "created": time.time(), "attempts": 0, "context": context}
         value.pop("not_sent", None)
         value["attempts"] += 1

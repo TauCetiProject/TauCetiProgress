@@ -189,6 +189,8 @@ validated without overwriting them. PR creation, fork creation and cleanup use
 the existing private publication outbox, keyed by origin, actor and operation.
 Native success is acknowledged through authoritative reads. Ambiguous writes
 remain retained until reconciliation; bounded retries require observed absence.
+Existing PRs also reconcile retained creation intents after process interruption;
+that acknowledgement path cannot send a new mutation.
 Superseded cleanup uses qualified ownership, the live cursor and the same source
 and history policy, and reconciles its comment and close operations separately.
 

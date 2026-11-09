@@ -128,9 +128,11 @@ class NativePublication(unittest.TestCase):
         self.api.failure = True
         context = {"candidate": "a" * 40}
         observed = []
+        def observe():
+            return observed[0] if observed else (None if self.api.calls else False)
         with self.assertRaises(gh.GhError):
             self.publisher._write(["create-report", 12, "branch", "main"], "repos/team/Roadmap/pulls", {},
-                                  lambda: observed[0] if observed else None, context)
+                                  observe, context)
         self.assertEqual(len(self.api.calls), 1)
         self.assertEqual(len(list(self.root.glob("*.json"))), 1)
         observed.append("https://source.example/team/Roadmap/pulls/1")
@@ -138,6 +140,13 @@ class NativePublication(unittest.TestCase):
                                        lambda: observed[0], context)
         self.assertEqual(result, observed[0])
         self.assertEqual(len(self.api.calls), 1)
+        self.assertFalse(list(self.root.glob("*.json")))
+
+    def test_read_only_acknowledgement_never_sends_a_missing_mutation(self):
+        with self.assertRaises(gh.GhError):
+            self.publisher._write(["create-report", 12, "branch", "main"], "repos/team/Roadmap/pulls", {},
+                                  lambda: False, {}, reconcile_only=True)
+        self.assertFalse(self.api.calls)
         self.assertFalse(list(self.root.glob("*.json")))
 
     def test_changed_actor_or_repository_refuses_before_mutation(self):
