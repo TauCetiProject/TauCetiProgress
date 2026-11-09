@@ -54,12 +54,46 @@ An override takes precedence over the commit's own citation and subject. It
 changes no Git objects. Use this only as reviewed operator configuration.
 
 Set `TAUCETI_PROGRESS_HISTORY_MAP` to the absolute path of that JSON file. It is
-bounded to 1 MiB and rejects duplicate JSON keys. The planner snapshots it once
-per round and retains its record as `history_migration` in the saved plan. The
-facts command restores that snapshot, even if the file has changed or disappeared.
-A legacy plan lacking the snapshot requires replanning when a nonempty map is
-configured. Configure the merge collector from the same protected policy; it
-does not accept mapping instructions from a report PR's prose or metadata.
+bounded to 16 MiB and rejects duplicate JSON keys. The planner snapshots it once
+per round. `plan --out FILE` retains the record as a content-named sibling,
+`FILE.history-<sha256>.json`, using the same atomic writer as existing facts
+artifacts. The small plan contains only `history_migration_sha256` and
+`history_migration_file`. Keep the sibling with the plan when moving retained
+artifacts. A nonempty policy requires `--out`. The facts command restores and
+verifies that snapshot, even if the original configuration changed or disappeared.
+A missing sibling requests a mechanical replan (76); corruption or a digest
+mismatch requires retained-state recovery (78). Apply verifies it again and
+returns 78 for either failure, preserving paid output.
+A legacy plan lacking the snapshot requires a mechanical replan (exit 76) when a
+nonempty map is configured. The canonical policy digest is recorded in the plan
+and generated PR metadata. The merge gate compares that claim with the digest
+from its independently prepared policy; PR data never chooses the policy.
+Historical reports without a digest remain valid under the empty policy.
+
+The reusable merge workflow accepts `history_migration_repository`,
+`history_migration_ref` (a full immutable commit), and `history_migration_path`.
+Set these in the protected caller workflow, never from pull-request data. The
+read-only validation job checks out that GitHub policy repository, refuses
+escaping/symlinked data paths, and prepares its own canonical snapshot. The policy
+repository must be public or the caller's own repository, readable by that job's
+`GITHUB_TOKEN`. Reviewers of protected caller changes must verify that the pinned
+commit belongs to the intended protected policy history: a full SHA fixes bytes,
+but GitHub can also serve objects from other forks in the repository network.
+Dependencies and validation run in a job-private virtual environment. A separate
+configured `tools_ref` is used only for configuration loading; its snapshot must
+be readable by the validator's pinned Tools version (currently 2177f5f). Defaults
+use an empty policy and need no extra checkout. This supports large migration
+tables without putting their JSON into a process environment variable.
+
+Coordinate the worker and merge-workflow policy pins before using a nonempty
+map. Worker saved-plan and parked-work identities must include the policy
+digest before its Progress pin is upgraded for that use. Existing paid outputs
+must not be reinterpreted under another map. After coordinating policy pins,
+close and mechanically replan reports still in flight under the previous digest;
+otherwise the gate refuses them until normal stale-report recovery runs. Preserve
+their paid outputs for inspection. The digest checks agreement with independently
+loaded policy, not authorship of the PR body. A Tools upgrade that changes
+repository-name normalization also changes this digest and needs coordination.
 
 The existing GitHub planner, bootstrap checks and factual line attribution use
 the same reader. Commit bodies can supply missing citations even when a squash

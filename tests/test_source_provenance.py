@@ -1,16 +1,17 @@
 """Real mainline windows keep native and historical PR namespaces separate."""
 
 import contextlib
+import gzip
 import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
 import tracemalloc
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -343,7 +344,13 @@ class SourceWindows(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.root), "replace", sha, replacement], check=True, capture_output=True)
         self.assertEqual(window.window_prs(self.root, self.initial, sha), [1])
 
-    def test_real_plan_bootstrap_reuses_full_history_and_facts_restore_its_migration(self):
+    def test_real_plan_bootstrap_reuses_history_and_facts_restore_saved_policy(self):
+        from progress.docs import Docs
+
+        lean = self.root / "TauCeti/A.lean"
+        lean.parent.mkdir()
+        lean.write_text("theorem alpha : True := trivial\n")
+        subprocess.run(["git", "-C", str(self.root), "add", str(lean)], check=True, capture_output=True)
         first = self.commit("ambiguous body\n\nSource-PR: not-a-citation")
         tip = self.commit("second (#8)")
         roadmap = self.root / "roadmap"
@@ -354,12 +361,16 @@ class SourceWindows(unittest.TestCase):
         mapping = MigrationMap(commits={first: PullSource(self.github, 7)})
         map_file = self.root / "history-map.json"
         map_file.write_text(json.dumps(mapping.record()))
-        docs = SimpleNamespace(
-            source_commit=lambda: tip,
-            generation="fixture",
-            require_coverage=lambda _: None,
-            pin=lambda: {"source_commit": tip},
-        )
+        base = "https://docs.example/docs"
+        raw = gzip.compress(json.dumps({
+            "schema_version": 1, "source_commit": tip,
+            "provenance": {"toolchain": "leanprover/lean4:v4.0.0", "doc_gen": "test"},
+            "modules": {"TauCeti/A.lean": {"alpha": {
+                "kind": "theorem", "file": "TauCeti/A.lean", "start": 1, "end": 1,
+                "doc": "Alpha.", "url": base + "/TauCeti/A.html#alpha",
+            }}},
+        }).encode())
+        saved = self.root / "plan.json"
         original = window.git_history.read
         reads = []
 
@@ -368,30 +379,34 @@ class SourceWindows(unittest.TestCase):
             return original(repo, revision)
 
         with (
-            patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(map_file)),
+            patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(map_file),
+                       TAUCETI_FACTS_CACHE=str(self.root / "facts-cache")),
+            patch.object(gh, "recent_roadmap_commits", return_value=[]),
+            patch.object(gh, "open_progress_prs", return_value=[]),
             patch.object(gh, "closed_prs_for_areas", return_value={"A": {7: None}, "B": {8: None}}),
             patch.object(plan, "_own_login", return_value="fixture"),
             patch.object(window.git_history, "read", side_effect=read),
-        ):
-            result = plan.build_plan(roadmap, self.root, commits=[], open_prs=[], ref="main", min_prs=1, docs=docs)
-        self.assertEqual(result["prs"], [7])
-        self.assertEqual(result["history_migration"], mapping.record())
-        self.assertEqual(reads.count(tip), 1)
-        self.assertIsNone(window._HISTORY_ROUND.get())
-        saved = self.root / "plan.json"
-        saved.write_text(json.dumps(result))
-        map_file.write_text("invalid current config")
-
-        def collect(*args, **kwargs):
-            self.assertEqual(window.current_migration().record(), mapping.record())
-            return {"declarations": [], "files": []}
-
-        with (
-            patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(map_file)),
-            patch.object(facts, "collect", side_effect=collect),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(cli.main(["facts", "--plan", str(saved), "--code-dir", str(self.root)]), 0)
+            docs = Docs(base=base, raw=raw)
+            with patch("progress.docs.discover", return_value=docs):
+                self.assertEqual(cli.main([
+                    "plan", "--roadmap-dir", str(roadmap), "--code-dir", str(self.root),
+                    "--ref", "main", "--min-prs", "1", "--out", str(saved),
+                ]), 0)
+            result = json.loads(saved.read_text())
+            self.assertEqual(result["prs"], [7])
+            self.assertNotIn("history_migration", result)
+            self.assertEqual(result["history_migration_sha256"], mapping.digest)
+            self.assertEqual(reads.count(tip), 1)
+            self.assertIsNone(window._HISTORY_ROUND.get())
+            map_file.write_text("invalid current config")
+            output = self.root / "facts.json"
+            self.assertEqual(cli.main([
+                "facts", "--plan", str(saved), "--code-dir", str(self.root), "--out", str(output),
+            ]), 0)
+        collected = json.loads(output.read_text())
+        self.assertEqual([(d["name"], d["pr"]) for d in collected["declarations"]], [("alpha", 7)])
         self.assertIsNone(window._MIGRATION.get())
 
     def test_empty_query_and_fragment_citations_are_rejected(self):
@@ -405,6 +420,35 @@ class SourceWindows(unittest.TestCase):
         self.assertEqual(window.window_prs(self.root, self.initial, sha), [7])
         sha = self.commit("ignored prose (#8)\n\nSource-PR: \u2003" + "x" * 20000)
         self.assertEqual(window.window_prs(self.root, "main~1", sha), [8])
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "SSH signing fixture requires ssh-keygen")
+    def test_git_signature_and_output_encoding_settings_do_not_change_framing(self):
+        key = self.root / "signing-key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True, capture_output=True)
+        signers = self.root / "allowed-signers"
+        signers.write_text("fixture@example.invalid " + key.with_suffix(".pub").read_text())
+        for name, value in (
+            ("gpg.format", "ssh"),
+            ("user.signingkey", str(key)),
+            ("commit.gpgsign", "true"),
+            ("gpg.ssh.allowedSignersFile", str(signers)),
+            ("log.showSignature", "true"),
+            ("i18n.logOutputEncoding", "ISO-8859-1"),
+        ):
+            subprocess.run(["git", "-C", str(self.root), "config", name, value], check=True, capture_output=True)
+        tip = self.commit("café contribution (#7)")
+        self.assertEqual(window.window_prs(self.root, self.initial, tip), [7])
+
+    def test_cli_reports_bad_operator_policy_without_a_traceback(self):
+        path = self.root / "invalid-map.json"
+        path.write_text("not JSON")
+        with (
+            patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(path)),
+            contextlib.redirect_stderr(io.StringIO()) as error,
+        ):
+            self.assertEqual(cli.main(["plan", "--roadmap-dir", str(self.root), "--code-dir", str(self.root)]), 1)
+        self.assertIn("invalid history configuration", error.getvalue())
+        self.assertNotIn("Traceback", error.getvalue())
 
 
 if __name__ == "__main__":

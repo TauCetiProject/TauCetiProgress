@@ -499,7 +499,7 @@ def build_plan(
 
     return {
         "documentation": docs.pin(),
-        "history_migration": window.current_migration().record(),
+        "history_migration_sha256": window.current_migration().digest,
         "roadmap": best["area"],
         "rel_dir": best["rel_dir"],
         "layers": area_layers,

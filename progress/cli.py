@@ -72,19 +72,24 @@ def cmd_due(args):
 
 
 def cmd_plan(args):
-    from . import plan
+    from . import plan, window
     from .docs import DocsGenerationChanged
+    from .provenance import ProvenanceError, retain_migration
 
+    migration = window.current_migration()
+    if not args.out and not migration.empty:
+        raise ProvenanceError("a nonempty history migration requires plan --out to retain its snapshot")
     try:
-        result = plan.build_plan(
-            roadmap_dir=args.roadmap_dir,
-            roadmap_ref=args.roadmap_ref,
-            code_dir=args.code_dir,
-            ref=args.ref,
-            idle_hours=args.idle_hours,
-            min_prs=args.min_prs,
-            only_area=args.area,
-        )
+        with window.using_migration(migration):
+            result = plan.build_plan(
+                roadmap_dir=args.roadmap_dir,
+                roadmap_ref=args.roadmap_ref,
+                code_dir=args.code_dir,
+                ref=args.ref,
+                idle_hours=args.idle_hours,
+                min_prs=args.min_prs,
+                only_area=args.area,
+            )
     except DocsGenerationChanged as exc:
         return _generation_changed("plan", exc)
     except plan.NotDue as exc:
@@ -100,6 +105,7 @@ def cmd_plan(args):
         sibling = target.with_name(target.name + ".facts-" + pin["facts_sha256"] + ".json.gz")
         Docs(pin=pin).retain(sibling)
         result["documentation"] = {**pin, "bundle_file": sibling.name}
+        result["history_migration_file"] = retain_migration(migration, target)
         out = plan.plan_json(result)
         if not store(target, (out + "\n").encode("utf-8")):
             raise ArtifactError(f"could not atomically retain plan at {target}")
@@ -112,7 +118,7 @@ def cmd_plan(args):
 def cmd_facts(args):
     from . import facts
     from . import window
-    from .provenance import MigrationMap, ProvenanceError
+    from .provenance import saved_migration
     from .docs import DocsGenerationChanged, ReplanRequired
 
     p = _load_plan(args.plan)
@@ -128,15 +134,7 @@ def cmd_facts(args):
     # The plan's PR list is the area filter. Without it `collect` would walk every merged PR in the
     # commit range, so a report on one roadmap would be grounded in every roadmap's work.
     try:
-        if "history_migration" in p:
-            try:
-                migration = MigrationMap.parse(p["history_migration"])
-            except ProvenanceError:
-                raise ReplanRequired("saved history migration is invalid; replan") from None
-        else:
-            migration = MigrationMap()
-            if window.current_migration().record() != migration.record():
-                raise ReplanRequired("legacy plan pins no configured history migration; replan")
+        migration = saved_migration(p, args.plan)
         with window.using_migration(migration):
             result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"],
                                    documentation=pin, bundle_path=bundle_path)
@@ -163,11 +161,17 @@ def _generation_changed(stage, exc):
 
 def cmd_apply(args):
     from . import apply as apply_mod
+    from .docs import FactsReplanRequired, ReplanRequired
+    from .provenance import saved_migration
 
     p = _load_plan(args.plan)
     from . import gh
 
     try:
+        try:
+            saved_migration(p, args.plan)
+        except FactsReplanRequired as exc:
+            raise ReplanRequired(str(exc)) from None
         return apply_mod.run(
             plan=p,
             status_body_file=args.status_body,
@@ -278,6 +282,7 @@ def main(argv=None):
     if getattr(args, "ref", None) is None:
         args.ref = plan_mod.CODE_REF
     from .docs import ArtifactError, ConfigurationError, FactsReplanRequired, ReplanRequired
+    from .provenance import ProvenanceError
 
     try:
         return args.fn(args)
@@ -289,6 +294,9 @@ def main(argv=None):
         return 78
     except ConfigurationError as exc:
         print(f"{args.cmd}: {exc}", file=sys.stderr)
+        return 1
+    except ProvenanceError as exc:
+        print(f"{args.cmd}: invalid history configuration: {exc}", file=sys.stderr)
         return 1
     except ArtifactError as exc:
         print(f"{args.cmd}: facts preparation unavailable: {exc}", file=sys.stderr)

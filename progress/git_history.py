@@ -19,14 +19,16 @@ class HistoryReadError(RuntimeError):
     pass
 
 
-def environment():
-    return {
+def environment(*, history=False):
+    result = {
         **os.environ,
         "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_GRAFT_FILE": os.devnull,
-        "GIT_NO_LAZY_FETCH": "1",
         "GIT_TERMINAL_PROMPT": "0",
     }
+    if history:
+        result["GIT_NO_LAZY_FETCH"] = "1"
+    return result
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,8 @@ def read(repo_dir, revision):
         str(repo_dir),
         "log",
         "--first-parent",
+        "--no-show-signature",
+        "--encoding=UTF-8",
         "--format=%H%x00%s%x00%B%x00",
         "--end-of-options",
         revision,
@@ -130,7 +134,7 @@ def read(repo_dir, revision):
     header = bytearray()
     current = None
     with tempfile.TemporaryFile() as errors:
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, env=environment()) as process:
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, env=environment(history=True)) as process:
             try:
                 while chunk := process.stdout.read(CHUNK_BYTES):
                     parts = chunk.split(b"\0")
@@ -159,8 +163,11 @@ def read(repo_dir, revision):
                             field = 0
                 if field or bytes(header).strip():
                     raise HistoryReadError("incomplete first-parent commit framing")
-                if process.wait() != 0:
-                    raise HistoryReadError("git could not read complete first-parent history")
+                if (code := process.wait()) != 0:
+                    errors.seek(0, os.SEEK_END)
+                    errors.seek(max(0, errors.tell() - 4096))
+                    detail = errors.read(4096).decode("utf-8", errors="replace").strip()
+                    raise HistoryReadError(f"git could not read complete first-parent history (exit {code}): {detail}")
             finally:
                 process.stdout.close()
                 if process.poll() is None:

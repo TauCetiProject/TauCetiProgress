@@ -4,6 +4,8 @@ These are source citations, not review or merge authority. Imported PR numbers
 only become current-source numbers through a supplied migration map.
 """
 
+import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -15,6 +17,7 @@ from tauceti_tools.ci_candidate import read_json
 from tauceti_tools.forge import GITHUB, Forge, RepositoryRef
 
 _TRAILER_RE = re.compile(r"^(?P<token>[A-Za-z][A-Za-z0-9-]*):[ \t]+(?P<value>\S.*?)\s*$")
+MAX_MAP_BYTES = 16 * 1024 * 1024
 
 
 class ProvenanceError(ValueError):
@@ -164,9 +167,20 @@ class MigrationMap:
     def record(self):
         return {
             "schema": "tauceti-progress.migration/v1",
-            "mappings": [{"from": before.key, "to": after.key} for before, after in self._mapping.items()],
+            "mappings": [
+                {"from": before.key, "to": after.key}
+                for before, after in sorted(self._mapping.items(), key=lambda pair: pair[0].key)
+            ],
             "commits": {sha: citation.key if citation else None for sha, citation in self.commits.items()},
         }
+
+    @property
+    def digest(self):
+        return hashlib.sha256(json.dumps(self.record(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    @property
+    def empty(self):
+        return not self._mapping and not self.commits
 
     def number(self, citation, repository):
         if citation.repository.key == repository.key:
@@ -187,9 +201,62 @@ def configured_migration():
         if not path.is_absolute():
             raise ValueError
         with path.open("rb") as stream:
-            raw = stream.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
+            raw = stream.read(MAX_MAP_BYTES + 1)
+        if len(raw) > MAX_MAP_BYTES:
             raise ValueError
-        return MigrationMap.parse(read_json(raw, max_bytes=1024 * 1024))
+        return MigrationMap.parse(read_json(raw, max_bytes=MAX_MAP_BYTES))
+    except ProvenanceError:
+        raise
     except (OSError, ValueError, TypeError):
         raise ProvenanceError("configured history migration is unavailable or invalid") from None
+
+
+def policy_digest(value):
+    """Validate a retained policy identity without putting the table in the plan."""
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ProvenanceError("invalid saved history migration digest")
+    return value
+
+
+def retain_migration(migration, plan_path):
+    """Retain the configuration beside the plan, like its existing facts bundle."""
+    from .docs import ArtifactError, store
+
+    target = Path(plan_path)
+    sibling = target.with_name(target.name + ".history-" + migration.digest + ".json")
+    raw = json.dumps(migration.record(), sort_keys=True, separators=(",", ":")).encode()
+    if len(raw) > MAX_MAP_BYTES or not store(sibling, raw):
+        raise ArtifactError("could not retain history migration beside the plan")
+    return sibling.name
+
+
+def saved_migration(plan, plan_path):
+    """Restore the plan's exact policy; current configuration cannot reinterpret it."""
+    from .docs import FactsReplanRequired, ReplanRequired
+
+    if "history_migration_sha256" not in plan:
+        if "history_migration_file" in plan or "history_migration" in plan:
+            raise ReplanRequired("saved history migration has no digest; replan")
+        if not configured_migration().empty:
+            raise FactsReplanRequired("legacy plan pins no configured history migration; replan")
+        return MigrationMap()
+    try:
+        digest = policy_digest(plan["history_migration_sha256"])
+        name = plan.get("history_migration_file")
+        if name is None and digest == MigrationMap().digest:
+            return MigrationMap()
+        if (
+            not isinstance(name, str) or name in ("", ".", "..")
+            or "/" in name or "\\" in name or any(ord(c) < 32 for c in name)
+        ):
+            raise ProvenanceError("invalid saved migration filename")
+        with (Path(plan_path).parent / name).open("rb") as stream:
+            raw = stream.read(MAX_MAP_BYTES + 1)
+        migration = MigrationMap.parse(read_json(raw, max_bytes=MAX_MAP_BYTES))
+        if migration.digest != digest:
+            raise ProvenanceError("saved migration digest differs from its record")
+        return migration
+    except FileNotFoundError:
+        raise FactsReplanRequired("saved history migration is missing; replan") from None
+    except (OSError, ValueError, TypeError):
+        raise ReplanRequired("saved history migration is invalid; retain artifacts and replan") from None

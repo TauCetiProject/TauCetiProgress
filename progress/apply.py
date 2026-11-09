@@ -85,6 +85,12 @@ def pr_body(plan, section_header, version=None):
         "prs": sorted(plan["prs"]),
         "version": version,
     }
+    if "history_migration_sha256" in plan:
+        from .provenance import ProvenanceError, policy_digest
+        try:
+            meta["history_migration_sha256"] = policy_digest(plan["history_migration_sha256"])
+        except ProvenanceError as exc:
+            raise ApplyError(str(exc)) from None
     return (
         f"{BODY_MARKER.replace('{}', json.dumps(meta, sort_keys=True, separators=(',', ':')))}\n"
         f"This PR records progress on the {plan['roadmap']} roadmap for the window "
