@@ -4,10 +4,14 @@ These are source citations, not review or merge authority. Imported PR numbers
 only become current-source numbers through a supplied migration map.
 """
 
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import urlsplit
 
+from tauceti_tools.ci_candidate import read_json
 from tauceti_tools.forge import GITHUB, Forge, RepositoryRef
 
 _TRAILER_RE = re.compile(r"^(?P<token>[A-Za-z][A-Za-z0-9-]*):[ \t]+(?P<value>\S.*?)\s*$")
@@ -90,7 +94,12 @@ def commit_source(message, *, legacy_repository=None, subject=None):
             citations.add(PullSource.parse(value))
         if len(citations) != 1:
             raise ProvenanceError("ambiguous Source-PR citation")
-        citation = citations.pop()
+        return resolve_source(citations.pop(), number, legacy_repository)
+    return resolve_source(None, number, legacy_repository)
+
+
+def resolve_source(citation, number, legacy_repository):
+    if citation is not None:
         if number is not None and number != citation.number:
             raise ProvenanceError("merge subject conflicts with Source-PR citation")
         return citation
@@ -104,7 +113,7 @@ def commit_source(message, *, legacy_repository=None, subject=None):
 class MigrationMap:
     """An explicit one-to-one import/rename map; no number-preserving assumption."""
 
-    def __init__(self, rows=()):
+    def __init__(self, rows=(), *, commits=None):
         self._mapping = {}
         targets = set()
         for before, after in rows:
@@ -118,12 +127,22 @@ class MigrationMap:
             targets.add(after)
         if set(self._mapping) & targets:
             raise ProvenanceError("migration destinations must not be migration sources")
+        overrides = {}
+        if commits is not None and not isinstance(commits, dict):
+            raise ProvenanceError("commit overrides must be keyed by immutable SHA")
+        for sha, citation in (commits or {}).items():
+            if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) is None:
+                raise ProvenanceError("commit overrides require immutable SHA keys")
+            if citation is not None and not isinstance(citation, PullSource):
+                raise ProvenanceError("commit overrides require a citation or explicit null")
+            overrides[sha] = citation
+        self.commits = MappingProxyType(overrides)
 
     @classmethod
     def parse(cls, row):
         if (
             not isinstance(row, dict)
-            or set(row) != {"schema", "mappings"}
+            or not {"schema", "mappings"} <= set(row) <= {"schema", "mappings", "commits"}
             or row["schema"] != "tauceti-progress.migration/v1"
         ):
             raise ProvenanceError("invalid progress migration schema")
@@ -134,7 +153,20 @@ class MigrationMap:
             if not isinstance(pair, dict) or set(pair) != {"from", "to"}:
                 raise ProvenanceError("invalid progress migration entry")
             entries.append((PullSource.parse(pair["from"]), PullSource.parse(pair["to"])))
-        return cls(entries)
+        commits = row.get("commits", {})
+        if not isinstance(commits, dict):
+            raise ProvenanceError("invalid commit overrides")
+        return cls(
+            entries,
+            commits={sha: PullSource.parse(value) if value is not None else None for sha, value in commits.items()},
+        )
+
+    def record(self):
+        return {
+            "schema": "tauceti-progress.migration/v1",
+            "mappings": [{"from": before.key, "to": after.key} for before, after in self._mapping.items()],
+            "commits": {sha: citation.key if citation else None for sha, citation in self.commits.items()},
+        }
 
     def number(self, citation, repository):
         if citation.repository.key == repository.key:
@@ -143,3 +175,21 @@ class MigrationMap:
         if mapped is None or mapped.repository.key != repository.key:
             raise ProvenanceError("foreign source citation needs an explicit migration to the report repository")
         return mapped.number
+
+
+def configured_migration():
+    """Snapshot the operator-selected map; callers retain its record for later stages."""
+    selected = os.environ.get("TAUCETI_PROGRESS_HISTORY_MAP")
+    if not selected:
+        return MigrationMap()
+    try:
+        path = Path(selected)
+        if not path.is_absolute():
+            raise ValueError
+        with path.open("rb") as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError
+        return MigrationMap.parse(read_json(raw, max_bytes=1024 * 1024))
+    except (OSError, ValueError, TypeError):
+        raise ProvenanceError("configured history migration is unavailable or invalid") from None

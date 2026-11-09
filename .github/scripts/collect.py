@@ -157,6 +157,7 @@ def rev_parse(repo, ref):
     return proc.stdout.strip() or None if proc.returncode == 0 else None
 
 
+@window.history_round
 def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
     """The one legitimate `from_sha` for a roadmap's FIRST report, or None if it cannot be computed.
 
@@ -173,8 +174,8 @@ def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
     the SAME functions over the same data -- so the two agree by construction rather than by luck,
     which is what the previous attempts got wrong.
 
-    `--filter=blob:none --no-checkout` fetches commits without file contents: about a second and three
-    megabytes, since only commit subjects are read. This is not a checkout of pull-request content --
+    `--filter=blob:none --no-checkout` fetches commits without file contents. Commit provenance is
+    streamed and memoized for this call; unrelated message bodies are discarded. This is not a checkout of pull-request content --
     it is the upstream code repository, nothing from the pull request reaches it, and nothing in it is
     executed.
     """

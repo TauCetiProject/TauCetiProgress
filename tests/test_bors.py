@@ -163,6 +163,18 @@ class BorsTests(unittest.TestCase):
                 gh.closed_prs_for_area("PDE")
             self.assertIsNone(collect.bootstrap_cursor("PDE"))
 
+    def test_gate_bootstrap_reads_numberless_queue_source_citations(self):
+        sha = self.commit("queue contribution\n\nSource-PR: TauCetiProject/TauCeti#104")
+        self.rows = [{"number": 104, "mergedAt": None, "mergeCommit": {"oid": self.root}}]
+        real_run = subprocess.run
+        def run(args, **kwargs):
+            if args[:2] == ["git", "clone"]:
+                args = [*args[:-2], str(self.code), args[-1]]
+            return real_run(args, **kwargs)
+        with patch.object(gh, "gh", side_effect=self.github), patch.object(subprocess, "run", side_effect=run):
+            cursor = collect.bootstrap_cursor("PDE", ref="main")
+        self.assertEqual(cursor, window.first_parent_before(self.code, sha))
+
     def test_batched_histories_keep_independent_complete_connections(self):
         def connection(rows, more=False):
             return {"nodes": rows, "pageInfo": {"hasNextPage": more, "endCursor": "next" if more else None}}

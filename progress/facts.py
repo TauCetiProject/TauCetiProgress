@@ -111,6 +111,7 @@ def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None):
     return [path for path in touched if path in present]
 
 
+@window.history_round
 def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None, bundle_path=None):
     """The factual spine of a window.
 

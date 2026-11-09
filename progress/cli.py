@@ -111,6 +111,8 @@ def cmd_plan(args):
 
 def cmd_facts(args):
     from . import facts
+    from . import window
+    from .provenance import MigrationMap, ProvenanceError
     from .docs import DocsGenerationChanged, ReplanRequired
 
     p = _load_plan(args.plan)
@@ -126,8 +128,18 @@ def cmd_facts(args):
     # The plan's PR list is the area filter. Without it `collect` would walk every merged PR in the
     # commit range, so a report on one roadmap would be grounded in every roadmap's work.
     try:
-        result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"],
-                               documentation=pin, bundle_path=bundle_path)
+        if "history_migration" in p:
+            try:
+                migration = MigrationMap.parse(p["history_migration"])
+            except ProvenanceError:
+                raise ReplanRequired("saved history migration is invalid; replan") from None
+        else:
+            migration = MigrationMap()
+            if window.current_migration().record() != migration.record():
+                raise ReplanRequired("legacy plan pins no configured history migration; replan")
+        with window.using_migration(migration):
+            result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"],
+                                   documentation=pin, bundle_path=bundle_path)
     except DocsGenerationChanged as exc:
         return _generation_changed("facts", exc)
     except facts.FactsError as exc:

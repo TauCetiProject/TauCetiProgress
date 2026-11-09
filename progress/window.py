@@ -13,16 +13,18 @@ Pure functions take text and lists; the two that shell out to `git` are marked.
 """
 
 import os
-import re
 import subprocess
+from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 
 from tauceti_tools.forge import GITHUB, RepositoryRef
 
-from .provenance import MigrationMap, ProvenanceError, commit_source, subject_number
+from . import git_history
+from .provenance import MigrationMap, ProvenanceError, configured_migration, resolve_source, subject_number
 
 _HISTORY_ROUND = ContextVar("progress_history_round", default=None)
+_MIGRATION = ContextVar("progress_history_migration", default=None)
 MAX_HISTORY_ENTRIES = 4
 MAX_HISTORY_ROWS = 100_000
 
@@ -31,12 +33,30 @@ def history_round(function):
     """Memoize immutable local history only for one planning round, within fixed bounds."""
     @wraps(function)
     def run(*args, **kwargs):
+        migration = current_migration()
         token = _HISTORY_ROUND.set({})
+        policy = _MIGRATION.set(migration)
         try:
             return function(*args, **kwargs)
         finally:
             _HISTORY_ROUND.reset(token)
+            _MIGRATION.reset(policy)
     return run
+
+
+def current_migration():
+    return _MIGRATION.get() if _MIGRATION.get() is not None else configured_migration()
+
+
+@contextmanager
+def using_migration(migration):
+    if not isinstance(migration, MigrationMap):
+        raise GitError("history needs an explicit migration snapshot")
+    token = _MIGRATION.set(migration)
+    try:
+        yield
+    finally:
+        _MIGRATION.reset(token)
 
 
 # Windows track the `docgen` branch of TauCeti, NOT `main`.
@@ -62,6 +82,7 @@ def git(args, repo_dir):
         ["git", "-C", str(repo_dir), *args],
         capture_output=True,
         text=True,
+        env=git_history.environment(),
     )
     if proc.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed: {proc.stderr.strip() or proc.returncode}")
@@ -100,6 +121,7 @@ def is_ancestor(repo_dir, maybe_ancestor, descendant):
         ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", maybe_ancestor, descendant],
         capture_output=True,
         text=True,
+        env=git_history.environment(),
     )
     if proc.returncode == 0:
         return True
@@ -119,10 +141,11 @@ def has_commit(repo_dir, sha):
     return subprocess.run(
         ["git", "-C", str(repo_dir), "cat-file", "-e", f"{sha}^{{commit}}"],
         capture_output=True,
+        env=git_history.environment(),
     ).returncode == 0
 
 
-def first_parent_sources(repo_dir, revision, *, legacy_repository=None):
+def first_parent_sources(repo_dir, revision, *, legacy_repository=None, migration=None):
     """Qualified citations from complete commit messages, newest first.
 
     NUL framing preserves body lines; a repair may have appended notes after its
@@ -141,26 +164,33 @@ def first_parent_sources(repo_dir, revision, *, legacy_repository=None):
         if cache_key in cache:
             saved = cache.pop(cache_key)
             cache[cache_key] = saved
-            return list(saved)
-    log = git(["log", "--first-parent", "--format=%H%x00%s%x00%B%x00", "--end-of-options", revision, "--"], repo_dir)
-    parts = log.split("\0")
-    if len(parts) % 3 != 1 or parts[-1].strip():
-        raise GitError("unframed first-parent commit history")
-    out = []
-    for index in range(0, len(parts) - 1, 3):
-        sha, subject, message = parts[index].strip(), parts[index + 1], parts[index + 2]
-        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) is None:
-            raise GitError("invalid first-parent commit identity")
-        try:
-            citation = commit_source(message, legacy_repository=legacy_repository, subject=subject)
-        except ProvenanceError as error:
-            raise GitError(f"commit {sha[:12]}: {error}") from None
-        if citation is not None:
-            out.append((sha, citation))
-    if cache_key is not None and len(out) <= MAX_HISTORY_ROWS:
-        while cache and (len(cache) >= MAX_HISTORY_ENTRIES or sum(map(len, cache.values())) + len(out) > MAX_HISTORY_ROWS):
+            return _sources(saved, legacy_repository, migration)
+    try:
+        rows = git_history.read(repo_dir, revision)
+    except (git_history.HistoryReadError, OSError) as error:
+        raise GitError(str(error)) from None
+    if cache_key is not None and len(rows) <= MAX_HISTORY_ROWS:
+        while cache and (len(cache) >= MAX_HISTORY_ENTRIES or sum(map(len, cache.values())) + len(rows) > MAX_HISTORY_ROWS):
             del cache[next(iter(cache))]
-        cache[cache_key] = tuple(out)
+        cache[cache_key] = tuple(rows)
+    return _sources(rows, legacy_repository, migration)
+
+
+def _sources(rows, legacy_repository, migration=None):
+    out = []
+    migration = migration if migration is not None else current_migration()
+    for row in rows:
+        try:
+            if row.sha in migration.commits:
+                citation = migration.commits[row.sha]
+            else:
+                if row.error:
+                    raise ProvenanceError(row.error)
+                citation = resolve_source(row.citation, row.number, legacy_repository)
+        except ProvenanceError as error:
+            raise GitError(f"commit {row.sha[:12]}: {error}") from None
+        if citation is not None:
+            out.append((row.sha, citation))
     return out
 
 
@@ -176,12 +206,12 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
         raise GitError("report repository must be qualified")
     if legacy_repository is None and repository.forge == GITHUB:
         legacy_repository = repository
-    migration = migration if migration is not None else MigrationMap()
+    migration = migration if migration is not None else current_migration()
     if not isinstance(migration, MigrationMap):
         raise GitError("report migration must be an explicit source map")
     out = []
     seen = {}
-    for sha, citation in first_parent_sources(repo_dir, revision, legacy_repository=legacy_repository):
+    for sha, citation in first_parent_sources(repo_dir, revision, legacy_repository=legacy_repository, migration=migration):
         try:
             number = migration.number(citation, repository)
             if number in seen and seen[number] != citation:

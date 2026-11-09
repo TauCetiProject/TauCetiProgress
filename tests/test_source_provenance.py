@@ -1,18 +1,23 @@
 """Real mainline windows keep native and historical PR namespaces separate."""
 
+import contextlib
+import io
+import json
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from tauceti_tools.forge import GITHUB, Forge, RepositoryRef
 
-from progress import facts, window
+from progress import cli, facts, gh, plan, window
 from progress.provenance import MigrationMap, ProvenanceError, PullSource, commit_source
 
 
@@ -165,13 +170,12 @@ class SourceWindows(unittest.TestCase):
 
     def test_round_cache_reuses_immutable_history_but_ref_moves_and_new_rounds_reread(self):
         self.commit("one (#1)")
-        original = window.git
+        original = window.git_history.read
         log_reads = []
 
-        def counted(args, repo):
-            if args[0] == "log":
-                log_reads.append(args)
-            return original(args, repo)
+        def counted(repo, revision):
+            log_reads.append(revision)
+            return original(repo, revision)
 
         @window.history_round
         def round_():
@@ -183,7 +187,7 @@ class SourceWindows(unittest.TestCase):
             self.assertEqual(len(window.first_parent_sources(self.root, "main", legacy_repository=self.github)), 2)
             self.assertEqual(len(log_reads), 2)
 
-        with patch.object(window, "git", side_effect=counted):
+        with patch.object(window.git_history, "read", side_effect=counted):
             round_()
             window.first_parent_sources(self.root, "main", legacy_repository=self.github)
         self.assertEqual(len(log_reads), 3)
@@ -191,19 +195,18 @@ class SourceWindows(unittest.TestCase):
     def test_round_cache_bounds_and_legacy_namespaces_are_kept_separate(self):
         one = self.commit("one (#1)")
         self.commit("two (#2)")
-        original = window.git
+        original = window.git_history.read
         reads = []
 
-        def counted(args, repo):
-            if args[0] == "log":
-                reads.append(args)
-            return original(args, repo)
+        def counted(repo, revision):
+            reads.append(revision)
+            return original(repo, revision)
 
         @window.history_round
         def round_():
             for _ in range(2):
                 window.first_parent_sources(self.root, "main", legacy_repository=self.github)
-            self.assertEqual(len(reads), 2)  # Two citations exceed the one-row cache bound.
+            self.assertEqual(len(reads), 2)  # Three commits exceed the two-row cache bound.
             self.assertEqual(
                 window.first_parent_sources(self.root, one, legacy_repository=self.github)[0][1].repository, self.github
             )
@@ -212,15 +215,196 @@ class SourceWindows(unittest.TestCase):
             )
             cache = window._HISTORY_ROUND.get()
             self.assertLessEqual(len(cache), 1)
-            self.assertLessEqual(sum(map(len, cache.values())), 1)
+            self.assertLessEqual(sum(map(len, cache.values())), 2)
 
         with (
             patch.object(window, "MAX_HISTORY_ENTRIES", 1),
-            patch.object(window, "MAX_HISTORY_ROWS", 1),
-            patch.object(window, "git", side_effect=counted),
+            patch.object(window, "MAX_HISTORY_ROWS", 2),
+            patch.object(window.git_history, "read", side_effect=counted),
         ):
             round_()
         self.assertIsNone(window._HISTORY_ROUND.get())
+
+    def test_streaming_chunk_boundaries_and_large_unicode_line_do_not_retain_bodies(self):
+        source = PullSource(self.native, 7)
+        message = "huge (#7)\n\n" + "∀" * (3 * 1024 * 1024) + f"\nSource-PR: {source.key}\n"
+        # Avoid an argv limit and exclude fixture construction from the reader's memory budget.
+        subprocess.run(
+            ["git", "-C", str(self.root), "commit", "--allow-empty", "-q", "-F", "-"],
+            input=message.encode(),
+            env=self.env,
+            check=True,
+            capture_output=True,
+        )
+        del message
+        tracemalloc.start()
+        try:
+            self.assertEqual(window.window_prs(self.root, self.initial, "main", repository=self.native), [7])
+            _current, peak = tracemalloc.get_traced_memory()
+            self.assertLess(peak, 4 * 1024 * 1024)
+        finally:
+            tracemalloc.stop()
+        self.commit(f"boundary (#8)\n\n∀\nSource-PR: {PullSource(self.native, 8).key}\nRepair notes αβγ.")
+        # Exercise small chunks on just the last commit, not on the 9 MiB fixture.
+        with patch.object(window.git_history, "CHUNK_BYTES", 7):
+            self.assertEqual(window.window_prs(self.root, "main~1", "main", repository=self.native), [8])
+
+    def test_commit_overrides_repair_landed_ambiguity_and_can_explicitly_ignore_one_commit(self):
+        sha = self.commit("prose without a number\n\nSource-PR: invalid")
+        with self.assertRaisesRegex(window.GitError, sha[:12]):
+            window.window_prs(self.root, self.initial, sha)
+        repaired = MigrationMap.parse(
+            {
+                "schema": "tauceti-progress.migration/v1",
+                "mappings": [],
+                "commits": {sha: PullSource(self.github, 7).key},
+            }
+        )
+        self.assertEqual(window.window_prs(self.root, self.initial, sha, migration=repaired), [7])
+        ignored = MigrationMap(commits={sha: None})
+        self.assertEqual(window.window_prs(self.root, self.initial, sha, migration=ignored), [])
+        self.assertEqual(MigrationMap.parse(repaired.record()).record(), repaired.record())
+        with self.assertRaises(ProvenanceError):
+            MigrationMap(commits={"main": None})
+
+    def test_invalid_utf8_names_the_commit_and_a_trusted_override_can_resolve_it(self):
+        tree = window.git(["rev-parse", "HEAD^{tree}"], self.root).strip()
+        raw = (
+            f"tree {tree}\nparent {self.initial}\nauthor Fixture <fixture@example.invalid> 1 +0000\n"
+            "committer Fixture <fixture@example.invalid> 1 +0000\n\nbad (#7)\n\n"
+        ).encode() + b"invalid \xff\n"
+        sha = (
+            subprocess.run(
+                ["git", "-C", str(self.root), "hash-object", "-t", "commit", "-w", "--stdin"],
+                input=raw,
+                check=True,
+                capture_output=True,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        with self.assertRaisesRegex(window.GitError, f"{sha[:12]}: commit text is not valid UTF-8"):
+            window.window_prs(self.root, self.initial, sha)
+        self.assertEqual(
+            window.window_prs(
+                self.root, self.initial, sha, migration=MigrationMap(commits={sha: PullSource(self.github, 7)})
+            ),
+            [7],
+        )
+
+    def test_shallow_histories_bypass_the_round_cache(self):
+        self.commit("one (#1)")
+        clone = self.root / "shallow"
+        subprocess.run(
+            ["git", "clone", "-q", "--depth", "1", self.root.as_uri(), str(clone)], check=True, capture_output=True
+        )
+        original = window.git_history.read
+
+        @window.history_round
+        def round_():
+            with patch.object(window.git_history, "read", wraps=original) as read:
+                for _ in range(2):
+                    window.first_parent_sources(clone, "main", legacy_repository=self.github)
+                self.assertEqual(read.call_count, 2)
+                self.assertEqual(window._HISTORY_ROUND.get(), {})
+
+        round_()
+
+    def test_configured_map_is_frozen_during_a_round_and_errors_leave_no_context(self):
+        import json
+
+        path = self.root / "migration.json"
+        sha = self.commit("one (#1)")
+        first = MigrationMap(commits={sha: PullSource(self.github, 7)})
+        second = MigrationMap(commits={sha: None})
+        path.write_text(json.dumps(first.record()))
+
+        @window.history_round
+        def round_():
+            path.write_text(json.dumps(second.record()))
+            self.assertEqual(window.window_prs(self.root, self.initial, sha), [7])
+            return window.current_migration().record()
+
+        with patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(path)):
+            frozen = round_()
+            self.assertEqual(frozen, first.record())
+            with window.using_migration(MigrationMap.parse(frozen)):
+                self.assertEqual(window.window_prs(self.root, self.initial, sha), [7])
+            self.assertEqual(window.window_prs(self.root, self.initial, sha), [])
+            path.write_text("invalid JSON")
+            with self.assertRaises(ProvenanceError):
+                round_()
+        self.assertIsNone(window._HISTORY_ROUND.get())
+        self.assertIsNone(window._MIGRATION.get())
+
+    def test_local_replace_refs_cannot_change_canonical_commit_attribution(self):
+        sha = self.commit("one (#1)")
+        replacement = self.commit("different (#99)")
+        subprocess.run(["git", "-C", str(self.root), "replace", sha, replacement], check=True, capture_output=True)
+        self.assertEqual(window.window_prs(self.root, self.initial, sha), [1])
+
+    def test_real_plan_bootstrap_reuses_full_history_and_facts_restore_its_migration(self):
+        first = self.commit("ambiguous body\n\nSource-PR: not-a-citation")
+        tip = self.commit("second (#8)")
+        roadmap = self.root / "roadmap"
+        for area in ("A", "B"):
+            path = roadmap / "TauCetiRoadmap" / area
+            path.mkdir(parents=True)
+            (path / "README.md").write_text(f"# {area}\n")
+        mapping = MigrationMap(commits={first: PullSource(self.github, 7)})
+        map_file = self.root / "history-map.json"
+        map_file.write_text(json.dumps(mapping.record()))
+        docs = SimpleNamespace(
+            source_commit=lambda: tip,
+            generation="fixture",
+            require_coverage=lambda _: None,
+            pin=lambda: {"source_commit": tip},
+        )
+        original = window.git_history.read
+        reads = []
+
+        def read(repo, revision):
+            reads.append(revision)
+            return original(repo, revision)
+
+        with (
+            patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(map_file)),
+            patch.object(gh, "closed_prs_for_areas", return_value={"A": {7: None}, "B": {8: None}}),
+            patch.object(plan, "_own_login", return_value="fixture"),
+            patch.object(window.git_history, "read", side_effect=read),
+        ):
+            result = plan.build_plan(roadmap, self.root, commits=[], open_prs=[], ref="main", min_prs=1, docs=docs)
+        self.assertEqual(result["prs"], [7])
+        self.assertEqual(result["history_migration"], mapping.record())
+        self.assertEqual(reads.count(tip), 1)
+        self.assertIsNone(window._HISTORY_ROUND.get())
+        saved = self.root / "plan.json"
+        saved.write_text(json.dumps(result))
+        map_file.write_text("invalid current config")
+
+        def collect(*args, **kwargs):
+            self.assertEqual(window.current_migration().record(), mapping.record())
+            return {"declarations": [], "files": []}
+
+        with (
+            patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(map_file)),
+            patch.object(facts, "collect", side_effect=collect),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(cli.main(["facts", "--plan", str(saved), "--code-dir", str(self.root)]), 0)
+        self.assertIsNone(window._MIGRATION.get())
+
+    def test_empty_query_and_fragment_citations_are_rejected(self):
+        for suffix in ("?", "#"):
+            with self.assertRaises(ProvenanceError):
+                PullSource.parse(f"forgejo:https://forge.example/team/Math{suffix}#7")
+
+    def test_streaming_trailer_separator_whitespace_matches_queue_grammar(self):
+        source = PullSource(self.github, 7)
+        sha = self.commit("long separator (#7)\n\nSource-PR:" + " " * 20000 + source.key)
+        self.assertEqual(window.window_prs(self.root, self.initial, sha), [7])
+        sha = self.commit("ignored prose (#8)\n\nSource-PR: \u2003" + "x" * 20000)
+        self.assertEqual(window.window_prs(self.root, "main~1", sha), [8])
 
 
 if __name__ == "__main__":
