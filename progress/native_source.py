@@ -236,7 +236,7 @@ class NativeRepository:
             raise ValueError("source file path must stay inside the repository")
         if not isinstance(ref, str) or not ref or any(c in ref for c in "\0\r\n"):
             raise ValueError("source file ref is invalid")
-        commit = self.api.request("GET", self.path + "/commits/" + quote(ref, safe=""))
+        commit = self.api.request("GET", self.path + "/git/commits/" + quote(ref, safe=""))
         if not isinstance(commit, dict):
             raise Incomplete("Progress cursor ref is unavailable")
         revision = _sha(commit.get("sha"))
@@ -265,16 +265,19 @@ class NativeSource:
     content: NativeRepository
     roadmap: NativeRepository
     legacy_content: RepositoryRef | None = None
+    legacy_through: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.content, NativeRepository) or not isinstance(self.roadmap, NativeRepository):
             raise ValueError("Progress source needs explicit content and roadmap readers")
         if self.legacy_content is not None and not isinstance(self.legacy_content, RepositoryRef):
             raise ValueError("Progress legacy history namespace must be qualified")
+        _validate_boundary(self.legacy_content, self.legacy_through)
 
     @property
     def history_options(self):
-        return {"repository": self.content.repository, "legacy_repository": self.legacy_content}
+        return {"repository": self.content.repository, "legacy_repository": self.legacy_content,
+                "legacy_through": self.legacy_through}
 
     def record(self):
         legacy = self.legacy_content
@@ -282,17 +285,27 @@ class NativeSource:
             "schema": "tauceti-progress.source/v1",
             "content": self.content.identity.record(),
             "roadmap": self.roadmap.identity.record(),
+            "legacy_through": self.legacy_through,
             "legacy_content": None
             if legacy is None
             else {"forge": {"kind": legacy.forge.kind, "url": legacy.forge.url}, "name": legacy.name},
         }
 
 
+def _validate_boundary(legacy, boundary):
+    if (legacy is None) != (boundary is None):
+        raise ValueError("legacy namespace and immutable cutover commit must be supplied together")
+    if boundary is not None and (
+        not isinstance(boundary, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", boundary) is None
+    ):
+        raise ValueError("legacy cutover must be a full immutable commit SHA")
+
+
 def history_options_from_record(value):
     """Parse retained repository identities without consulting environment defaults."""
     if (
         not isinstance(value, dict)
-        or set(value) != {"schema", "content", "roadmap", "legacy_content"}
+        or set(value) != {"schema", "content", "roadmap", "legacy_content", "legacy_through"}
         or value["schema"] != "tauceti-progress.source/v1"
     ):
         raise ValueError("invalid saved Progress source binding")
@@ -308,4 +321,5 @@ def history_options_from_record(value):
         if not all(isinstance(value, str) for value in legacy["forge"].values()):
             raise ValueError("invalid saved legacy source origin")
         legacy = RepositoryRef(Forge(**legacy["forge"]), legacy["name"])
-    return {"repository": content.repository, "legacy_repository": legacy}
+    _validate_boundary(legacy, value["legacy_through"])
+    return {"repository": content.repository, "legacy_repository": legacy, "legacy_through": value["legacy_through"]}

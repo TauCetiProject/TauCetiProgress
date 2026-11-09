@@ -125,16 +125,28 @@ Reading every state prevents close/reopen events from changing scan membership.
 Counted pagination refuses changing totals when other membership changes would
 shift pages. Forgejo 17's creation-order sort breaks timestamp ties by issue ID.
 These are bounded observations, not an atomic snapshot of concurrently edited
-labels. Every native merge SHA on the selected first-parent window must match
-its PR attribution even after an area has a cursor; an unrecognized merge needs
+labels. API merge SHAs reachable in the selected window must have corresponding
+first-parent PR attribution, including merges nested on a side branch. A merge
+SHA on the first-parent chain must match that exact commit's attribution.
+This applies to GitHub and Forgejo, even after an area has a cursor; an unrecognized merge needs
 an approved commit override before another report can advance past it.
+An affected area aborts planning rather than advancing its cursor. Before upgrading
+the production Progress pin, audit current windows for this refusal and recover
+ambiguous commits through reviewed policy; the planner never rewinds existing cursors.
 Native in-flight ownership uses authenticated user and repository IDs rather
 than display logins. It trusts the canonical roadmap repository or a fork owned
 by the authenticated user; another organization-owned repository is not inferred
 to be the canonical source. Clients never select credentials or shared-service fallbacks.
 
 Native plans retain the qualified content/roadmap identities and an explicit
-legacy-history namespace in `source` (`tauceti-progress.source/v1`). Facts restores
+legacy-history namespace in `source` (`tauceti-progress.source/v1`). A legacy
+namespace requires `legacy_through`, the full immutable last imported commit SHA.
+Bare subjects on that commit's first-parent history use the legacy namespace;
+bare subjects after it use the current native repository. This prevents a newly
+allocated native number from being interpreted through an old renumbering map.
+The cutover must belong to the observed first-parent history; incomplete or
+divergent histories refuse. Older retained windows before cutover remain valid.
+Facts restores
 that binding through `source_record`, including the source origin in its output. This retained metadata identifies the
 namespace used for the calculation; it does not independently prove the origin
 of a caller-supplied checkout. Trusted callers remain responsible for fetching the
@@ -145,10 +157,16 @@ introduced through a native merge are credited to the merge that landed on main,
 rather than to an unlabelled feature-branch commit. A native merge with no
 recognizable source citation remains subject to the existing refusal/explicit
 commit-override rule.
+First-parent blame also changes GitHub merge attribution. Before a production
+pin upgrade, mechanically regenerate facts for unfinished windows under the new
+version and retain existing paid prose for inspection; do not silently reuse old
+facts as if calculated by the new version. Qualified writer context requires the
+same plan/facts source binding and qualified commentary from its content repository.
 
 The command-line entry points still use the legacy bootstrap and reject native
 project configurations. Apply also refuses qualified saved plans before any
-legacy GitHub operation, including direct library calls or a lost `--conf`;
+legacy GitHub operation, including direct library calls, superseded-report cleanup,
+or a lost `--conf`; an explicit null source binding also refuses factual collection;
 prepared prose remains available for the qualified publisher. Native publication/fork handling, trusted runtime binding, announcements and
 workflow integration must be completed before enabling that bootstrap. Retained
 local and remote publication commits must be checked against the policy that

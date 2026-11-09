@@ -54,6 +54,23 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
 
     `pr_details` is `[{number,title,body,url,merged_at}]`, newest first.
     """
+    if "source" in plan or "source" in fact_data:
+        from tauceti_tools.ci_candidate import RepositoryIdentity
+        from .docs import ReplanRequired
+        from .native_source import history_options_from_record
+
+        source = plan.get("source")
+        try:
+            history_options_from_record(source)
+            if fact_data.get("source") != source:
+                raise ValueError("facts source differs from plan")
+            expected = RepositoryIdentity.parse(source["content"])
+            for row in pr_details:
+                actual = RepositoryIdentity.parse(row.get("repository"))
+                if actual != expected or row.get("number") not in plan["prs"]:
+                    raise ValueError("PR commentary belongs to another source or window")
+        except (ValueError, TypeError, KeyError):
+            raise ReplanRequired("writing context source binding mismatch; preserve prepared artifacts") from None
     counts = fact_data["counts"]
     notes = []
 

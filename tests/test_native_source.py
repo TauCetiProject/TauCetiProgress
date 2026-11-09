@@ -20,7 +20,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from tauceti_tools.forge import GITHUB, Forge, ForgeError, Forgejo, Incomplete, RepositoryRef  # noqa: E402
 
-from progress import apply, cli, facts, files, gh, plan, window  # noqa: E402
+from progress import apply, cli, context, facts, files, gh, plan, window  # noqa: E402
 from progress.docs import Docs, ReplanRequired  # noqa: E402
 from progress.native_source import NativeRepository, NativeSource, history_options_from_record  # noqa: E402
 from progress.provenance import MigrationMap, PullSource  # noqa: E402
@@ -94,7 +94,7 @@ class NativePlanning(unittest.TestCase):
                     elif endpoint.startswith("pulls/"):
                         number = int(endpoint.split("/")[1])
                         body = next((row for row in outer.closed + outer.open if row["number"] == number), None)
-                    elif endpoint.startswith("commits/"):
+                    elif endpoint.startswith("git/commits/"):
                         body = {"sha": "a" * 40}
                     elif endpoint == "commits":
                         body = (
@@ -434,7 +434,7 @@ class NativePlanning(unittest.TestCase):
         sha = self.commit("Imported proof (#7)", "TauCeti/A.lean")
         self.closed = [self.row(103)]
         old = RepositoryRef(GITHUB, "old/Math")
-        source = NativeSource(self.content, self.roadmap, legacy_content=old)
+        source = NativeSource(self.content, self.roadmap, legacy_content=old, legacy_through=sha)
         mapping = MigrationMap([(PullSource(old, 7), PullSource(self.content.repository, 103))])
         with window.using_migration(mapping):
             collected = facts.collect(
@@ -460,7 +460,7 @@ class NativePlanning(unittest.TestCase):
         self.assertEqual(self.content.file_at("Area/PROGRESS.md"), "saved cursor")
         content_requests = [url for url, _ in self.requests if "/contents/" in url]
         self.assertEqual(parse_qs(urlsplit(content_requests[-1]).query)["ref"], ["a" * 40])
-        self.failures["repos/team/Code/commits/gone"] = 404
+        self.failures["repos/team/Code/git/commits/gone"] = 404
         with self.assertRaises(ForgeError):
             self.content.file_at("Area/PROGRESS.md", ref="gone")
         self.failures["repos/team/Code/contents/Area/PROGRESS.md"] = 404
@@ -479,6 +479,8 @@ class NativePlanning(unittest.TestCase):
         ):
             with self.assertRaisesRegex(apply.ApplyError, "qualified source publisher"):
                 apply.run(native_plan, "paid-status", "paid-section", self.root)
+            with self.assertRaisesRegex(apply.ApplyError, "qualified source publisher"):
+                apply.sweep(native_plan, "unused", "unused")
             self.assertEqual(
                 cli.main(
                     [
@@ -501,13 +503,71 @@ class NativePlanning(unittest.TestCase):
         record = self.source.record()
         self.assertEqual(history_options_from_record(record)["repository"], self.content.repository)
         old = RepositoryRef(GITHUB, "team/Code")
-        source = NativeSource(self.content, self.roadmap, legacy_content=old)
+        source = NativeSource(self.content, self.roadmap, legacy_content=old, legacy_through=self.initial)
         self.assertEqual(history_options_from_record(source.record())["legacy_repository"], old)
         bad = {**record, "content": {**record["content"], "id": True}}
         with self.assertRaises(ValueError):
             history_options_from_record(bad)
         with self.assertRaises(ReplanRequired):
             facts.collect(self.code, self.initial, self.initial, source_record=bad)
+
+    def test_cutover_disambiguates_reused_bare_numbers_and_survives_retention(self):
+        old = RepositoryRef(GITHUB, "old/Math")
+        boundary = self.commit("Imported proof (#200)", "old.txt")
+        native = self.commit("Native proof (#200)", "new.txt")
+        source = NativeSource(self.content, self.roadmap, legacy_content=old, legacy_through=boundary)
+        history = history_options_from_record(json.loads(json.dumps(source.record())))
+        mapping = MigrationMap([(PullSource(old, 200), PullSource(self.content.repository, 7))])
+        self.assertEqual(window.window_prs(self.code, self.initial, native, migration=mapping, **history), [200, 7])
+        self.assertEqual(window.window_prs(self.code, self.initial, boundary, migration=mapping, **history), [7])
+        with self.assertRaises(ValueError):
+            NativeSource(self.content, self.roadmap, legacy_content=old)
+        with self.assertRaises(ValueError):
+            NativeSource(self.content, self.roadmap, legacy_content=old, legacy_through="main")
+        subprocess.run(["git", "-C", str(self.code), "checkout", "-qb", "diverged", self.initial], check=True)
+        diverged = self.commit("Other branch (#200)", "diverged.txt")
+        with self.assertRaisesRegex(window.GitError, "cutover commit"):
+            window.window_prs(self.code, self.initial, diverged, migration=mapping, **history)
+
+    def test_nested_landed_merge_is_checked_in_bootstrap_and_existing_window(self):
+        branch = window.git(["branch", "--show-current"], self.code).strip()
+        subprocess.run(["git", "-C", str(self.code), "checkout", "-qb", "nested"], check=True)
+        nested = self.commit("Unrecognized landed change", "nested.txt")
+        subprocess.run(["git", "-C", str(self.code), "checkout", "-q", branch], check=True)
+        self.commit("Independent change", "main.txt")
+        subprocess.run(["git", "-C", str(self.code), "merge", "--no-ff", "-qm", "Aggregate", "nested"],
+                       env=self.git_env, check=True)
+        head = self.commit("Recognized change (#9)", "later.txt")
+        self.assertEqual(plan.unaccounted_prs(self.code, {8: nested, 9: head}, ref=head), [8])
+        with self.assertRaisesRegex(window.GitError, "no matching source provenance"):
+            plan.area_window(self.code, {8: nested, 9: head}, self.initial, head)
+        excluded = MigrationMap([], commits={nested: None})
+        self.assertEqual(plan.unaccounted_prs(self.code, {8: nested, 9: head}, ref=head, migration=excluded), [])
+        self.assertEqual(plan.area_window(self.code, {8: nested, 9: head}, self.initial, head,
+                                          migration=excluded), [9])
+
+    def test_explicit_null_source_facts_never_falls_back_to_github(self):
+        saved = self.root / "null-source.json"
+        saved.write_text(json.dumps({"source": None}))
+        with patch.object(facts, "collect", side_effect=AssertionError("null source reached legacy facts")):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(["facts", "--plan", str(saved), "--code-dir", str(self.code)]), 78)
+
+    def test_writer_context_requires_matching_qualified_facts_and_commentary(self):
+        p = {"source": self.source.record(), "roadmap": "Area", "from_sha": self.initial,
+             "to_sha": self.initial, "prs": [7]}
+        f = {"source": self.source.record(), "declarations": [],
+             "counts": {"prs": 1, "declarations": 0, "new": 0, "documented": 0, "files": 0}}
+        detail = {"number": 7, "title": "Proof", "body": "", "repository": self.content.identity.record()}
+        self.assertIn("Proof", context.render(p, f, [detail]))
+        for facts_record, details in [
+            ({k: v for k, v in f.items() if k != "source"}, [detail]),
+            (f, [{k: v for k, v in detail.items() if k != "repository"}]),
+            (f, [{**detail, "repository": self.roadmap.identity.record()}]),
+            (f, [{**detail, "number": 8}]),
+        ]:
+            with self.assertRaises(ReplanRequired):
+                context.render(p, facts_record, details)
 
     def test_native_in_flight_ownership_uses_ids_not_reused_logins(self):
         actor = {"login": "operator", "id": self.forge.key + "/users/21"}

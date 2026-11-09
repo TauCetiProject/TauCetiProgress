@@ -123,6 +123,8 @@ def cmd_facts(args):
     from .docs import DocsGenerationChanged, ReplanRequired
 
     p = _load_plan(args.plan)
+    if "source" in p and p["source"] is None:
+        raise ReplanRequired("invalid saved source repository binding; replan")
     pin = p.get("documentation")
     if pin is None:
         raise ReplanRequired("the plan pins no documentation facts; replan the window")

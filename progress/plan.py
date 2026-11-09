@@ -182,13 +182,16 @@ def area_window(repo_dir, area_prs, from_sha, to_sha, **history):
     Attribution is an intersection: git says which PRs are in the range, one label query says
     which PRs belong to the area. Order comes from git (newest first).
     """
+    revision = window.immutable_revision(repo_dir, f"{from_sha}..{to_sha}")
+    from_sha, to_sha = revision.split("..")
     numbers = window.window_prs(repo_dir, from_sha, to_sha, **history)
     # Native API merge SHAs must agree with the actual first-parent attribution
     # in this window, including after an area has already acquired its cursor.
     # Otherwise a later recognized PR could advance past an invisible merge.
     if isinstance(area_prs, dict) and any(area_prs.values()):
-        rows = dict(window.first_parent_prs(repo_dir, f"{from_sha}..{to_sha}", include_uncited=True, **history))
-        unaccounted = _unaccounted_merges(area_prs, rows, migration=history.get("migration"))
+        rows = dict(window.first_parent_prs(repo_dir, revision, include_uncited=True, **history))
+        unaccounted = _unaccounted_merges(area_prs, rows, window.reachable_commits(repo_dir, revision),
+                                         migration=history.get("migration"))
         if unaccounted:
             raise window.GitError("native merge has no matching source provenance in this window: "
                                   + ", ".join(f"#{n}" for n in unaccounted[:5]))
@@ -214,14 +217,17 @@ def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF, **history):
     than guessing a cursor. Bors squash merges rely on bors's guaranteed numbered commit subjects;
     GitHub does not provide a trustworthy landed SHA for those closures.
     """
-    rows = dict(window.first_parent_prs(repo_dir, ref, include_uncited=True, **history))
-    return _unaccounted_merges(area_prs, rows, migration=history.get("migration"))
+    revision = window.immutable_revision(repo_dir, ref)
+    rows = dict(window.first_parent_prs(repo_dir, revision, include_uncited=True, **history))
+    return _unaccounted_merges(area_prs, rows, window.reachable_commits(repo_dir, revision),
+                               migration=history.get("migration"))
 
 
-def _unaccounted_merges(area_prs, rows, *, migration=None):
+def _unaccounted_merges(area_prs, rows, reachable, *, migration=None):
     migration = migration if migration is not None else window.current_migration()
+    seen = set(rows.values())
     return [number for number, sha in sorted(area_prs.items())
-            if sha in rows and rows[sha] != number
+            if sha in reachable and (rows[sha] != number if sha in rows else number not in seen)
             and not (sha in migration.commits and migration.commits[sha] is None)]
 
 
@@ -238,6 +244,7 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF, **history):
     # before choosing a cursor or treating an unfetched earlier merge as documentation lag.
     if window.git(["rev-parse", "--is-shallow-repository"], repo_dir).strip() == "true":
         raise window.GitError(f"a full-history checkout is required to bootstrap an area ({area})")
+    ref = window.immutable_revision(repo_dir, ref)
     # The earliest to MERGE, not the lowest-numbered. Numbers are assigned when a pull request is
     # opened, and pull requests do not merge in the order they were opened; starting from the lowest
     # number would put the cursor after any labelled pull request that opened later but merged

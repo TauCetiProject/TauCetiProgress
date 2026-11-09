@@ -325,6 +325,8 @@ def sweep(plan, keep_branch, replacement_url):
 
     Only `gh` failures are caught. A parsing or programming error here is a bug and must surface.
     """
+    if "source" in plan:
+        raise ApplyError("qualified source publisher is required; preserve the prepared report")
     live = files.cursor(gh.file_on_default_branch(plan["progress_path"]) or "") or ""
     rows = superseded_prs(
         gh.open_progress_prs(), plan["roadmap"], live, plan["from_sha"], keep_branch,
