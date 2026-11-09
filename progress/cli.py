@@ -105,7 +105,8 @@ def cmd_plan(args):
         sibling = target.with_name(target.name + ".facts-" + pin["facts_sha256"] + ".json.gz")
         Docs(pin=pin).retain(sibling)
         result["documentation"] = {**pin, "bundle_file": sibling.name}
-        result["history_migration_file"] = retain_migration(migration, target)
+        if not migration.empty:
+            result["history_migration_file"] = retain_migration(migration, target)
         out = plan.plan_json(result)
         if not store(target, (out + "\n").encode("utf-8")):
             raise ArtifactError(f"could not atomically retain plan at {target}")

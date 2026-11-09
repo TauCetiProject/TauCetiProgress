@@ -138,7 +138,10 @@ facts. The [producer fixture](tests/fixtures/pages-facts/README.md) is the produ
 
 Production use requires the deployed site to serve the bundle, and a Worker Progress pin with
 bounded exit-76 mechanical retries (including `facts-replan-required`), exit-77/78 recovery
-handling, and retention of `bundle_file` siblings with plans. Until the bundle is served, plans wait
+handling, and retention of `bundle_file` siblings with plans. A nonempty
+[history migration policy](docs/source-provenance.md) additionally needs retention of
+`history_migration_file` siblings and policy-aware saved-work identity. Empty-policy
+plans need no additional file. Until the bundle is served, plans wait
 (77). Use an existing naturally due report to verify prepare/publish through the normal Worker path.
 Do not create a synthetic paid round, reset a cursor, or delete retained facts for acceptance.
 

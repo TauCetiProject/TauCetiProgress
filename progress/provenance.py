@@ -176,7 +176,13 @@ class MigrationMap:
 
     @property
     def digest(self):
-        return hashlib.sha256(json.dumps(self.record(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    def canonical_bytes(self):
+        raw = json.dumps(self.record(), sort_keys=True, separators=(",", ":")).encode()
+        if len(raw) > MAX_MAP_BYTES:
+            raise ProvenanceError("canonical history migration exceeds the size limit")
+        return raw
 
     @property
     def empty(self):
@@ -204,7 +210,9 @@ def configured_migration():
             raw = stream.read(MAX_MAP_BYTES + 1)
         if len(raw) > MAX_MAP_BYTES:
             raise ValueError
-        return MigrationMap.parse(read_json(raw, max_bytes=MAX_MAP_BYTES))
+        migration = MigrationMap.parse(read_json(raw, max_bytes=MAX_MAP_BYTES))
+        migration.canonical_bytes()
+        return migration
     except ProvenanceError:
         raise
     except (OSError, ValueError, TypeError):
@@ -224,8 +232,8 @@ def retain_migration(migration, plan_path):
 
     target = Path(plan_path)
     sibling = target.with_name(target.name + ".history-" + migration.digest + ".json")
-    raw = json.dumps(migration.record(), sort_keys=True, separators=(",", ":")).encode()
-    if len(raw) > MAX_MAP_BYTES or not store(sibling, raw):
+    raw = migration.canonical_bytes()
+    if not store(sibling, raw):
         raise ArtifactError("could not retain history migration beside the plan")
     return sibling.name
 
@@ -243,11 +251,14 @@ def saved_migration(plan, plan_path):
     try:
         digest = policy_digest(plan["history_migration_sha256"])
         name = plan.get("history_migration_file")
-        if name is None and digest == MigrationMap().digest:
+        if digest == MigrationMap().digest:
             return MigrationMap()
         if (
-            not isinstance(name, str) or name in ("", ".", "..")
-            or "/" in name or "\\" in name or any(ord(c) < 32 for c in name)
+            not isinstance(name, str)
+            or name in ("", ".", "..")
+            or "/" in name
+            or "\\" in name
+            or any(ord(c) < 32 for c in name)
         ):
             raise ProvenanceError("invalid saved migration filename")
         with (Path(plan_path).parent / name).open("rb") as stream:

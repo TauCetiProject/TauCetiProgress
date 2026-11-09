@@ -2,7 +2,6 @@
 """Prepare a history policy from a protected, immutable workflow checkout."""
 
 import argparse
-import json
 import pathlib
 import re
 import sys
@@ -67,7 +66,7 @@ def main(argv=None):
         output = pathlib.Path(args.output).absolute()
         if any(c in str(output) for c in "\r\n"):
             raise ValueError("invalid policy output path")
-        output.write_text(json.dumps(policy.record(), sort_keys=True) + "\n", encoding="utf-8")
+        output.write_bytes(policy.canonical_bytes())
         if args.github_env:
             with open(args.github_env, "a", encoding="utf-8") as stream:
                 stream.write(f"TAUCETI_PROGRESS_HISTORY_MAP={output}\n")

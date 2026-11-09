@@ -56,9 +56,10 @@ changes no Git objects. Use this only as reviewed operator configuration.
 Set `TAUCETI_PROGRESS_HISTORY_MAP` to the absolute path of that JSON file. It is
 bounded to 16 MiB and rejects duplicate JSON keys. The planner snapshots it once
 per round. `plan --out FILE` retains the record as a content-named sibling,
-`FILE.history-<sha256>.json`, using the same atomic writer as existing facts
+`FILE.history-<sha256>.json` for a nonempty policy, using the same atomic writer as existing facts
 artifacts. The small plan contains only `history_migration_sha256` and
-`history_migration_file`. Keep the sibling with the plan when moving retained
+`history_migration_file`. Empty policies are reconstructed from their fixed digest
+and need no sibling. Keep a nonempty policy sibling with the plan when moving retained
 artifacts. A nonempty policy requires `--out`. The facts command restores and
 verifies that snapshot, even if the original configuration changed or disappeared.
 A missing sibling requests a mechanical replan (76); corruption or a digest
@@ -93,7 +94,9 @@ close and mechanically replan reports still in flight under the previous digest;
 otherwise the gate refuses them until normal stale-report recovery runs. Preserve
 their paid outputs for inspection. The digest checks agreement with independently
 loaded policy, not authorship of the PR body. A Tools upgrade that changes
-repository-name normalization also changes this digest and needs coordination.
+repository-name normalization also changes nonempty policy digests and needs coordination.
+The validation runner needs Python with venv/ensurepip support and access to install
+the pinned dependencies. Malformed or duplicate PR metadata markers are refused.
 
 The existing GitHub planner, bootstrap checks and factual line attribution use
 the same reader. Commit bodies can supply missing citations even when a squash

@@ -1,6 +1,7 @@
 """Protected workflow policy snapshots and independent merge-policy comparison."""
 
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -14,7 +15,7 @@ from unittest.mock import patch
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from progress import apply, cli, facts, gate  # noqa: E402
+from progress import apply, cli, facts, gate, provenance, window  # noqa: E402
 from progress.docs import ReplanRequired  # noqa: E402
 from progress.provenance import MigrationMap, PullSource, retain_migration, saved_migration  # noqa: E402
 
@@ -99,8 +100,7 @@ class ProtectedPolicy(unittest.TestCase):
     def test_large_policy_is_retained_beside_small_plan_and_verified_on_restore(self):
         policy = MigrationMap(commits={f"{n:040x}": PullSource.parse(f"owner/Math#{n}") for n in range(1, 5001)})
         path = self.root / "plan.json"
-        plan = {"history_migration_sha256": policy.digest,
-                "history_migration_file": retain_migration(policy, path)}
+        plan = {"history_migration_sha256": policy.digest, "history_migration_file": retain_migration(policy, path)}
         self.assertLess(len(json.dumps(plan)), 300)
         self.assertEqual(saved_migration(plan, path).digest, policy.digest)
         with self.assertRaisesRegex(ReplanRequired, "invalid"):
@@ -111,8 +111,11 @@ class ProtectedPolicy(unittest.TestCase):
 
     def test_missing_or_corrupt_retained_policy_has_typed_recovery_before_work(self):
         path = self.root / "plan.json"
-        plan = {"documentation": {}, "history_migration_sha256": self.policy.digest,
-                "history_migration_file": retain_migration(self.policy, path)}
+        plan = {
+            "documentation": {},
+            "history_migration_sha256": self.policy.digest,
+            "history_migration_file": retain_migration(self.policy, path),
+        }
         path.write_text(json.dumps(plan))
         sidecar = path.parent / plan["history_migration_file"]
         for content, expected_facts in ((None, 76), ("bad JSON", 78)):
@@ -120,19 +123,187 @@ class ProtectedPolicy(unittest.TestCase):
                 sidecar.unlink()
             else:
                 sidecar.write_text(content)
-            with (patch.object(facts, "collect") as collect, patch.object(apply, "run") as publish,
-                  contextlib.redirect_stderr(io.StringIO())):
+            with (
+                patch.object(facts, "collect") as collect,
+                patch.object(apply, "run") as publish,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
                 self.assertEqual(cli.main(["facts", "--plan", str(path), "--code-dir", str(self.root)]), expected_facts)
-                self.assertEqual(cli.main([
-                    "apply", "--plan", str(path), "--status-body", "paid-status",
-                    "--section-body", "paid-section", "--roadmap-dir", str(self.root),
-                ]), 78)
+                self.assertEqual(
+                    cli.main(
+                        [
+                            "apply",
+                            "--plan",
+                            str(path),
+                            "--status-body",
+                            "paid-status",
+                            "--section-body",
+                            "paid-section",
+                            "--roadmap-dir",
+                            str(self.root),
+                        ]
+                    ),
+                    78,
+                )
             collect.assert_not_called()
             publish.assert_not_called()
 
+    def test_valid_policy_reaches_publication_with_saved_snapshot(self):
+        path = self.root / "plan.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "history_migration_sha256": self.policy.digest,
+                    "history_migration_file": retain_migration(self.policy, path),
+                }
+            )
+        )
+        with patch.object(apply, "run", return_value=0) as publish:
+            self.assertEqual(
+                cli.main(
+                    [
+                        "apply",
+                        "--plan",
+                        str(path),
+                        "--status-body",
+                        "paid-status",
+                        "--section-body",
+                        "paid-section",
+                        "--roadmap-dir",
+                        str(self.root),
+                    ]
+                ),
+                0,
+            )
+        publish.assert_called_once()
+
+    def test_empty_policy_plan_needs_no_sibling_even_when_moved_by_legacy_worker(self):
+        path = self.root / "plan.json"
+        result = {
+            "roadmap": "Area",
+            "from_sha": "c" * 40,
+            "to_sha": "d" * 40,
+            "prs": [7],
+            "documentation": {"facts_sha256": "e" * 64},
+            "history_migration_sha256": MigrationMap().digest,
+        }
+        with (
+            patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=""),
+            patch("progress.plan.build_plan", return_value=result),
+            patch("progress.docs.Docs"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                cli.main(
+                    [
+                        "plan",
+                        "--roadmap-dir",
+                        str(self.root),
+                        "--code-dir",
+                        str(self.root),
+                        "--out",
+                        str(path),
+                    ]
+                ),
+                0,
+            )
+        saved = json.loads(path.read_text())
+        self.assertNotIn("history_migration_file", saved)
+        self.assertEqual(list(self.root.glob("plan.json.history-*")), [])
+        # Also accept an empty-policy plan from a version that recorded a redundant filename.
+        saved["history_migration_file"] = "missing-empty-policy.json"
+        path.write_text(json.dumps(saved))
+
+        def collect(*args, **kwargs):
+            self.assertTrue(window.current_migration().empty)
+            return {"declarations": [], "files": []}
+
+        with (
+            patch.object(facts, "collect", side_effect=collect),
+            patch.object(apply, "run", return_value=0) as publish,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(cli.main(["facts", "--plan", str(path), "--code-dir", str(self.root)]), 0)
+            self.assertEqual(
+                cli.main(
+                    [
+                        "apply",
+                        "--plan",
+                        str(path),
+                        "--status-body",
+                        "paid-status",
+                        "--section-body",
+                        "paid-section",
+                        "--roadmap-dir",
+                        str(self.root),
+                    ]
+                ),
+                0,
+            )
+        publish.assert_called_once()
+
+    def test_canonical_expansion_exceeding_bound_is_configuration_error_before_snapshot(self):
+        record = {
+            "schema": "tauceti-progress.migration/v1",
+            "mappings": [],
+            "commits": {f"{n:040x}": "o/r#1" for n in range(4)},
+        }
+        raw = json.dumps(record, separators=(",", ":")).encode()
+        policy = MigrationMap.parse(record)
+        bound = len(raw)
+        self.assertGreater(len(policy.canonical_bytes()), bound)
+        original = self.checkout / "progress-history.json"
+        original.write_bytes(raw)
+        path = self.root / "oversize-plan.json"
+        with (
+            patch.object(provenance, "MAX_MAP_BYTES", bound),
+            patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(original)),
+            patch("progress.plan.build_plan") as build,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(
+                cli.main(
+                    [
+                        "plan",
+                        "--roadmap-dir",
+                        str(self.root),
+                        "--code-dir",
+                        str(self.root),
+                        "--out",
+                        str(path),
+                    ]
+                ),
+                1,
+            )
+            self.assertIn("size limit", errors.getvalue())
+            build.assert_not_called()
+            spec = importlib.util.spec_from_file_location("test_history_policy_script", SCRIPT)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.assertEqual(
+                module.main(
+                    [
+                        "--repository",
+                        "owner/Configuration",
+                        "--ref",
+                        "b" * 40,
+                        "--root",
+                        str(self.checkout),
+                        "--output",
+                        str(self.output),
+                    ]
+                ),
+                1,
+            )
+        self.assertFalse(self.output.exists())
+        self.assertFalse(path.exists())
+
     def test_nonempty_policy_requires_output_file_before_planning(self):
-        with (patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(self.checkout / "progress-history.json")),
-              patch("progress.plan.build_plan") as build, contextlib.redirect_stderr(io.StringIO())):
+        with (
+            patch.dict(os.environ, TAUCETI_PROGRESS_HISTORY_MAP=str(self.checkout / "progress-history.json")),
+            patch("progress.plan.build_plan") as build,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
             self.assertEqual(cli.main(["plan", "--roadmap-dir", str(self.root), "--code-dir", str(self.root)]), 1)
         build.assert_not_called()
 
