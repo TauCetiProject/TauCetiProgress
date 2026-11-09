@@ -521,8 +521,9 @@ class NativePlanning(unittest.TestCase):
         native = self.commit("Native proof (#200)", "new.txt")
         source = NativeSource(self.content, self.roadmap, legacy_content=old, legacy_through=boundary)
         history = history_options_from_record(json.loads(json.dumps(source.record())))
-        mapping = MigrationMap([(PullSource(old, 200), PullSource(self.content.repository, 7)),
-                                (PullSource(old, 199), PullSource(self.content.repository, 6))])
+        migration_rows = [(PullSource(old, 200), PullSource(self.content.repository, 7)),
+                          (PullSource(old, 199), PullSource(self.content.repository, 6))]
+        mapping = MigrationMap(migration_rows)
         @window.history_round
         def observations():
             return [window.window_prs(self.code, self.initial, tip, migration=mapping, **history)
@@ -542,12 +543,23 @@ class NativePlanning(unittest.TestCase):
             bootstrap_reads()
             self.assertEqual(reads.call_count, 1)
         self.assertEqual(window.window_prs(self.code, boundary, native, migration=mapping, **history), [200])
+        excluded_boundary = MigrationMap(migration_rows, commits={boundary: None})
+        self.assertEqual(window.window_prs(self.code, self.initial, native,
+                                           migration=excluded_boundary, **history), [200, 6])
         with self.assertRaises(window.GitError):
             window.window_prs(self.code, boundary, native, repository=self.content.repository)
         with self.assertRaises(ValueError):
             NativeSource(self.content, self.roadmap, legacy_content=old)
         with self.assertRaises(ValueError):
             NativeSource(self.content, self.roadmap, legacy_content=old, legacy_through="main")
+        branch = window.git(["branch", "--show-current"], self.code).strip()
+        subprocess.run(["git", "-C", str(self.code), "checkout", "-qb", "side-cursor", self.initial], check=True)
+        side = self.commit("Side change", "side.txt")
+        subprocess.run(["git", "-C", str(self.code), "checkout", "-q", branch], check=True)
+        subprocess.run(["git", "-C", str(self.code), "merge", "--no-ff", "-qm", "Land side change", "side-cursor"],
+                       env=self.git_env, check=True)
+        merged = window.head_sha(self.code, ref="HEAD")
+        self.assertEqual(window.window_prs(self.code, side, merged, migration=mapping, **history), [200, 7, 6])
         subprocess.run(["git", "-C", str(self.code), "checkout", "-qb", "diverged", self.initial], check=True)
         diverged = self.commit("Other branch (#200)", "diverged.txt")
         with self.assertRaisesRegex(window.GitError, "cutover commit"):
