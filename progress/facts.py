@@ -35,6 +35,7 @@ MAX_DOC_CHARS = 400
 # Each module costs a git blame, so a window touching an enormous number of modules is capped rather
 # than left to run away. The cap is reported when it bites.
 MAX_MODULES = 200
+_UNSET_SOURCE = object()
 
 _BLAME_LINE_RE = re.compile(r"\A([0-9a-f]{40}) \d+ (\d+)")
 
@@ -113,7 +114,8 @@ def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None, **histor
 
 
 @window.history_round
-def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None, bundle_path=None, source_record=None):
+def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None, bundle_path=None,
+            source_record=_UNSET_SOURCE):
     """The factual spine of a window.
 
     `to_sha` is the documented window end chosen by the plan, and `documentation` the plan's pin of
@@ -124,7 +126,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
     from .docs import ArtifactError, Docs, ReplanRequired
 
     history = {}
-    if source_record is not None:
+    if source_record is not _UNSET_SOURCE:
         from .native_source import history_options_from_record
         try:
             history = history_options_from_record(source_record)
@@ -231,7 +233,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
             f"changed, {removed} removed by the documented commit); refusing to report the window as empty"
         )
     return {
-        **({"source": source_record} if source_record is not None else {}),
+        **({"source": source_record} if source_record is not _UNSET_SOURCE else {}),
         "documentation": docs.pin(),
         "from_sha": from_sha,
         "to_sha": to_sha,

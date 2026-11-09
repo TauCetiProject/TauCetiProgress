@@ -236,7 +236,8 @@ class NativeRepository:
             raise ValueError("source file path must stay inside the repository")
         if not isinstance(ref, str) or not ref or any(c in ref for c in "\0\r\n"):
             raise ValueError("source file ref is invalid")
-        commit = self.api.request("GET", self.path + "/git/commits/" + quote(ref, safe=""))
+        commit = self.api.request("GET", self.path + "/git/commits/" + quote(ref, safe="")
+                                  + "?stat=false&verification=false&files=false")
         if not isinstance(commit, dict):
             raise Incomplete("Progress cursor ref is unavailable")
         revision = _sha(commit.get("sha"))

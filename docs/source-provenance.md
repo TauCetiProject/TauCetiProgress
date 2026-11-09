@@ -130,9 +130,13 @@ first-parent PR attribution, including merges nested on a side branch. A merge
 SHA on the first-parent chain must match that exact commit's attribution.
 This applies to GitHub and Forgejo, even after an area has a cursor; an unrecognized merge needs
 an approved commit override before another report can advance past it.
-An affected area aborts planning rather than advancing its cursor. Before upgrading
-the production Progress pin, audit current windows for this refusal and recover
+An affected area aborts planning for all areas rather than advancing its cursor. Before upgrading
+the production Progress pin, audit current windows and the complete bootstrap
+histories of never-reported areas for this refusal and recover
 ambiguous commits through reviewed policy; the planner never rewinds existing cursors.
+An override on a nested, off-first-parent SHA can explicitly exclude that commit;
+it cannot credit it as a separate first-parent contribution. Do not exclude valid
+contributions merely to clear the refusal without deciding how they should be reported.
 Native in-flight ownership uses authenticated user and repository IDs rather
 than display logins. It trusts the canonical roadmap repository or a fork owned
 by the authenticated user; another organization-owned repository is not inferred
@@ -146,8 +150,10 @@ bare subjects after it use the current native repository. This prevents a newly
 allocated native number from being interpreted through an old renumbering map.
 The cutover must belong to the observed first-parent history; incomplete or
 divergent histories refuse. Older retained windows before cutover remain valid.
-Facts restores
-that binding through `source_record`, including the source origin in its output. This retained metadata identifies the
+Without an explicit legacy namespace and cutover, bare native subjects remain
+ambiguous and refuse; qualified `Source-PR` citations work without that configuration.
+The configured cutover explicitly authorizes the namespace of later bare subjects.
+Facts restores that binding through `source_record`, including the source origin in its output. This retained metadata identifies the
 namespace used for the calculation; it does not independently prove the origin
 of a caller-supplied checkout. Trusted callers remain responsible for fetching the
 configured repository and immutable source objects.
@@ -161,7 +167,8 @@ First-parent blame also changes GitHub merge attribution. Before a production
 pin upgrade, mechanically regenerate facts for unfinished windows under the new
 version and retain existing paid prose for inspection; do not silently reuse old
 facts as if calculated by the new version. Qualified writer context requires the
-same plan/facts source binding and qualified commentary from its content repository.
+same plan/facts source binding, window endpoints, documentation pin and PR set,
+plus complete, non-duplicated qualified commentary from its content repository.
 
 The command-line entry points still use the legacy bootstrap and reject native
 project configurations. Apply also refuses qualified saved plans before any

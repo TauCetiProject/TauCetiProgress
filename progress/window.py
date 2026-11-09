@@ -160,7 +160,9 @@ def reachable_commits(repo_dir, revision, *, first_parent=False):
     cache = _HISTORY_ROUND.get()
     key = ("reachable", os.path.abspath(repo_dir), revision, first_parent)
     if cache is not None and key in cache:
-        return cache[key]
+        saved = cache.pop(key)
+        cache[key] = saved
+        return saved
     rows = frozenset(git(["rev-list", *(["--first-parent"] if first_parent else []), revision, "--"],
                          repo_dir).splitlines())
     if cache is not None and len(rows) <= MAX_HISTORY_ROWS \

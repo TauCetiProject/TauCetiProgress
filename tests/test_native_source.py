@@ -458,6 +458,9 @@ class NativePlanning(unittest.TestCase):
 
     def test_empty_content_and_missing_repository_are_distinct(self):
         self.assertEqual(self.content.file_at("Area/PROGRESS.md"), "saved cursor")
+        requests = [url for url, _ in self.requests if "/git/commits/" in url]
+        self.assertEqual(parse_qs(urlsplit(requests[-1]).query),
+                         {"stat": ["false"], "verification": ["false"], "files": ["false"]})
         content_requests = [url for url, _ in self.requests if "/contents/" in url]
         self.assertEqual(parse_qs(urlsplit(content_requests[-1]).query)["ref"], ["a" * 40])
         self.failures["repos/team/Code/git/commits/gone"] = 404
@@ -513,13 +516,21 @@ class NativePlanning(unittest.TestCase):
 
     def test_cutover_disambiguates_reused_bare_numbers_and_survives_retention(self):
         old = RepositoryRef(GITHUB, "old/Math")
+        earlier = self.commit("Earlier imported proof (#199)", "earlier.txt")
         boundary = self.commit("Imported proof (#200)", "old.txt")
         native = self.commit("Native proof (#200)", "new.txt")
         source = NativeSource(self.content, self.roadmap, legacy_content=old, legacy_through=boundary)
         history = history_options_from_record(json.loads(json.dumps(source.record())))
-        mapping = MigrationMap([(PullSource(old, 200), PullSource(self.content.repository, 7))])
-        self.assertEqual(window.window_prs(self.code, self.initial, native, migration=mapping, **history), [200, 7])
-        self.assertEqual(window.window_prs(self.code, self.initial, boundary, migration=mapping, **history), [7])
+        mapping = MigrationMap([(PullSource(old, 200), PullSource(self.content.repository, 7)),
+                                (PullSource(old, 199), PullSource(self.content.repository, 6))])
+        @window.history_round
+        def observations():
+            return [window.window_prs(self.code, self.initial, tip, migration=mapping, **history)
+                    for tip in (native, boundary, earlier, native)]
+        self.assertEqual(observations(), [[200, 7, 6], [7, 6], [6], [200, 7, 6]])
+        self.assertEqual(window.window_prs(self.code, boundary, native, migration=mapping, **history), [200])
+        with self.assertRaises(window.GitError):
+            window.window_prs(self.code, boundary, native, repository=self.content.repository)
         with self.assertRaises(ValueError):
             NativeSource(self.content, self.roadmap, legacy_content=old)
         with self.assertRaises(ValueError):
@@ -547,6 +558,8 @@ class NativePlanning(unittest.TestCase):
                                           migration=excluded), [9])
 
     def test_explicit_null_source_facts_never_falls_back_to_github(self):
+        with self.assertRaises(ReplanRequired):
+            facts.collect(self.code, self.initial, self.initial, source_record=None)
         saved = self.root / "null-source.json"
         saved.write_text(json.dumps({"source": None}))
         with patch.object(facts, "collect", side_effect=AssertionError("null source reached legacy facts")):
@@ -555,8 +568,10 @@ class NativePlanning(unittest.TestCase):
 
     def test_writer_context_requires_matching_qualified_facts_and_commentary(self):
         p = {"source": self.source.record(), "roadmap": "Area", "from_sha": self.initial,
-             "to_sha": self.initial, "prs": [7]}
+             "to_sha": self.initial, "prs": [7], "documentation": {"facts_sha256": "test", "bundle_file": "saved.gz"}}
         f = {"source": self.source.record(), "declarations": [],
+             "from_sha": self.initial, "to_sha": self.initial, "documentation": {"facts_sha256": "test"},
+             "prs": [{"number": 7}],
              "counts": {"prs": 1, "declarations": 0, "new": 0, "documented": 0, "files": 0}}
         detail = {"number": 7, "title": "Proof", "body": "", "repository": self.content.identity.record()}
         self.assertIn("Proof", context.render(p, f, [detail]))
@@ -565,6 +580,11 @@ class NativePlanning(unittest.TestCase):
             (f, [{k: v for k, v in detail.items() if k != "repository"}]),
             (f, [{**detail, "repository": self.roadmap.identity.record()}]),
             (f, [{**detail, "number": 8}]),
+            ({**f, "from_sha": "a" * 40}, [detail]),
+            ({**f, "documentation": {"facts_sha256": "other"}}, [detail]),
+            ({**f, "prs": []}, [detail]),
+            (f, [detail, detail]),
+            (f, []),
         ]:
             with self.assertRaises(ReplanRequired):
                 context.render(p, facts_record, details)
