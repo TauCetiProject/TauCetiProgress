@@ -244,18 +244,28 @@ jobs:
       # The refusal text quotes attacker-controlled strings -- a path from the diff, for instance --
       # so it is passed through `env:` and printed with printf. Interpolating `${{ }}` straight into
       # `run:` would splice that text into the shell, and this job holds a token.
+      #
+      # The comment ends with the head that was refused, as a line the reader does not see. A caller
+      # that offers open reports again on a schedule reads it to tell a refused head from one pushed
+      # since; the comment alone does not say, and runs overlap, so "the refusal written during my
+      # run" is not a safe guess. It is the last line because nothing quoted can stand there: the
+      # quoted text ends inside the code block, before the closing sentence.
       - name: Explain a refusal on the pull request
         if: steps.gate.outputs.verdict == 'refuse'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ inputs.pr }}
           REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.gate.outputs.head_sha }}
         run: |
           set -euo pipefail
           {
             printf 'The automated progress gate did not merge this pull request.\n\n```\n'
             sed -n 's/^REFUSED: //p' gate.out
             printf '```\n\nIt is left for a human to review.\n'
+            if [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              printf '\n<!-- progress-gate-refused-head: %s -->\n' "$HEAD_SHA"
+            fi
           } > refusal.md
           printf 'gate refused:\n'
           cat refusal.md
