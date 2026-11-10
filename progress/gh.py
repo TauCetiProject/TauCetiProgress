@@ -12,6 +12,7 @@ Two design points worth stating, because both were defects in an earlier draft:
 """
 
 import base64
+import datetime
 import fcntl
 import hashlib
 import json
@@ -328,6 +329,80 @@ def closed_prs_for_areas(areas, repo=CODE_REPO):
             except (ValueError, KeyError, TypeError, AttributeError) as exc:
                 raise GhError(f"could not read complete closed PR histories: {exc}") from exc
     return histories
+
+
+def closed_prs_since(since, repo=CODE_REPO, limit=1000):
+    """`{number: (label_names, native_merge_sha_or_None)}` for PRs closed at or after `since`.
+
+    One search, which GitHub caps at 1000 results: a caller must read a full result as "possibly
+    more". The SHA means what it does in `closed_prs_for_area`.
+    """
+    stamp = since.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = gh([
+        "pr", "list", "--repo", repo, "--state", "closed", "--search", f"closed:>={stamp}",
+        "--limit", str(int(limit)), "--json", "number,labels,mergedAt,mergeCommit",
+    ])
+    try:
+        found = {}
+        for row in json.loads(out):
+            sha = (row.get("mergeCommit") or {}).get("oid") if row["mergedAt"] else None
+            if row["mergedAt"] and not sha:
+                raise GhError(f"native merge SHA unavailable for PR #{row['number']}")
+            found[int(row["number"])] = ([label["name"] for label in row["labels"]], sha)
+        return found
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise GhError(f"could not parse closed PR search output: {exc}") from exc
+
+
+LABEL_CACHE_VERSION = 1
+LABEL_CACHE_FULL_HOURS = 24.0
+# The search is by close time; the margin absorbs clock skew between this host and GitHub and a
+# closure that was being recorded while the previous search ran.
+LABEL_CACHE_MARGIN = datetime.timedelta(hours=1)
+LABEL_CACHE_SEARCH_LIMIT = 1000
+
+
+def cached_closed_prs_for_areas(path, areas, repo=CODE_REPO, now=None):
+    """`closed_prs_for_areas`, answered from the JSON file `path` kept between runs.
+
+    A run after the first makes one search for the PRs closed since the previous run and files them
+    under their labels; only areas the file has not seen are read in full. The search cannot see a
+    label removed from a closed PR, or one added to a PR that closed before the previous run, so
+    every area is read in full again once the file is `LABEL_CACHE_FULL_HOURS` old, and whenever
+    the search comes back full. A file that is unreadable, for another repository or from another
+    version is discarded, and one that cannot be written costs the next run a full read.
+    """
+    from .docs import store
+
+    path = Path(path)
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    stamp = now.isoformat(timespec="seconds")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        age = (now - datetime.datetime.fromisoformat(data["full_at"])).total_seconds()
+        synced = datetime.datetime.fromisoformat(data["synced_at"])
+        if (data["version"] != LABEL_CACHE_VERSION or data["repo"] != repo
+                or not 0 <= age < LABEL_CACHE_FULL_HOURS * 3600
+                or not all(isinstance(prs, dict) for prs in data["areas"].values())):
+            raise ValueError("stale or foreign label cache")
+        closed = closed_prs_since(synced - LABEL_CACHE_MARGIN, repo=repo, limit=LABEL_CACHE_SEARCH_LIMIT)
+        if len(closed) >= LABEL_CACHE_SEARCH_LIMIT:
+            raise ValueError("more closed than one search returns")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        data = {"version": LABEL_CACHE_VERSION, "repo": repo, "full_at": stamp, "areas": {}}
+        closed = {}
+    cached = data["areas"]
+    for number, (labels, sha) in closed.items():
+        for label in labels:
+            if label.startswith(ROADMAP_LABEL_PREFIX) and label[len(ROADMAP_LABEL_PREFIX):] in cached:
+                cached[label[len(ROADMAP_LABEL_PREFIX):]][str(number)] = sha
+    missing = [area for area in dict.fromkeys(areas) if area not in cached]
+    if missing:
+        for area, prs in closed_prs_for_areas(missing, repo=repo).items():
+            cached[area] = {str(number): sha for number, sha in prs.items()}
+    data["synced_at"] = stamp
+    store(path, (json.dumps(data, sort_keys=True) + "\n").encode("utf-8"))
+    return {area: {int(number): sha for number, sha in cached[area].items()} for area in areas}
 
 
 def pr_details(numbers, repo=CODE_REPO):

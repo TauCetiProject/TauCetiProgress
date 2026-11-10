@@ -38,6 +38,33 @@ tauceti-progress announce --section FILE  post a new section to Zulip (idempoten
 `due` is the only one that runs often; it exits 75 ("no progress") when nothing is due, matching
 the worker's convention. `plan` runs at most once a day.
 
+### Choosing the roadmap
+
+`plan` uses the `busiest` strategy by default: it waits until no report has landed anywhere for 8
+hours, then takes the roadmap with the most PRs in its window, if it has at least 10.
+
+`plan --strategy threshold` decides per roadmap and has no project-wide cadence, for a caller that
+polls for work. With N the PRs in a roadmap's window and T the days since its last report landed
+(since its README was added, if it has never been reported), a roadmap qualifies when N > 0 and one
+of these holds: N + T > 10 (`--threshold`); it is archived under `Completed/`; or it is not yet
+assessed, meaning it has no report, or its report carries no coverage header bound to the README as
+it now stands, for it and each sub-roadmap. The merge gate's six-hour interval per roadmap is
+applied as well. Among the roadmaps that qualify the unassessed go first, then the largest N + T.
+An open report holds its area for 72 hours whoever opened it, as long as its head repository still
+exists. T is read from the roadmap checkout's history at `--roadmap-ref` (default `HEAD`), which
+must be complete.
+
+`--table FILE` (threshold only) writes every roadmap's standing as JSON, whether or not one
+qualifies: `chosen`, `next_qualifies_at`, `to_sha`, and one row per roadmap with `area`, `prs`,
+`days`, `score`, `assessed`, `complete`, `qualifies`, `qualifies_from` and `note`. When `plan` exits
+75, `next_qualifies_at` is the earliest time a roadmap qualifies with the PRs it has now, or null
+when only new PRs can make one qualify.
+
+`--skip-area AREA` (repeatable, either strategy) keeps a roadmap from being chosen.
+`--label-cache FILE` (either strategy) keeps each area's closed PRs between runs: a later run makes
+one search for what closed since the previous one, and the full labelled histories are read again
+once a day.
+
 ## The window cursor is a SHA, on the docs-tracking branch
 
 A window is the half-open commit range `(from_sha, to_sha]` on TauCeti's **`docgen`** branch, where

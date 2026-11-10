@@ -89,6 +89,11 @@ def cmd_plan(args):
                 idle_hours=args.idle_hours,
                 min_prs=args.min_prs,
                 only_area=args.area,
+                strategy=args.strategy,
+                threshold=args.threshold,
+                table_path=args.table,
+                label_cache=args.label_cache,
+                skip_areas=frozenset(args.skip_area),
             )
     except DocsGenerationChanged as exc:
         return _generation_changed("plan", exc)
@@ -230,6 +235,20 @@ def build_parser():
     p.add_argument("--idle-hours", type=float, default=None)
     p.add_argument("--min-prs", type=int, default=None)
     p.add_argument("--area", default=None, help="force a single area (testing)")
+    p.add_argument("--skip-area", action="append", default=[], metavar="AREA",
+                   help="never choose this roadmap (repeatable)")
+    p.add_argument("--strategy", choices=("busiest", "threshold"), default="busiest",
+                   help="busiest (default): the area with the most PRs, subject to --idle-hours and "
+                        "--min-prs. threshold: any roadmap whose PRs plus days since its last "
+                        "report exceed --threshold; see plan.py")
+    p.add_argument("--threshold", type=float, default=None,
+                   help="threshold only: the N + T a roadmap must exceed (default 10)")
+    p.add_argument("--table", default=None,
+                   help="threshold only: write every roadmap's standing under the rule to this "
+                        "JSON file, whether or not one qualifies")
+    p.add_argument("--label-cache", default=None,
+                   help="a JSON file that keeps each area's closed PRs between runs, so a later run "
+                        "asks GitHub only for what closed since")
     p.add_argument("--out", default=None, help="write the plan JSON here instead of stdout")
     p.set_defaults(fn=cmd_plan)
 
@@ -283,6 +302,8 @@ def main(argv=None):
         args.idle_hours = plan_mod.IDLE_HOURS
     if getattr(args, "min_prs", None) is None:
         args.min_prs = plan_mod.MIN_PRS
+    if getattr(args, "threshold", None) is None:
+        args.threshold = plan_mod.THRESHOLD
     if getattr(args, "ref", None) is None:
         args.ref = plan_mod.CODE_REF
     from .docs import ArtifactError, ConfigurationError, FactsReplanRequired, ReplanRequired
