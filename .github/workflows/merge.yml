@@ -76,6 +76,22 @@ on:
         required: false
         default: false
         type: boolean
+      hold_while_queue_busy:
+        description: >
+          Do not move `main` while the repository's merge queue holds entries. A report landing on
+          `main` resets every merge group in the queue, so a caller with a merge queue sets this for
+          its automatic runs and leaves it off for a dispatch by hand. A report held this way is
+          validated but not landed; its pull request stays open for the caller to offer again.
+        required: false
+        default: false
+        type: boolean
+      queue_stale_seconds:
+        description: >
+          With `hold_while_queue_busy`: a queue whose oldest entry was enqueued at least this long ago
+          is taken to be stuck for other reasons and does not hold a report back.
+        required: false
+        default: 7200
+        type: number
     secrets:
       APP_PRIVATE_KEY:
         required: true
@@ -318,6 +334,11 @@ jobs:
           BLOBS: ${{ needs.validate.outputs.blobs }}
           ROADMAP_DIR: ${{ needs.validate.outputs.roadmap_dir }}
           COMPLETED_DIR: ${{ needs.validate.outputs.completed_dir }}
+          HOLD_WHILE_QUEUE_BUSY: ${{ inputs.hold_while_queue_busy }}
+          QUEUE_STALE_SECONDS: ${{ inputs.queue_stale_seconds }}
+          # The queue is read with the job's own read-only token, not the App token: the App token
+          # is minted for writing, and nothing here should depend on what else it may read.
+          QUEUE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -368,6 +389,27 @@ jobs:
           message="$(printf 'progress: %s report\n\nValidated head %s against main %s.\nCloses #%s.\n' \
             "$AREA" "$HEAD_SHA" "$MAIN_SHA" "$PR")"
 
+          # The merge queue on `main`, as `idle` or a sentence saying what it holds. A repository
+          # without a merge queue is idle. Any failure to read it fails, rather than reading as idle.
+          queue_state() {
+            local q total oldest since
+            q="$(GH_TOKEN="$QUEUE_TOKEN" gh api graphql \
+                   -f query='query($o:String!,$n:String!){ repository(owner:$o,name:$n){ mergeQueue(branch:"main"){ entries(first:1){ totalCount nodes{ enqueuedAt } } } } }' \
+                   -f o="${REPO%/*}" -f n="${REPO#*/}" \
+                   --jq '.data.repository | if .mergeQueue == null then "0 " else (.mergeQueue.entries | "\(.totalCount) \(.nodes[0].enqueuedAt // "")") end')" || return 1
+            total="${q%% *}"; oldest="${q#* }"
+            [[ "$total" =~ ^[0-9]+$ ]] && [[ "$QUEUE_STALE_SECONDS" =~ ^[0-9]+$ ]] || return 1
+            if [ "$total" = 0 ] || [ -z "$oldest" ]; then
+              echo idle; return 0
+            fi
+            since="$(date -u -d "$oldest" +%s)" || return 1
+            if [ $(( $(date -u +%s) - since )) -ge "$QUEUE_STALE_SECONDS" ]; then
+              echo idle
+            else
+              echo "the merge queue holds $total pull request(s), the oldest enqueued $oldest"
+            fi
+          }
+
           base="$MAIN_SHA"
           landed=false
           for _ in 1 2 3 4 5; do
@@ -378,6 +420,25 @@ jobs:
             commit="$(gh api -X POST "repos/$REPO/git/commits" \
               -f message="$message" -f tree="$tree" -f parents[]="$base" --jq .sha)"
             printf 'built %s (tree %s, parent %s)\n' "${commit:0:7}" "${tree:0:7}" "${base:0:7}"
+
+            # Moving `main` resets every merge group in the repository's merge queue, each of which
+            # then rebuilds from the start; reports landing every few minutes can keep a queued pull
+            # request from ever finishing. A caller can look at the queue before it calls this
+            # workflow, but two waits for a runner and the validation lie between that look and this
+            # line. So the look that counts is here, directly before the swap and again before every
+            # retry. A report held here is not landed and its pull request stays open; the caller
+            # offers it again later. An unreadable queue stops the job: the caller asked for a
+            # guarantee that cannot be given, and nothing has been written to `main`.
+            if [ "$HOLD_WHILE_QUEUE_BUSY" = "true" ]; then
+              if ! queue="$(queue_state)"; then
+                echo "::error title=not landed::the merge queue could not be read, so the report was not landed"
+                exit 1
+              fi
+              if [ "$queue" != idle ]; then
+                echo "::notice title=held for the merge queue::$queue; this report was not landed and stays open"
+                break
+              fi
+            fi
 
             # force=false is the compare-and-swap. It fails if main is no longer at `base`, because
             # then this commit is not a fast-forward of it.
