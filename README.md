@@ -31,6 +31,7 @@ done by tested Python too.
 tauceti-progress due                      is an update due? (one API call, no clone)
 tauceti-progress plan   --roadmap-dir DIR pick the roadmap and the PR window
 tauceti-progress facts  --plan FILE       what declarations actually landed in the window
+tauceti-progress check  --plan FILE ...   hold the model's two bodies to the prompt and the facts
 tauceti-progress apply  --plan FILE ...   write the files, open the PR (resumable)
 tauceti-progress announce --section FILE  post a new section to Zulip (idempotent)
 ```
@@ -64,6 +65,17 @@ when only new PRs can make one qualify.
 `--label-cache FILE` (either strategy) keeps each area's closed PRs between runs: a later run makes
 one search for what closed since the previous one, and the full labelled histories are read again
 once a day.
+
+### Checking the prose
+
+`check --plan FILE --facts FILE --status-body FILE --section-body FILE --roadmap-dir DIR` renders
+the report as `apply` would, without committing anything, and then holds it to what the prompt asks:
+750 and 300 words, three paragraphs, the two status headings. It refuses a documentation link that
+was not copied from the facts or the previous report, one whose declaration is not in the plan's
+pinned documentation facts, a layer the previous report assessed that is now `unassessed` against
+the same README, and a report that assesses no layer. Findings are printed as `FAIL:` lines and the
+exit code is 1; the writing model can run it and repair what it reports. `--no-links` skips the
+lookup in the pinned facts.
 
 ## The window cursor is a SHA, on the docs-tracking branch
 
