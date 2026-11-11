@@ -9,6 +9,8 @@ read for a Forgejo repository or the reverse. The forge-specific half is a reade
 * `changes(cursor, areas)` -- `{number: (areas_labelled, sha_or_None)}`, every pull request whose
   membership may have changed since `cursor`, with its labels as they now are.
 
+A reader whose forge has no incremental read returns None from `start`, and every run reads in full.
+
 Neither forge's incremental read sees a label added to or removed from a pull request that has
 not otherwise changed, so the file is read in full again once it is `FULL_HOURS` old, and a planner
 rereads its chosen area in full (`refresh`) before it plans the report.
@@ -49,7 +51,7 @@ def read(path, areas, reader, binding, now=None):
     try:
         data = _load(path, binding)
         age = (now - datetime.datetime.fromisoformat(data["full_at"])).total_seconds()
-        if not 0 <= age < FULL_HOURS * 3600:
+        if not 0 <= age < FULL_HOURS * 3600 or data["cursor"] is None:
             raise ValueError("label cache is due a full read")
         cursor = reader.start(sorted(set(data["areas"]) | set(areas)))
         changed = reader.changes(data["cursor"], sorted(data["areas"]))

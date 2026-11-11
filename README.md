@@ -71,10 +71,10 @@ labelled PRs.
 
 `build_plan` also plans from a bound `NativeSource`, whose content and roadmap repositories are both
 on Forgejo; the command line binds none. Both strategies, the table, `--skip-area` and the label
-cache work with one. Forgejo cannot search by close time, so there the cache remembers the newest
-labelled PR number and the labelled PRs then open, and a later run lists the open ones again, reads
-the numbers above that, and fetches each formerly open PR that left the open list. The cache file
-names its forge and repository, so a file written for one is never read for another. Two things
+cache work with one. Forgejo cannot search by close or update time, and lists by creation time,
+which an import can set out of number order, so there each run reads the complete labelled listing,
+as an uncached plan does. The cache file names its forge and repository, so a file written for one
+is never read for another. Two things
 are not supported: content on Forgejo with the roadmap on GitHub, and `apply` of a plan made from a
 bound source, which it refuses.
 

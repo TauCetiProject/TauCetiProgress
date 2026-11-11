@@ -471,6 +471,35 @@ def test_the_planner_reads_through_the_label_cache_and_rereads_its_choice():
         assert refreshed == [(path, "Quiet"), (path, "Busy")], refreshed
 
 
+def test_a_new_area_does_not_move_the_cursor_past_what_existing_areas_saw():
+    from progress import label_cache
+
+    class Numbered:
+        """A forge whose cursor is the newest PR number; `arrive` lands after the next `changes`."""
+
+        def __init__(self):
+            self.prs, self.arrive = {}, {}
+
+        def full(self, areas):
+            return {a: {n: None for n, labelled in self.prs.items() if a in labelled} for a in areas}
+
+        def start(self, areas):
+            return max(self.prs, default=0)
+
+        def changes(self, cursor, areas):
+            rows = {n: (labelled, None) for n, labelled in self.prs.items() if n > cursor}
+            self.prs.update(self.arrive)
+            self.arrive = {}
+            return rows
+
+    path, forge = cache_file(), Numbered()
+    label_cache.read(path, ["A"], forge, "test", now=NOW)
+    forge.arrive = {7: {"A"}}
+    label_cache.read(path, ["A", "B"], forge, "test", now=NOW + datetime.timedelta(hours=1))
+    assert label_cache.read(path, ["A", "B"], forge, "test", now=NOW + datetime.timedelta(hours=2)) == \
+        {"A": {7: None}, "B": {}}
+
+
 def test_a_refreshed_area_replaces_its_entry_in_the_cache():
     path = cache_file()
     GitHub({"A": {1: None, 4: None}, "B": {2: None}}).read(path, ["A", "B"])

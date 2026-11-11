@@ -124,31 +124,42 @@ class NativeRepository:
         seen = {}
         for page in self._history_pages(label_ids):
             for row in page:
-                number, signature = _history_row(row)
+                if not isinstance(row, dict):
+                    raise Incomplete("Progress labelled history contains a non-object")
+                number = _number(row.get("number"), "PR number")
+                if row.get("state") not in {"open", "closed"} or type(row.get("merged")) is not bool:
+                    raise Incomplete("Progress labelled history has an unavailable closure or merge state")
+                if "labels" not in row:
+                    raise Incomplete("Progress labelled history labels are unavailable")
+                raw_labels = row["labels"]
+                if raw_labels is None:
+                    raw_labels = []
+                if not isinstance(raw_labels, list) or any(
+                    not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in raw_labels
+                ):
+                    raise Incomplete("Progress labelled history labels are unavailable")
+                sha = _sha(row.get("merge_commit_sha")) if row["merged"] else None
+                signature = (sha, frozenset(label["name"].casefold() for label in raw_labels))
                 if number in seen and seen[number] != signature:
                     raise Incomplete("Progress labelled history changed during pagination")
                 seen[number] = signature
                 for label in signature[1]:
                     if label in labels:
-                        histories[labels[label]][number] = signature[0]
+                        histories[labels[label]][number] = sha
         self.revalidate()
         return histories
 
-    def _history_pages(self, label_ids, state="all"):
-        for path in self._history_paths(label_ids, state):
-            yield from self.api.pages(path, counted=True)
-
-    def _history_paths(self, label_ids, state="all"):
+    def _history_pages(self, label_ids):
         # Forgejo 17's repeated label-ID filter is OR, which is exactly the
         # requested union. Keep URLs bounded and split large unions, not one
         # full repository history read per roadmap. Client-side grouping still
         # checks the returned names and deduplicates PRs shared across batches.
         if label_ids is None:
-            return [self.path + "/pulls?" + urlencode([("state", state)])]
-        return [
-            self.path + "/pulls?" + urlencode([("state", state), *[("labels", str(n)) for n in label_ids[offset : offset + 50]]])
-            for offset in range(0, len(label_ids), 50)
-        ]
+            yield from self.api.pages(self.path + "/pulls?state=all", counted=True)
+            return
+        for offset in range(0, len(label_ids), 50):
+            query = urlencode([("state", "all"), *[("labels", str(n)) for n in label_ids[offset : offset + 50]]])
+            yield from self.api.pages(self.path + "/pulls?" + query, counted=True)
 
     def pr_details(self, numbers):
         self._check_binding()
@@ -250,34 +261,14 @@ class NativeRepository:
         return text
 
 
-def _history_row(row):
-    """`(number, (merge_sha_or_None, casefolded_label_names))` for one row of a pull listing."""
-    if not isinstance(row, dict):
-        raise Incomplete("Progress labelled history contains a non-object")
-    number = _number(row.get("number"), "PR number")
-    if row.get("state") not in {"open", "closed"} or type(row.get("merged")) is not bool:
-        raise Incomplete("Progress labelled history has an unavailable closure or merge state")
-    if "labels" not in row:
-        raise Incomplete("Progress labelled history labels are unavailable")
-    raw_labels = row["labels"]
-    if raw_labels is None:
-        raw_labels = []
-    if not isinstance(raw_labels, list) or any(
-        not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in raw_labels
-    ):
-        raise Incomplete("Progress labelled history labels are unavailable")
-    sha = _sha(row.get("merge_commit_sha")) if row["merged"] else None
-    return number, (sha, frozenset(label["name"].casefold() for label in raw_labels))
-
-
 class LabelReader:
     """`label_cache`'s reader for a native repository, whose histories hold labelled pull requests
     in every state (see `NativeRepository.labelled_histories`).
 
-    Forgejo lists pull requests newest first and cannot search by close or update time, so the
-    cursor is the newest labelled number and the labelled pull requests then open. A later read
-    lists the open ones again, the numbers above the cursor until a page has none, and fetches each
-    formerly open one that left the open list: the only ones whose merge state can have changed.
+    Forgejo lists pull requests by creation time, which an import can set out of number order, and
+    cannot search by close or update time, so no listing prefix proves that nothing older changed.
+    Each run therefore reads the complete labelled listing of the areas it plans, as an uncached
+    plan does; the file keeps the cache's binding and format.
     """
 
     def __init__(self, repository):
@@ -287,53 +278,8 @@ class LabelReader:
     def full(self, areas):
         return self.repository.labelled_histories(areas) if areas else {}
 
-    def _labels(self, areas):
-        labels = {("roadmap/" + area).casefold(): area for area in areas}
-        if len(labels) != len(areas):
-            raise ValueError("roadmap areas have ambiguous case-insensitive labels")
-        return labels, self.repository._area_label_ids(labels)
-
-    def _open(self, label_ids):
-        rows = {}
-        if label_ids != []:
-            for page in self.repository._history_pages(label_ids, state="open"):
-                for row in page:
-                    number, signature = _history_row(row)
-                    rows[number] = signature
-        return rows
-
     def start(self, areas):
-        _labels, label_ids = self._labels(areas)
-        newest = 0
-        if label_ids != []:
-            for path in self.repository._history_paths(label_ids):
-                for page in self.repository.api.pages(path, counted=True):
-                    newest = max([newest, *(_history_row(row)[0] for row in page)])
-                    break
-        opened = sorted(self._open(label_ids))
-        cursor = {"areas": list(areas), "number": max([newest, *opened]), "open": opened}
-        self.repository.revalidate()
-        return cursor
-
-    def changes(self, cursor, areas):
-        if cursor["areas"] != list(areas) or type(cursor["number"]) is not int:
-            raise ValueError("label cursor covers other areas")
-        labels, label_ids = self._labels(areas)
-        opened = self._open(label_ids)
-        rows = dict(opened)
-        if label_ids != []:
-            for path in self.repository._history_paths(label_ids):
-                for page in self.repository.api.pages(path, counted=True):
-                    fresh = [(number, signature) for number, signature in map(_history_row, page)
-                             if number > cursor["number"]]
-                    rows.update(fresh)
-                    if not fresh:
-                        break
-        for number in sorted(set(cursor["open"]) - set(rows)):
-            rows[number] = _history_row(self.repository.api.pull(self.repository.repository, number))[1]
-        self.repository.revalidate()
-        return {number: ({labels[name] for name in names if name in labels}, sha)
-                for number, (sha, names) in rows.items()}
+        return None
 
     def read(self, path, areas, now=None):
         from . import label_cache

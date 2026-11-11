@@ -627,7 +627,7 @@ class NativePlanning(unittest.TestCase):
     def open_row(self, number, area="Area"):
         return {**self.row(number, area), "state": "open"}
 
-    def test_the_label_cache_reads_only_what_can_have_changed_since_the_previous_run(self):
+    def test_the_label_cache_reads_the_complete_labelled_listing_each_run(self):
         from progress.native_source import LabelReader
 
         cache = self.root / "labels.json"
@@ -636,38 +636,24 @@ class NativePlanning(unittest.TestCase):
         self.closed = [self.row(7, merged=True, sha="a" * 40), self.row(6), self.row(5, "Other")]
         self.assertEqual(reader.read(cache, ["Area", "Other"]),
                          {"Area": {9: None, 7: "a" * 40, 6: None}, "Other": {8: None, 5: None}})
-        saved = json.loads(cache.read_text())
-        self.assertEqual(saved["binding"], f"{self.content.repository.key}#11")
-        self.assertEqual(saved["cursor"], {"areas": ["Area", "Other"], "number": 9, "open": [8, 9]})
-
-        # 9 merged; 11 was opened and merged; 10 was opened unlabelled and labelled while open;
-        # 8 lost its label and closed. Nothing older is read again.
-        self.requests.clear()
+        self.assertEqual(json.loads(cache.read_text())["binding"], f"{self.content.repository.key}#11")
+        # 9 merged; 11 was opened and merged; 10 was labelled while open; 8 lost its label.
         self.open = [self.open_row(10)]
         self.closed = [self.row(11, merged=True, sha="b" * 40), self.row(9, merged=True, sha="c" * 40),
                        {**self.row(8), "labels": []}, *self.closed]
-        self.assertEqual(reader.read(cache, ["Area", "Other"]),
-                         {"Area": {11: "b" * 40, 10: None, 9: "c" * 40, 7: "a" * 40, 6: None}, "Other": {5: None}})
-        listed = [path for path, _ in self.requests if "/pulls" in path]
-        self.assertEqual([path.split("?")[0].rsplit("/", 1)[-1] for path in listed].count("8"), 1)
-        self.assertFalse(any(parse_qs(urlsplit(path).query).get("page") == ["3"] for path in listed), listed)
-        self.assertEqual(json.loads(cache.read_text())["cursor"], {"areas": ["Area", "Other"], "number": 11, "open": [10]})
+        expected = {"Area": {11: "b" * 40, 10: None, 9: "c" * 40, 7: "a" * 40, 6: None}, "Other": {5: None}}
+        self.assertEqual(reader.read(cache, ["Area", "Other"]), expected)
+        self.assertEqual(self.content.labelled_histories(["Area", "Other"]), expected)
 
-    def test_a_new_area_does_not_move_the_cursor_past_what_existing_areas_saw(self):
+    def test_the_label_cache_finds_an_imported_pr_listed_after_older_numbers(self):
         from progress.native_source import LabelReader
 
         cache, reader = self.root / "labels.json", LabelReader(self.content)
+        self.closed = [self.row(9), self.row(7)]
         reader.read(cache, ["Area"])
-        observe = LabelReader.changes
-
-        def changes(this, cursor, areas):
-            result = observe(this, cursor, areas)
-            self.closed = [self.row(7)]  # opened and closed after the existing areas were read
-            return result
-
-        with patch.object(LabelReader, "changes", changes):
-            reader.read(cache, ["Area", "Other"])
-        self.assertEqual(reader.read(cache, ["Area", "Other"]), {"Area": {7: None}, "Other": {}})
+        # #40 was imported with its original, older creation date, so it lists after #7.
+        self.closed = [self.row(9), self.row(7), self.row(40)]
+        self.assertEqual(reader.read(cache, ["Area"]), {"Area": {9: None, 7: None, 40: None}})
 
     def test_a_github_label_cache_is_never_read_for_a_native_repository(self):
         from progress.native_source import LabelReader
