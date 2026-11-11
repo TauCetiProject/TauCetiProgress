@@ -174,13 +174,16 @@ def _saved_bundle(p, plan_path):
 
 def cmd_check(args):
     from . import check
-    from .docs import Docs
+    from .docs import Docs, DocsGenerationChanged
 
     p = _load_plan(args.plan)
     docs = None
     if not args.no_links:
         pin, bundle_path = _saved_bundle(p, args.plan)
-        docs = Docs(pin=pin, bundle_path=bundle_path)
+        try:
+            docs = Docs(pin=pin, bundle_path=bundle_path)
+        except DocsGenerationChanged as exc:
+            return _generation_changed("check", exc)
     return check.run(p, args.facts, args.status_body, args.section_body, args.roadmap_dir, docs=docs)
 
 

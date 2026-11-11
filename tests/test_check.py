@@ -83,14 +83,17 @@ def run(status_body, section=SECTION, old=(None, None), docs=DOCS, readme_sha=RE
                             *old, docs=docs)
 
 
-def docs_with(*names):
+def bundle_with(*names):
     """The fixture bundle with further declarations in `Demo/A.lean`, each at its literal URL."""
     data = json.loads((pathlib.Path(__file__).parent / "fixtures/pages-facts/facts.json").read_text())
     alpha = data["modules"]["Demo/A.lean"]["Demo.alpha"]
     for name in names:
         data["modules"]["Demo/A.lean"][name] = {**alpha, "url": f"{BASE}/Demo/A.html#{name}"}
-    raw = gzip.compress(json.dumps(data).encode("utf-8"), mtime=0)
-    return Docs(base=BASE, cache_dir=tempfile.mkdtemp(dir=ROOT), raw=raw)
+    return gzip.compress(json.dumps(data).encode("utf-8"), mtime=0)
+
+
+def docs_with(*names):
+    return Docs(base=BASE, cache_dir=tempfile.mkdtemp(dir=ROOT), raw=bundle_with(*names))
 
 
 def test_a_sound_report_passes():
@@ -224,6 +227,9 @@ def test_the_command_reads_the_bundle_retained_beside_the_plan_and_exits_1_on_a_
         assert rc == 1 and "FAIL: missing or empty" in out, out
         (work / "bundle.json.gz").write_bytes(b"not the pinned bundle")
         assert command(status() + block("done", "partial"), "--no-links")[0] == 0
+        # The retained bundle is gone and the site now serves another build: only a new plan helps.
+        Docs._fetch = staticmethod(lambda url: bundle_with("Demo.redeployed"))
+        assert command(status() + block("done", "partial"))[0] == cli.EX_DOCS_GENERATION_CHANGED
     finally:
         Docs._fetch = original
 
