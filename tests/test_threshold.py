@@ -416,18 +416,42 @@ def test_a_github_failure_is_never_an_empty_history():
     assert json.loads(path.read_text())["synced_at"] == NOW.isoformat(timespec="seconds")
 
 
-def test_the_planner_reads_through_the_label_cache():
+def test_the_planner_reads_through_the_label_cache_and_rereads_its_choice():
     c, labels = quiet_and_busy()
-    path, calls = pathlib.Path(c.tmp.name) / "labels.json", []
+    path, calls, refreshed = pathlib.Path(c.tmp.name) / "labels.json", [], []
+    exact = dict(labels)
 
     def cached(file, areas, now=None):
         calls.append((file, sorted(areas), now))
         return {a: {n: None for n in labels[a]} for a in areas}
 
-    with patch.object(gh, "cached_closed_prs_for_areas", cached):
+    def refresh(file, area):
+        refreshed.append((file, area))
+        return {n: None for n in exact[area]}
+
+    with patch.object(gh, "cached_closed_prs_for_areas", cached), patch.object(gh, "refresh_cached_area", refresh):
         assert c.plan({}, strategy="threshold", label_cache=path)["roadmap"] == "Quiet"
-    assert calls == [(path, ["Busy", "Quiet"], NOW)], calls
+        assert calls == [(path, ["Busy", "Quiet"], NOW)] and refreshed == [(path, "Quiet")], (calls, refreshed)
+        # Quiet's labels were removed after the cache read them: the choice is made again without it.
+        exact["Quiet"], refreshed[:] = [], []
+        got = c.plan({}, strategy="threshold", label_cache=path, threshold=5)
+        assert got["roadmap"] == "Busy" and "Quiet: no merged PRs yet" in got["skipped"], got
+        assert refreshed == [(path, "Quiet"), (path, "Busy")], refreshed
     raises(ValueError, lambda: plan.build_plan(c.roadmap, c.code, label_cache=path, source=object()))
+
+
+def test_a_refreshed_area_replaces_its_entry_in_the_cache():
+    path = cache_file()
+    GitHub({"A": {1: None, 4: None}, "B": {2: None}}).read(path, ["A", "B"])
+    with patch.object(gh, "closed_prs_for_area", lambda area, repo=None: {6: "c6", 1: None}):
+        assert gh.refresh_cached_area(path, "A") == {6: "c6", 1: None}
+    data = json.loads(path.read_text())
+    assert data["areas"] == {"A": {"6": "c6", "1": None}, "B": {"2": None}}
+    assert data["full_at"] == data["synced_at"] == NOW.isoformat(timespec="seconds")
+    path.write_text("{not json")
+    with patch.object(gh, "closed_prs_for_area", lambda area, repo=None: {6: "c6"}):
+        assert gh.refresh_cached_area(path, "A") == {6: "c6"}
+    assert path.read_text() == "{not json"
 
 
 for _name, _fn in sorted(globals().items()):

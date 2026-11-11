@@ -637,11 +637,13 @@ def build_plan(
         histories = gh.cached_closed_prs_for_areas(label_cache, eligible, now=now)
     else:
         histories = source.content.labelled_histories(eligible) if source else gh.closed_prs_for_areas(eligible)
-    for area, (rel_dir, status_text, progress_text, from_sha) in eligible.items():
+
+    def consider(area):
+        rel_dir, status_text, progress_text, from_sha = eligible[area]
         area_prs = histories[area]
         if not area_prs:
             skipped.append(f"{area}: no merged PRs yet")
-            continue
+            return
 
         bootstrapped = False
         if from_sha is None:
@@ -649,10 +651,10 @@ def build_plan(
             bootstrapped = True
             if from_sha is None:
                 skipped.append(f"{area}: no labelled merges in {ref} yet; waiting for documentation")
-                continue
+                return
         if from_sha == to_sha:
             skipped.append(f"{area}: already at {to_sha[:7]}")
-            continue
+            return
 
         # An area bootstrapped from a pull request that merged after the documented build has a
         # cursor ahead of `to_sha`. Nothing is wrong: its window simply has not been published yet,
@@ -682,7 +684,7 @@ def build_plan(
                     f"{to_sha[:7]} — the documentation went backwards, or that cursor is wrong; "
                     f"waiting rather than reporting a backwards window"
                 )
-            continue
+            return
 
         # The SHA window is the authority on what belongs in a report, and deliberately the ONLY
         # authority. An earlier version also subtracted every PR number any previous section had
@@ -697,7 +699,7 @@ def build_plan(
         fresh = area_window(code_dir, area_prs, from_sha, to_sha, **history)
         if not fresh:
             skipped.append(f"{area}: nothing new since {from_sha[:7]}")
-            continue
+            return
 
         candidates.append(
             {
@@ -711,26 +713,49 @@ def build_plan(
             }
         )
 
-    if strategy == "threshold":
-        ranked, reason = choose_by_threshold(
-            areas, candidates, skipped, report_dates(roadmap_dir, roadmap_ref), roadmap_dir, to_sha,
-            now, threshold=threshold, table_path=table_path)
-        best = ranked[0]
-    else:
-        if not candidates:
-            raise NotDue("; ".join(skipped) or "no candidate areas")
+    for area in eligible:
+        consider(area)
 
-        ranked = sorted(
-            candidates,
-            key=lambda c: (-len(c["prs"]), c["area"]),
-        )
-        best = ranked[0]
-        if len(best["prs"]) < min_prs:
-            raise NotDue(
-                f"{cadence_reason}, but the busiest area ({best['area']}) has only "
-                f"{len(best['prs'])} PR(s) in its window (< {min_prs})"
+    def choose():
+        if strategy == "threshold":
+            ranked, reason = choose_by_threshold(
+                areas, candidates, skipped, dates, roadmap_dir, to_sha,
+                now, threshold=threshold, table_path=table_path)
+        else:
+            if not candidates:
+                raise NotDue("; ".join(skipped) or "no candidate areas")
+
+            ranked = sorted(
+                candidates,
+                key=lambda c: (-len(c["prs"]), c["area"]),
             )
-        reason = f"{cadence_reason}; {best['area']} has {len(best['prs'])} PR(s) since {best['from_sha'][:7]}"
+            best = ranked[0]
+            if len(best["prs"]) < min_prs:
+                raise NotDue(
+                    f"{cadence_reason}, but the busiest area ({best['area']}) has only "
+                    f"{len(best['prs'])} PR(s) in its window (< {min_prs})"
+                )
+            reason = f"{cadence_reason}; {best['area']} has {len(best['prs'])} PR(s) since {best['from_sha'][:7]}"
+        return ranked, reason
+
+    dates = report_dates(roadmap_dir, roadmap_ref) if strategy == "threshold" else None
+    ranked, reason = choose()
+    best = ranked[0]
+    # The cache cannot see a label added to a PR that closed before its last search, and a cursor
+    # recorded past that PR's merge would leave it out of every later window. So the chosen area is
+    # read in full before its window is planned, and the choice is made again if that changed it.
+    refreshed = set()
+    while label_cache is not None and best["area"] not in refreshed:
+        area = best["area"]
+        refreshed.add(area)
+        exact = gh.refresh_cached_area(label_cache, area)
+        if exact == histories[area]:
+            break
+        histories[area] = exact
+        candidates.remove(best)
+        consider(area)
+        ranked, reason = choose()
+        best = ranked[0]
     area_layers, area_readme_sha = read_area_layers(roadmap_dir, best["rel_dir"])
     sub_roadmaps = read_sub_roadmaps(roadmap_dir, best["area"], best["rel_dir"])
 

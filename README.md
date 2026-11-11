@@ -64,7 +64,9 @@ when only new PRs can make one qualify.
 `--skip-area AREA` (repeatable, either strategy) keeps a roadmap from being chosen.
 `--label-cache FILE` (either strategy) keeps each area's closed PRs between runs: a later run makes
 one search for what closed since the previous one, and the full labelled histories are read again
-once a day.
+once a day. The search misses a label added to a PR that had already closed, so the chosen roadmap's
+history is read in full before its plan is written: one more GraphQL query per plan, a page per 100
+labelled PRs.
 
 ### Checking the prose
 

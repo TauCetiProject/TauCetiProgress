@@ -135,8 +135,29 @@ class BorsTests(unittest.TestCase):
         self.tip = window.head_sha(self.code, ref="main")
         self.closed_since = [{"number": 104, "labels": [{"name": "roadmap/PDE"}],
                               "mergedAt": None, "mergeCommit": None}]
+        self.rows.append({"number": 104, "mergedAt": None, "mergeCommit": None})
         self.assertEqual(run(start + datetime.timedelta(hours=1))["prs"], [104, 102, 100, 101])
-        self.assertEqual([call[:2] for call in self.calls], [["pr", "list"]])
+        self.assertEqual([call[:2] for call in self.calls], [["pr", "list"], ["api", "graphql"]])
+
+    def test_a_label_added_after_closure_reaches_the_plan_that_moves_the_cursor(self):
+        (self.area / "PROGRESS.md").write_text(
+            files.new_progress_file("PDE") + files.render_section(
+                "PDE", self.root, self.bors, [101], "2026-01-01", "prose " * 60))
+        cache = pathlib.Path(self.tmp.name) / "labels.json"
+        start = datetime.datetime.now(datetime.timezone.utc)
+        labelled, self.rows = self.rows, [row for row in self.rows if row["number"] != 100]
+        with patch.object(gh, "gh", side_effect=self.github):
+            gh.cached_closed_prs_for_areas(cache, ["PDE"], now=start)
+        # #100 closed long before the cache's last search, so only a full read sees its new label.
+        self.rows, self.closed_since = labelled, []
+        with patch.object(gh, "gh", side_effect=self.github), \
+             patch("progress.docs.discover") as discover:
+            discover.return_value.source_commit.return_value = self.tip
+            discover.return_value.pin.return_value = {"source_commit": self.tip}
+            result = plan.build_plan(self.roadmap, self.code, commits=[], open_prs=[], ref="main",
+                                     min_prs=1, now=start + datetime.timedelta(hours=1), label_cache=cache)
+        self.assertEqual(result["prs"], [102, 100])
+        self.assertIn("100", json.loads(cache.read_text())["areas"]["PDE"])
 
     def test_unmerged_reachable_test_merge_sha_is_ignored(self):
         with patch.object(gh, "gh", side_effect=self.github):

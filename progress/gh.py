@@ -369,7 +369,9 @@ def cached_closed_prs_for_areas(path, areas, repo=CODE_REPO, now=None):
     under their labels; only areas the file has not seen are read in full. The search cannot see a
     label removed from a closed PR, or one added to a PR that closed before the previous run, so
     every area is read in full again once the file is `LABEL_CACHE_FULL_HOURS` old, and whenever
-    the search comes back full. A file that is unreadable, for another repository or from another
+    the search comes back full. Neither repairs a cursor already advanced past such a PR, so a
+    planner reads its chosen area in full (`refresh_cached_area`) before it plans the report. A file
+    that is unreadable, for another repository or from another
     version is discarded, and one that cannot be written costs the next run a full read.
     """
     from .docs import store
@@ -403,6 +405,24 @@ def cached_closed_prs_for_areas(path, areas, repo=CODE_REPO, now=None):
     data["synced_at"] = stamp
     store(path, (json.dumps(data, sort_keys=True) + "\n").encode("utf-8"))
     return {area: {int(number): sha for number, sha in cached[area].items()} for area in areas}
+
+
+def refresh_cached_area(path, area, repo=CODE_REPO):
+    """`closed_prs_for_area`, read in full and filed in the label cache at `path` in place of the
+    area's entry. A cache that cannot be read is left for its next full read."""
+    from .docs import store
+
+    prs = closed_prs_for_area(area, repo=repo)
+    path = Path(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data["version"] != LABEL_CACHE_VERSION or data["repo"] != repo or not isinstance(data["areas"], dict):
+            raise ValueError("stale or foreign label cache")
+    except (OSError, ValueError, KeyError, TypeError):
+        return prs
+    data["areas"][area] = {str(number): sha for number, sha in prs.items()}
+    store(path, (json.dumps(data, sort_keys=True) + "\n").encode("utf-8"))
+    return prs
 
 
 def pr_details(numbers, repo=CODE_REPO):
