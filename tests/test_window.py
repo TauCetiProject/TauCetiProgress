@@ -396,13 +396,25 @@ def reported(area, from_sha, to_sha, prs):
     return files.new_progress_file(area) + files.render_section(area, from_sha, to_sha, prs, "then", "Body.")
 
 
-def test_first_parent_prs_can_say_whether_the_subject_has_the_number():
+def test_citation_only_prs_are_the_commits_a_subject_reader_could_not_see():
     with tempfile.TemporaryDirectory() as code:
         shas = passed_history(code)
-        rows = window.first_parent_prs(code, shas[4], include_uncited=True, subjects=True)
-        assert rows == [(shas[4], 4, True), (shas[3], 3, True), (shas[2], 2, False), (shas[1], 1, True),
-                        (shas[0], None, False)], rows
-        assert window.first_parent_prs(code, shas[4]) == [(shas[4], 4), (shas[3], 3), (shas[2], 2), (shas[1], 1)]
+        assert window.citation_only_prs(code, shas[4]) == [(shas[2], 2)]
+        assert window.citation_only_prs(code, shas[1]) == []
+
+
+def test_a_citation_the_scan_cannot_attribute_is_left_out_not_refused():
+    """These commits sit behind cursors that earlier plans accepted; the scan must accept them too."""
+    with tempfile.TemporaryDirectory() as code:
+        shas = commit_messages(code, [
+            "init",
+            "feat: unreadable\n\nSource-PR: not-a-citation\n",
+            "feat: from elsewhere\n\nSource-PR: other/Repo#5\n",
+            f"feat: numbered and unreadable (#6)\n\n{SOURCE}7\n",
+            f"feat: fine\n\n{SOURCE}8\n",
+        ])
+        assert window.citation_only_prs(code, shas[4]) == [(shas[4], 8)]
+        raises(window.GitError, lambda: window.first_parent_prs(code, shas[4]))
 
 
 def test_a_pr_the_cursor_passed_unreported_is_carried_into_the_next_window():
@@ -456,12 +468,23 @@ def test_a_first_report_carries_nothing():
         assert got["prs"] == [3, 2] and got["carried"] == [], got
 
 
+def test_every_citation_only_commit_of_a_carried_pr_is_kept():
+    """A later empty landing of #2 must not hide the commit that made the change."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = commit_messages(code, ["init", f"feat: a\n\n{SOURCE}2\n", f"feat: a again\n\n{SOURCE}2\n",
+                                      "feat: b (#3)", "feat: c (#4)"])
+        make_roadmap(roadmap, {"Curves": reported("Curves", shas[0], shas[3], [3])})
+        got = plan_against(code, roadmap, shas[4], {"Curves": [2, 3, 4]})
+        assert got["prs"] == [4, 2], got["prs"]
+        assert [(c["number"], c["sha"]) for c in got["carried"]] == [(2, shas[2]), (2, shas[1])], got["carried"]
+
+
 def test_passed_citations_places_commits_against_the_cursor():
     with tempfile.TemporaryDirectory() as code:
         shas = passed_history(code)
         passed = plan.PassedCitations(code, shas[4])
-        assert passed.behind(shas[3], {2: None}, set()) == {2: shas[2]}
-        assert passed.behind(shas[2], {2: None}, set()) == {2: shas[2]}, "the cursor commit is behind itself"
+        assert passed.behind(shas[3], {2: None}, set()) == {2: [shas[2]]}
+        assert passed.behind(shas[2], {2: None}, set()) == {2: [shas[2]]}, "the cursor commit is behind itself"
         assert passed.behind(shas[1], {2: None}, set()) == {}, "ahead of the cursor: the window's job"
         assert passed.behind(shas[3], {2: None}, {2}) == {}
         assert passed.behind(shas[3], {2: None}, set(), fresh=[2]) == {}

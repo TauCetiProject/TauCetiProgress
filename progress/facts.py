@@ -98,7 +98,8 @@ def pr_commits(repo_dir, from_sha, to_sha, numbers, carried=None, **history):
     """The first-parent merge commits attributed to a selected set of PRs.
 
     `carried` is `{sha: number}` for selected PRs that landed at or before `from_sha` (see
-    `plan.PassedCitations`); each must be a commit there that cites that PR by `Source-PR` alone.
+    `plan.PassedCitations`), one entry per commit; each must be a commit there that cites that PR
+    by `Source-PR` alone.
     """
     wanted = set(numbers)
     result = {}
@@ -106,8 +107,7 @@ def pr_commits(repo_dir, from_sha, to_sha, numbers, carried=None, **history):
         if number is not None and number in wanted:
             result[sha.strip()] = number
     if carried:
-        passed = {(sha, number) for sha, number, in_subject
-                  in window.first_parent_prs(repo_dir, from_sha, subjects=True, **history) if not in_subject}
+        passed = set(window.citation_only_prs(repo_dir, from_sha, **history))
         if any(pair not in passed or pair[1] not in wanted for pair in carried.items()):
             raise window.GitError("a carried pull request is not a citation-only commit behind the window")
         result.update(carried)

@@ -171,6 +171,25 @@ def test_a_carried_pr_is_attributed_though_it_landed_before_the_window():
         assert facts.required_modules(tmp, first, second, [101], carried={first: 101}) == ["TauCeti/A.lean"]
 
 
+def test_a_carried_pr_keeps_its_change_when_it_landed_again_empty():
+    """The repeated landing from review: `alpha` by citation, an empty replay of #101 at the cursor."""
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
+        commit(tmp, "init", {"README.md": "x"})
+        cited = "\n\nSource-PR: TauCetiProject/TauCeti#101\n"
+        first = commit(tmp, "feat: alpha" + cited, {"TauCeti/A.lean": ALPHA})
+        subprocess.run(["git", "-C", tmp, "commit", "-q", "--allow-empty", "-m", "feat: alpha again" + cited],
+                       check=True, capture_output=True, env=ENV)
+        replay = window.git(["rev-parse", "HEAD"], tmp).strip()
+        second = commit(tmp, "feat: beta (#102)", {"TauCeti/A.lean": ALPHA_AND_BETA})
+        from progress import plan
+        carried = plan.PassedCitations(tmp, second).behind(replay, {101: None}, set())
+        assert carried == {101: [replay, first]}, carried
+        got = facts.collect(tmp, replay, second, pr_numbers=[102, 101], docs=docs_for(second),
+                            carried={sha: n for n, shas in carried.items() for sha in shas})
+        assert {d["name"]: d["pr"] for d in got["declarations"]} == {"TauCeti.alpha": 101, "TauCeti.beta": 102}
+
+
 def test_a_carried_commit_must_be_a_citation_only_commit_behind_the_window():
     def refused(tmp, from_sha, to_sha, prs, carried):
         try:

@@ -72,7 +72,8 @@ One kind of PR enters a report from outside its window. A mainline commit that n
 `Source-PR` citation was invisible to readers that looked at subjects alone, and reports written by
 them moved the cursor past it. A PR labelled for the roadmap, landed by such a commit at or behind
 the cursor, and listed in no section is carried into the next section's `prs`; the plan names it
-under `carried` with its commit and landing date, and `facts` attributes its declarations.
+under `carried`, one row per such commit with its landing date, and `facts` attributes its
+declarations.
 
 Wall-clock time is used only for display. A cursor made of timestamps would be wrong: a worker
 clock running fast advances it past PRs whose merge times then fall *before* the stored cursor, and

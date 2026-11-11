@@ -212,17 +212,18 @@ class PassedCitations:
 
     def _load(self):
         if self._rows is None:
-            rows = window.first_parent_prs(self._repo_dir, self._to_sha, include_uncited=True, subjects=True,
-                                           **self._history)
-            self._position = {sha: i for i, (sha, _, _) in enumerate(rows)}
-            self._rows = [(i, sha, n) for i, (sha, n, in_subject) in enumerate(rows)
-                          if n is not None and not in_subject]
+            chain = window.git(["rev-list", "--first-parent", self._to_sha, "--"], self._repo_dir).split()
+            self._position = {sha: i for i, sha in enumerate(chain)}  # newest first
+            self._rows = [(self._position[sha], sha, number) for sha, number
+                          in window.citation_only_prs(self._repo_dir, self._to_sha, **self._history)]
 
     def behind(self, cursor, area_prs, reported, fresh=()):
-        """`{pr_number: sha}`, newest first: labelled, landed at or behind `cursor`, in no section.
+        """`{pr_number: [sha, ...]}`, newest first: labelled, landed at or behind `cursor`, in no section.
 
-        `reported` is every number the roadmap's sections list. Unlike a window, this does trust
-        that list: a section claiming a number only stops that number being carried.
+        Every citation-only commit of a carried PR is kept, so a later empty landing of it does
+        not hide the one that made the change. `reported` is every number the roadmap's sections
+        list. Unlike a window, this does trust that list: a section claiming a number only stops
+        that number being carried.
         """
         self._load()
         at = self._position.get(cursor)
@@ -232,7 +233,7 @@ class PassedCitations:
         found = {}
         for i, sha, number in self._rows:
             if i >= at and number in area_prs and number not in skip:
-                found.setdefault(number, sha)
+                found.setdefault(number, []).append(sha)
         return found
 
 
@@ -565,7 +566,7 @@ def build_plan(
 
     docs.require_coverage(required_modules(
         code_dir, best["from_sha"], to_sha, best["prs"],
-        carried={sha: number for number, sha in best["carried"].items()}, **history))
+        carried={sha: number for number, shas in best["carried"].items() for sha in shas}, **history))
 
     if source:
         source.content.revalidate()
@@ -584,7 +585,7 @@ def build_plan(
         "prs": best["prs"],
         "carried": [
             {"number": number, "sha": sha, "landed": window.commit_date(code_dir, sha)}
-            for number, sha in best["carried"].items()
+            for number, shas in best["carried"].items() for sha in shas
         ],
         "bootstrapped": best["bootstrapped"],
         "reason": (

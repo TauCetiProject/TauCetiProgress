@@ -106,11 +106,12 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
     carried = plan.get("carried") or []
     if carried:
         landed = sorted({str(row.get("landed") or "")[:10] for row in carried} - {""})
+        numbers = list(dict.fromkeys(row["number"] for row in carried))
         intro.append(
-            f"{len(carried)} of these pull requests landed before this window"
+            f"{len(numbers)} of these pull requests landed before this window"
             + (f" (on {', '.join(landed)})" if landed else "")
             + " and no earlier section reported them: "
-            + ", ".join(f"#{row['number']}" for row in carried)
+            + ", ".join(f"#{number}" for number in numbers)
             + ". Their declarations are listed with the window's own. Report the work, and say once "
             "that it landed earlier and is recorded here late."
         )
