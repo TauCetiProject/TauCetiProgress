@@ -227,6 +227,17 @@ def test_an_archived_roadmap_with_one_pr_is_chosen():
     assert got["roadmap"] == "Done" and "declared complete" in got["reason"], got
 
 
+def test_a_nested_archive_directory_is_compared_whole():
+    c = Checkouts()
+    c.merge(1)
+    c.area("Done", reported=1, parent="Archive/Completed")
+    with patch.object(plan, "COMPLETED_DIR", "Archive/Completed"):
+        got = c.plan({"Done": [1]}, strategy="threshold")
+        assert got["roadmap"] == "Done" and "declared complete" in got["reason"], got
+        assert not plan.is_complete("Archive/Other") and not plan.is_complete("Archive")
+    assert not plan.is_complete("Archive/Completed/Done") and plan.is_complete("Completed/Done")
+
+
 def status_for(readme, roadmap):
     header = {"roadmap": roadmap, "to_sha": "b" * 40, "readme_sha": layers.readme_sha(readme),
               "layers": [{"id": "Layer 0", "state": "done"}, {"id": "Layer 1", "state": "partial"}]}

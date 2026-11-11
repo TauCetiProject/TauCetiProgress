@@ -191,7 +191,7 @@ def roadmap_commits(roadmap_dir, ref):
 
 def is_complete(rel_dir):
     """Maintainers declare a roadmap complete by archiving it under `Completed/`."""
-    return rel_dir.split("/", 1)[0] == COMPLETED_DIR
+    return rel_dir.rpartition("/")[0] == COMPLETED_DIR.strip("/")
 
 
 def report_dates(roadmap_dir, ref=None):
