@@ -132,12 +132,21 @@ def test_a_link_destination_keeps_a_trailing_question_or_exclamation_mark():
     for suffix in "?!":
         fails, *_ = run(status(link=URL + suffix) + block("done", "partial"), docs=docs)
         assert any("not copied" in f and URL + suffix in f for f in fails), fails
-        canonical = {"declarations": [{"name": "Demo.alpha" + suffix, "url": URL + suffix}]}
+        canonical = {"declarations": [*FACTS["declarations"], {"name": "Demo.alpha" + suffix, "url": URL + suffix}]}
         assert run(status(link=URL + suffix) + block("done", "partial"), docs=docs, facts=canonical)[0] == []
         fails, *_ = run(status(link=URL + suffix) + block("done", "partial"), facts=canonical)
         assert any("dead documentation link" in f and URL + suffix in f for f in fails), fails
     prose = f"See {URL}? It is the main result.\n"
     assert check.urls(prose) == {URL} and check.urls(f"[a]({URL}?)") == {URL + "?"}
+
+
+def test_a_fragment_is_looked_up_as_written_before_it_is_decoded():
+    literal = "Demo.«literal%FF»"
+    docs, url = docs_with(literal), f"{URL.split('#')[0]}#{literal}"
+    facts = {"declarations": [*FACTS["declarations"], {"name": literal, "url": url}]}
+    assert run(status(link=url) + block("done", "partial"), docs=docs, facts=facts)[0] == []
+    encoded = URL.replace("#Demo.alpha", "#Demo.%61lpha")
+    assert check.link_problem(encoded, DOCS) is None
 
 
 def test_a_url_from_the_previous_report_is_allowed_but_must_still_exist():

@@ -77,7 +77,8 @@ def link_problem(url, docs):
     for start in range(1, len(parts)):
         page = "/".join(parts[start:])
         if page.endswith(".html") and page[:-len(".html")] + ".lean" in modules:
-            if urllib.parse.unquote(parsed.fragment) in docs.declarations(page):
+            names = docs.declarations(page)
+            if parsed.fragment in names or urllib.parse.unquote(parsed.fragment) in names:
                 return None
             return "no such declaration in its module"
     if url.startswith(docs.base + "/") and parsed.path.endswith(".html"):
