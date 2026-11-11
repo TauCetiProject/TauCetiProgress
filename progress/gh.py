@@ -354,75 +354,53 @@ def closed_prs_since(since, repo=CODE_REPO, limit=1000):
         raise GhError(f"could not parse closed PR search output: {exc}") from exc
 
 
-LABEL_CACHE_VERSION = 1
-LABEL_CACHE_FULL_HOURS = 24.0
 # The search is by close time; the margin absorbs clock skew between this host and GitHub and a
 # closure that was being recorded while the previous search ran.
 LABEL_CACHE_MARGIN = datetime.timedelta(hours=1)
 LABEL_CACHE_SEARCH_LIMIT = 1000
 
 
+class _LabelReader:
+    """`label_cache`'s reader for a GitHub repository: the cursor is the time of the last search."""
+
+    def __init__(self, repo, now):
+        self.repo, self.now = repo, now
+
+    def full(self, areas):
+        return closed_prs_for_areas(areas, repo=self.repo) if areas else {}
+
+    def start(self, areas):
+        return self.now.isoformat(timespec="seconds")
+
+    def changes(self, cursor, areas):
+        since = datetime.datetime.fromisoformat(cursor) - LABEL_CACHE_MARGIN
+        closed = closed_prs_since(since, repo=self.repo, limit=LABEL_CACHE_SEARCH_LIMIT)
+        if len(closed) >= LABEL_CACHE_SEARCH_LIMIT:
+            raise ValueError("more closed than one search returns")
+        prefix = ROADMAP_LABEL_PREFIX
+        return ({number: ({label[len(prefix):] for label in labels if label.startswith(prefix)}, sha)
+                 for number, (labels, sha) in closed.items()}, self.start(areas))
+
+
 def cached_closed_prs_for_areas(path, areas, repo=CODE_REPO, now=None):
-    """`closed_prs_for_areas`, answered from the JSON file `path` kept between runs.
+    """`closed_prs_for_areas`, answered from the label cache at `path` (see `label_cache`).
 
     A run after the first makes one search for the PRs closed since the previous run and files them
     under their labels; only areas the file has not seen are read in full. The search cannot see a
-    label removed from a closed PR, or one added to a PR that closed before the previous run, so
-    every area is read in full again once the file is `LABEL_CACHE_FULL_HOURS` old, and whenever
-    the search comes back full. Neither repairs a cursor already advanced past such a PR, so a
-    planner reads its chosen area in full (`refresh_cached_area`) before it plans the report. A file
-    that is unreadable, for another repository or from another
-    version is discarded, and one that cannot be written costs the next run a full read.
+    label changed on a PR that closed before the previous run, and comes back full when more than
+    `LABEL_CACHE_SEARCH_LIMIT` closed, so the file is read in full daily and after a full search.
     """
-    from .docs import store
+    from . import label_cache
 
-    path = Path(path)
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    stamp = now.isoformat(timespec="seconds")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        age = (now - datetime.datetime.fromisoformat(data["full_at"])).total_seconds()
-        synced = datetime.datetime.fromisoformat(data["synced_at"])
-        if (data["version"] != LABEL_CACHE_VERSION or data["repo"] != repo
-                or not 0 <= age < LABEL_CACHE_FULL_HOURS * 3600
-                or not all(isinstance(prs, dict) for prs in data["areas"].values())):
-            raise ValueError("stale or foreign label cache")
-        closed = closed_prs_since(synced - LABEL_CACHE_MARGIN, repo=repo, limit=LABEL_CACHE_SEARCH_LIMIT)
-        if len(closed) >= LABEL_CACHE_SEARCH_LIMIT:
-            raise ValueError("more closed than one search returns")
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        data = {"version": LABEL_CACHE_VERSION, "repo": repo, "full_at": stamp, "areas": {}}
-        closed = {}
-    cached = data["areas"]
-    for number, (labels, sha) in closed.items():
-        for label in labels:
-            if label.startswith(ROADMAP_LABEL_PREFIX) and label[len(ROADMAP_LABEL_PREFIX):] in cached:
-                cached[label[len(ROADMAP_LABEL_PREFIX):]][str(number)] = sha
-    missing = [area for area in dict.fromkeys(areas) if area not in cached]
-    if missing:
-        for area, prs in closed_prs_for_areas(missing, repo=repo).items():
-            cached[area] = {str(number): sha for number, sha in prs.items()}
-    data["synced_at"] = stamp
-    store(path, (json.dumps(data, sort_keys=True) + "\n").encode("utf-8"))
-    return {area: {int(number): sha for number, sha in cached[area].items()} for area in areas}
+    return label_cache.read(path, areas, _LabelReader(repo, now), f"github:{repo}", now=now)
 
 
 def refresh_cached_area(path, area, repo=CODE_REPO):
-    """`closed_prs_for_area`, read in full and filed in the label cache at `path` in place of the
-    area's entry. A cache that cannot be read is left for its next full read."""
-    from .docs import store
+    """`closed_prs_for_area`, read in full and filed in the label cache at `path`."""
+    from . import label_cache
 
-    prs = closed_prs_for_area(area, repo=repo)
-    path = Path(path)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if data["version"] != LABEL_CACHE_VERSION or data["repo"] != repo or not isinstance(data["areas"], dict):
-            raise ValueError("stale or foreign label cache")
-    except (OSError, ValueError, KeyError, TypeError):
-        return prs
-    data["areas"][area] = {str(number): sha for number, sha in prs.items()}
-    store(path, (json.dumps(data, sort_keys=True) + "\n").encode("utf-8"))
-    return prs
+    return label_cache.refresh(path, area, _LabelReader(repo, None), f"github:{repo}")
 
 
 def pr_details(numbers, repo=CODE_REPO):

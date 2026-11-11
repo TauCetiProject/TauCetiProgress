@@ -556,18 +556,21 @@ def build_plan(
     `strategy` is one of STRATEGIES (see the module docstring). Under `threshold`, `idle_hours`,
     `min_prs` and `commits` are unused, the roadmap history is read at `roadmap_ref` (default
     HEAD), and `table_path`, if given, receives every roadmap's standing under the rule whether or
-    not one qualifies. `label_cache` is a file for `gh.cached_closed_prs_for_areas`. `skip_areas`
-    are never chosen under either strategy.
+    not one qualifies. `label_cache` is a file for the `label_cache` module, read through the bound
+    source when there is one, through GitHub otherwise. `skip_areas` are never chosen under either
+    strategy.
     """
     if strategy not in STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}; one of {', '.join(STRATEGIES)}")
-    if label_cache is not None and source is not None:
-        raise ValueError("the label cache reads GitHub and cannot serve a bound source")
     if source is not None:
         from .native_source import NativeSource
         if not isinstance(source, NativeSource):
             raise ValueError("planning source must be explicitly bound")
     history = source.history_options if source else {}
+    if label_cache is not None and source is not None:
+        from .native_source import LabelReader
+
+        labels_reader = LabelReader(source.content)
     now = now or _utcnow()
     if strategy == "busiest":
         if commits is None:
@@ -643,7 +646,8 @@ def build_plan(
     if not eligible:
         histories = {}
     elif label_cache is not None:
-        histories = gh.cached_closed_prs_for_areas(label_cache, eligible, now=now)
+        histories = (labels_reader.read(label_cache, eligible, now=now) if source
+                     else gh.cached_closed_prs_for_areas(label_cache, eligible, now=now))
     else:
         histories = source.content.labelled_histories(eligible) if source else gh.closed_prs_for_areas(eligible)
 
@@ -757,7 +761,8 @@ def build_plan(
     while label_cache is not None and best["area"] not in refreshed:
         area = best["area"]
         refreshed.add(area)
-        exact = gh.refresh_cached_area(label_cache, area)
+        exact = (labels_reader.refresh(label_cache, area) if source
+                 else gh.refresh_cached_area(label_cache, area))
         if exact == histories[area]:
             break
         histories[area] = exact

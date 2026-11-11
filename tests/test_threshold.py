@@ -469,7 +469,6 @@ def test_the_planner_reads_through_the_label_cache_and_rereads_its_choice():
         got = c.plan({}, strategy="threshold", label_cache=path, threshold=5)
         assert got["roadmap"] == "Busy" and "Quiet: no merged PRs yet" in got["skipped"], got
         assert refreshed == [(path, "Quiet"), (path, "Busy")], refreshed
-    raises(ValueError, lambda: plan.build_plan(c.roadmap, c.code, label_cache=path, source=object()))
 
 
 def test_a_refreshed_area_replaces_its_entry_in_the_cache():
