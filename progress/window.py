@@ -174,11 +174,12 @@ def reachable_commits(repo_dir, revision, *, first_parent=False):
 
 
 def first_parent_sources(repo_dir, revision, *, repository=None, legacy_repository=None, legacy_through=None,
-                         migration=None, include_uncited=False):
+                         migration=None, include_uncited=False, subjects=False):
     """Qualified citations from complete commit messages, newest first.
 
     NUL framing preserves body lines; a repair may have appended notes after its
     provenance trailers. A qualified native citation never loses its origin.
+    With `subjects`, each row also says whether the commit's subject carries a PR number.
     """
     # Use the same revision contract with or without the round cache.
     revision = immutable_revision(repo_dir, revision)
@@ -207,7 +208,8 @@ def first_parent_sources(repo_dir, revision, *, repository=None, legacy_reposito
             saved = cache.pop(cache_key)
             cache[cache_key] = saved
             return _sources(saved, legacy_repository, migration, include_uncited=include_uncited,
-                            repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip)
+                            repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip,
+                            subjects=subjects)
     try:
         rows = git_history.read(repo_dir, revision)
     except (git_history.HistoryReadError, OSError) as error:
@@ -217,11 +219,11 @@ def first_parent_sources(repo_dir, revision, *, repository=None, legacy_reposito
             del cache[next(iter(cache))]
         cache[cache_key] = tuple(rows)
     return _sources(rows, legacy_repository, migration, include_uncited=include_uncited,
-                    repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip)
+                    repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip, subjects=subjects)
 
 
 def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, repository=None,
-             legacy_through=None, legacy_tip=None):
+             legacy_through=None, legacy_tip=None, subjects=False):
     out = []
     migration = migration if migration is not None else current_migration()
     legacy = legacy_through is None or legacy_tip
@@ -242,13 +244,17 @@ def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, 
         except ProvenanceError as error:
             raise GitError(f"commit {row.sha[:12]}: {error}") from None
         if citation is not None or include_uncited:
-            out.append((row.sha, citation))
+            out.append((row.sha, citation, row.number is not None) if subjects else (row.sha, citation))
     return out
 
 
 def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=None, legacy_through=None,
-                     migration=None, include_uncited=False):
-    """Current-source numbers only after origin checking or an explicit import map."""
+                     migration=None, include_uncited=False, subjects=False):
+    """Current-source numbers only after origin checking or an explicit import map.
+
+    Rows are `(sha, number)`; with `subjects`, `(sha, number, in_subject)`, where `in_subject` is
+    False for a commit that names its PR only in a `Source-PR` citation.
+    """
     if repository is None:
         from .gh import CODE_REPO
         try:
@@ -264,18 +270,19 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
         raise GitError("report migration must be an explicit source map")
     out = []
     seen = {}
-    for sha, citation in first_parent_sources(repo_dir, revision, repository=repository,
-                                               legacy_repository=legacy_repository, legacy_through=legacy_through,
-                                               migration=migration, include_uncited=include_uncited):
+    for sha, citation, in_subject in first_parent_sources(
+            repo_dir, revision, repository=repository, legacy_repository=legacy_repository,
+            legacy_through=legacy_through, migration=migration, include_uncited=include_uncited, subjects=True):
+        tail = (in_subject,) if subjects else ()
         if citation is None:
-            out.append((sha, None))
+            out.append((sha, None, *tail))
             continue
         try:
             number = migration.number(citation, repository)
             if number in seen and seen[number] != citation:
                 raise ProvenanceError("distinct source citations map to the same report PR number")
             seen[number] = citation
-            out.append((sha, number))
+            out.append((sha, number, *tail))
         except ProvenanceError as error:
             raise GitError(f"commit {sha[:12]}: {error}") from None
     return out

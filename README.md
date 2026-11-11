@@ -68,6 +68,12 @@ closed PRs: bors squash merges close PRs without setting GitHub's merged flag, w
 also appear in the closed query. Only PR numbers found on the first-parent history enter a report,
 so closing a PR without landing it does not count as progress.
 
+One kind of PR enters a report from outside its window. A mainline commit that names its PR only in a
+`Source-PR` citation was invisible to readers that looked at subjects alone, and reports written by
+them moved the cursor past it. A PR labelled for the roadmap, landed by such a commit at or behind
+the cursor, and listed in no section is carried into the next section's `prs`; the plan names it
+under `carried` with its commit and landing date, and `facts` attributes its declarations.
+
 Wall-clock time is used only for display. A cursor made of timestamps would be wrong: a worker
 clock running fast advances it past PRs whose merge times then fall *before* the stored cursor, and
 those PRs are never reported at all.
