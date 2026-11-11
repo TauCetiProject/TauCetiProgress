@@ -76,7 +76,8 @@ the report as `apply` would, without committing anything, and then holds it to w
 750 and 300 words, three paragraphs, the two status headings. It refuses a documentation link that
 was not copied from the facts or the previous report, one whose declaration is not in the plan's
 pinned documentation facts, a layer the previous report assessed that is now `unassessed` against
-the same README, and a report that assesses no layer. Findings are printed as `FAIL:` lines and the
+the same README, a report that assesses no layer, and a bare URL whose final `?` or `!` the
+rendered link would drop. Findings are printed as `FAIL:` lines and the
 exit code is 1; the writing model can run it and repair what it reports. `--no-links` skips the
 lookup in the pinned facts.
 

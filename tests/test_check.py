@@ -143,6 +143,40 @@ def test_a_link_destination_keeps_a_trailing_question_or_exclamation_mark():
     assert check.urls(prose) == {URL} and check.urls(f"[a]({URL}?)") == {URL + "?"}
 
 
+def test_every_explicit_link_form_keeps_its_destination_exact():
+    docs = docs_with("Demo.alpha?")
+    exact = URL + "?"
+    linked = f"[the Harnack inequality]({URL})"
+    forms = [(f"<{exact}>", ""), (f'[the Harnack inequality]({exact} "a title")', ""),
+             (f"[the Harnack inequality](<{exact}>)", ""), ("[the Harnack inequality][h]", f"\n[h]: {exact}\n"),
+             ("[the Harnack inequality][h]", f"\n[h]: <{exact}> 'a title'\n")]
+    canonical = {"declarations": [*FACTS["declarations"], {"name": "Demo.alpha?", "url": exact}]}
+    for link, definition in forms:
+        form = link + definition
+        body = status().replace(linked, link) + definition + block("done", "partial")
+        assert check.urls(form) == {exact}, (form, check.urls(form))
+        fails, *_ = run(body, docs=docs)
+        assert any("not copied" in f and exact in f for f in fails), (form, fails)
+        assert run(body, docs=docs, facts=canonical)[0] == [], form
+
+
+def test_a_url_in_the_facts_is_supplied_exactly_as_written():
+    only_suffixed = {"declarations": [{"name": "Demo.alpha?", "url": URL + "?"}]}
+    fails, *_ = run(status() + block("done", "partial"), section=SECTION.replace(f"[the Harnack inequality]({URL})", "the Harnack inequality theorem"),
+                    docs=docs_with("Demo.alpha?"), facts=only_suffixed)
+    assert any("not copied" in f and f.endswith(URL) for f in fails), fails
+
+
+def test_a_bare_url_that_would_lose_its_suffix_is_refused():
+    exact = URL + "?"
+    canonical = {"declarations": [*FACTS["declarations"], {"name": "Demo.alpha?", "url": exact}]}
+    body = status().replace(f"[the Harnack inequality]({URL})", f"the result at {exact}") + block("done", "partial")
+    fails, *_ = run(body, docs=docs_with("Demo.alpha?"), facts=canonical)
+    assert any("bare URL" in f and exact in f for f in fails), fails
+    body = status().replace(f"[the Harnack inequality]({URL})", f"the result at {URL}?") + block("done", "partial")
+    assert run(body, docs=docs_with("Demo.alpha?"))[0] == [], "a question after a bare URL is prose"
+
+
 def test_a_fragment_is_looked_up_as_written_before_it_is_decoded():
     literal = "Demo.«literal%FF»"
     docs, url = docs_with(literal), f"{URL.split('#')[0]}#{literal}"

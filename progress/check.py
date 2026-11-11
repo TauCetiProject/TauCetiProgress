@@ -31,20 +31,47 @@ SECTION_PARAGRAPHS = 3
 STATUS_HEADINGS = ["## Where this roadmap stands", "## The frontier"]
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]\"`]*[^\s<>()\[\]\"`.,;:!?]")
-# A link destination ends at its `)`, so a trailing `?` or `!` is part of a declaration name there.
-LINK_RE = re.compile(r"\]\((https?://[^\s()<>]+)\)")
+# An explicit destination -- an autolink or `<...>`, an inline link's, or a reference definition's --
+# ends at its delimiter, so a trailing `?` or `!` there is part of a declaration name.
+LINK_RE = re.compile(
+    r"<(https?://[^\s<>]+)>"
+    r"|\]\((https?://[^\s()<>]+)(?=[\s)])"
+    r"|^[ ]{0,3}\[[^\]\n]+\]:[ \t]*(https?://[^\s<>]+)",
+    re.M,
+)
 ASSESSED = ("done", "partial", "untouched")
 
 
+def _split_urls(text):
+    """`(explicit, bare)` for Markdown `text`: the destinations as written, and the remaining
+    `re.Match`es of URLs that Markdown links without their trailing punctuation."""
+    explicit = set()
+
+    def take(match):
+        explicit.add(next(group for group in match.groups() if group))
+        return " "
+
+    rest = LINK_RE.sub(take, text)
+    return explicit, list(URL_RE.finditer(rest))
+
+
 def urls(text):
-    """The URLs in Markdown `text`: each link destination as written, and any other URL without the
-    punctuation that ends a sentence."""
-    return set(LINK_RE.findall(text)) | set(URL_RE.findall(LINK_RE.sub("]()", text)))
+    """The URLs in Markdown `text`, each as the rendered link has it."""
+    explicit, bare = _split_urls(text)
+    return explicit | {match.group(0) for match in bare}
+
+
+def suffix_dropped(text):
+    """Each bare URL in `text` together with the `?` or `!` right after it, which Markdown leaves out
+    of the link."""
+    _explicit, bare = _split_urls(text)
+    return {match.group(0) + match.string[match.end()] for match in bare
+            if match.string[match.end():match.end() + 1] in ("?", "!")}
 
 
 def supplied_urls(facts, old_status, old_progress):
-    """The URLs the model was given: each string in the facts that is a URL, the URLs in the facts'
-    docstrings, and those in the previous report."""
+    """The URLs the model was given: each string in the facts that is a URL, exactly, the URLs in the
+    facts' docstrings, and those in the previous report."""
     found = set()
 
     def walk(value):
@@ -57,7 +84,8 @@ def supplied_urls(facts, old_status, old_progress):
         elif isinstance(value, str):
             if re.fullmatch(r"https?://\S+", value):
                 found.add(value)
-            found.update(urls(value))
+            else:
+                found.update(urls(value))
 
     walk(facts)
     return found | urls(old_status or "") | urls(old_progress or "")
@@ -153,6 +181,8 @@ def run_checks(plan, facts, status_body, section_body, old_status, old_progress,
 
     base = ((plan.get("documentation") or {}).get("docs_base") or DOCS_BASE).rstrip("/") + "/"
     supplied = supplied_urls(facts, old_status, old_progress)
+    for url in sorted(suffix_dropped(status_body + "\n" + section_body) & supplied):
+        failures.append(f"a bare URL loses its final `{url[-1]}` when rendered; write it as <{url}>")
     for url in sorted(urls(status_body + "\n" + section_body)):
         if url not in supplied:
             if url.startswith(base):
