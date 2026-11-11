@@ -282,12 +282,13 @@ def assess(n_prs, last_report, complete, now, threshold=THRESHOLD, unassessed=No
 
 
 def choose_by_threshold(areas, candidates, skipped, dates, roadmap_dir, to_sha, now,
-                        threshold=THRESHOLD, table_path=None):
+                        threshold=THRESHOLD, table_path=None, held_until=None):
     """The `threshold` strategy's choice: `(ranked, reason)` with the winner first, or NotDue.
 
     The table gets a row for every roadmap, those that are not candidates with their reason from
     `skipped`. It is written before NotDue is raised, so a caller polling for work learns from
-    `next_qualifies_at` when to look again.
+    `next_qualifies_at` when to look again. `held_until` maps a roadmap held by an open report to
+    the time that report goes stale; the row gives that time as its `qualifies_from`.
     """
     reported, added = dates
     by_area = {c["area"]: c for c in candidates}
@@ -301,6 +302,9 @@ def choose_by_threshold(areas, candidates, skipped, dates, roadmap_dir, to_sha, 
             days = None if last is None else (now - last).total_seconds() / 86400.0
             row["note"] = next((m[len(area) + 2:] for m in reversed(skipped) if m.startswith(f"{area}: ")),
                                "not a candidate")
+            if (held_until or {}).get(area) is not None:
+                row["qualifies_from"] = held_until[area].astimezone(datetime.timezone.utc).isoformat(
+                    timespec="seconds")
         else:
             gap = assessment_gap(roadmap_dir, area, rel_dir, c["status_text"])
             ok, days, note, qualifies_from = assess(
@@ -609,6 +613,7 @@ def build_plan(
 
     candidates = []
     skipped = list(stale)
+    held_until = {}
     eligible = {}
     for area, rel_dir in areas.items():
         if area in skip_areas:
@@ -616,6 +621,10 @@ def build_plan(
             continue
         if area in blocked:
             skipped.append(f"{area}: PR #{blocked[area]['number']} is still open")
+            try:
+                held_until[area] = _parse_iso(blocked[area]["createdAt"]) + datetime.timedelta(hours=stale_hours)
+            except (KeyError, TypeError, ValueError, AttributeError):
+                pass  # an unreadable age holds the area with no end in sight
             continue
         status_text, progress_text = read_area_files(roadmap_dir, rel_dir)
         try:
@@ -720,7 +729,7 @@ def build_plan(
         if strategy == "threshold":
             ranked, reason = choose_by_threshold(
                 areas, candidates, skipped, dates, roadmap_dir, to_sha,
-                now, threshold=threshold, table_path=table_path)
+                now, threshold=threshold, table_path=table_path, held_until=held_until)
         else:
             if not candidates:
                 raise NotDue("; ".join(skipped) or "no candidate areas")

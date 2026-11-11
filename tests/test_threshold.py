@@ -303,6 +303,27 @@ def test_under_threshold_anyone_s_fresh_report_holds_its_area():
         "the default strategy still ignores a stranger's report"
 
 
+def test_the_table_says_when_an_open_report_stops_holding_its_area():
+    c, labels = quiet_and_busy()
+    table_path = pathlib.Path(c.tmp.name) / "table.json"
+    held = [report_pr(1, "Quiet", 71), report_pr(2, "Busy", 71), report_pr(3, "Quiet", 2)]
+    raises(plan.NotDue, lambda: c.plan(labels, open_prs=held, strategy="threshold", table_path=table_path))
+    table = json.loads(table_path.read_text())
+    expiry = (NOW + datetime.timedelta(hours=plan.STALE_PR_HOURS - 71)).isoformat(timespec="seconds")
+    rows = {r["area"]: r for r in table["rows"]}
+    assert rows["Busy"]["qualifies_from"] == expiry and table["next_qualifies_at"] == expiry, table
+    # Quiet's latest report holds it longer; the table follows the report the planner obeys.
+    assert rows["Quiet"]["qualifies_from"] > expiry, rows["Quiet"]
+    # Two hours on, the same two reports no longer hold anything.
+    two_hours_on = [report_pr(1, "Quiet", 73), report_pr(2, "Busy", 73)]
+    assert c.plan(labels, open_prs=two_hours_on, strategy="threshold")["roadmap"] == "Quiet"
+    no_age = {**held[1], "createdAt": None}
+    raises(plan.NotDue, lambda: c.plan(labels, open_prs=[held[0], no_age], strategy="threshold",
+                                       table_path=table_path))
+    rows = {r["area"]: r for r in json.loads(table_path.read_text())["rows"]}
+    assert rows["Busy"]["qualifies_from"] is None, rows["Busy"]
+
+
 def test_a_skipped_area_is_never_chosen_under_either_strategy():
     c, labels = quiet_and_busy()
     got = c.plan(labels, strategy="threshold", skip_areas={"Quiet"}, threshold=5)

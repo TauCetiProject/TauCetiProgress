@@ -58,8 +58,9 @@ must be complete.
 `--table FILE` (threshold only) writes every roadmap's standing as JSON, whether or not one
 qualifies: `chosen`, `next_qualifies_at`, `to_sha`, and one row per roadmap with `area`, `prs`,
 `days`, `score`, `assessed`, `complete`, `qualifies`, `qualifies_from` and `note`. When `plan` exits
-75, `next_qualifies_at` is the earliest time a roadmap qualifies with the PRs it has now, or null
-when only new PRs can make one qualify.
+75, `next_qualifies_at` is the earliest time a roadmap qualifies with the PRs it has now or an open
+report stops holding its roadmap (a held row's `qualifies_from` is when its report goes stale), or
+null when only new PRs, or a report closing, can make one qualify.
 
 `--skip-area AREA` (repeatable, either strategy) keeps a roadmap from being chosen.
 `--label-cache FILE` (either strategy) keeps each area's closed PRs between runs: a later run makes
