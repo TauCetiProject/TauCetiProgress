@@ -4,9 +4,10 @@ One file serves one content repository on one forge, named by `binding`, so a Gi
 read for a Forgejo repository or the reverse. The forge-specific half is a reader with three calls:
 
 * `full(areas)` -- `{area: {number: sha_or_None}}`, the complete labelled histories;
-* `start(areas)` -- a cursor marking now, taken before any full read it covers;
-* `changes(cursor, areas)` -- `({number: (areas_labelled, sha_or_None)}, cursor)`, every pull
-  request whose membership may have changed since `cursor`, with its labels as they now are.
+* `start(areas)` -- a cursor marking now for `areas`, taken before this run reads anything, so
+  whatever changes during the run is still after it;
+* `changes(cursor, areas)` -- `{number: (areas_labelled, sha_or_None)}`, every pull request whose
+  membership may have changed since `cursor`, with its labels as they now are.
 
 Neither forge's incremental read sees a label added to or removed from a pull request that has
 not otherwise changed, so the file is read in full again once it is `FULL_HOURS` old, and a planner
@@ -50,10 +51,11 @@ def read(path, areas, reader, binding, now=None):
         age = (now - datetime.datetime.fromisoformat(data["full_at"])).total_seconds()
         if not 0 <= age < FULL_HOURS * 3600:
             raise ValueError("label cache is due a full read")
-        changed, cursor = reader.changes(data["cursor"], sorted(data["areas"]))
+        cursor = reader.start(sorted(set(data["areas"]) | set(areas)))
+        changed = reader.changes(data["cursor"], sorted(data["areas"]))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         data = {"version": VERSION, "binding": binding, "full_at": stamp, "areas": {}}
-        changed, cursor = {}, None
+        cursor, changed = reader.start(sorted(set(areas))), {}
     cached = data["areas"]
     for number, (labelled, sha) in changed.items():
         for area, prs in cached.items():
@@ -62,10 +64,8 @@ def read(path, areas, reader, binding, now=None):
             else:
                 prs.pop(str(number), None)
     missing = [area for area in dict.fromkeys(areas) if area not in cached]
-    if missing or cursor is None:
-        cursor = reader.start(sorted(set(cached) | set(missing)))
-        for area, prs in reader.full(missing).items():
-            cached[area] = {str(number): sha for number, sha in prs.items()}
+    for area, prs in reader.full(missing).items():
+        cached[area] = {str(number): sha for number, sha in prs.items()}
     data.update(cursor=cursor, synced_at=stamp)
     _store(path, data)
     return {area: {int(number): sha for number, sha in cached[area].items()} for area in areas}

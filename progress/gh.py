@@ -378,8 +378,8 @@ class _LabelReader:
         if len(closed) >= LABEL_CACHE_SEARCH_LIMIT:
             raise ValueError("more closed than one search returns")
         prefix = ROADMAP_LABEL_PREFIX
-        return ({number: ({label[len(prefix):] for label in labels if label.startswith(prefix)}, sha)
-                 for number, (labels, sha) in closed.items()}, self.start(areas))
+        return {number: ({label[len(prefix):] for label in labels if label.startswith(prefix)}, sha)
+                for number, (labels, sha) in closed.items()}
 
 
 def cached_closed_prs_for_areas(path, areas, repo=CODE_REPO, now=None):

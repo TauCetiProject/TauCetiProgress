@@ -653,6 +653,22 @@ class NativePlanning(unittest.TestCase):
         self.assertFalse(any(parse_qs(urlsplit(path).query).get("page") == ["3"] for path in listed), listed)
         self.assertEqual(json.loads(cache.read_text())["cursor"], {"areas": ["Area", "Other"], "number": 11, "open": [10]})
 
+    def test_a_new_area_does_not_move_the_cursor_past_what_existing_areas_saw(self):
+        from progress.native_source import LabelReader
+
+        cache, reader = self.root / "labels.json", LabelReader(self.content)
+        reader.read(cache, ["Area"])
+        observe = LabelReader.changes
+
+        def changes(this, cursor, areas):
+            result = observe(this, cursor, areas)
+            self.closed = [self.row(7)]  # opened and closed after the existing areas were read
+            return result
+
+        with patch.object(LabelReader, "changes", changes):
+            reader.read(cache, ["Area", "Other"])
+        self.assertEqual(reader.read(cache, ["Area", "Other"]), {"Area": {7: None}, "Other": {}})
+
     def test_a_github_label_cache_is_never_read_for_a_native_repository(self):
         from progress.native_source import LabelReader
 

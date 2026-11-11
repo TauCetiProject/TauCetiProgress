@@ -320,22 +320,20 @@ class LabelReader:
             raise ValueError("label cursor covers other areas")
         labels, label_ids = self._labels(areas)
         opened = self._open(label_ids)
-        rows, newest = dict(opened), cursor["number"]
+        rows = dict(opened)
         if label_ids != []:
             for path in self.repository._history_paths(label_ids):
                 for page in self.repository.api.pages(path, counted=True):
                     fresh = [(number, signature) for number, signature in map(_history_row, page)
                              if number > cursor["number"]]
                     rows.update(fresh)
-                    newest = max([newest, *(number for number, _signature in fresh)])
                     if not fresh:
                         break
         for number in sorted(set(cursor["open"]) - set(rows)):
             rows[number] = _history_row(self.repository.api.pull(self.repository.repository, number))[1]
         self.repository.revalidate()
-        changed = {number: ({labels[name] for name in names if name in labels}, sha)
-                   for number, (sha, names) in rows.items()}
-        return changed, {"areas": list(areas), "number": max([newest, *opened]), "open": sorted(opened)}
+        return {number: ({labels[name] for name in names if name in labels}, sha)
+                for number, (sha, names) in rows.items()}
 
     def read(self, path, areas, now=None):
         from . import label_cache
