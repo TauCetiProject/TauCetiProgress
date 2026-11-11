@@ -78,9 +78,19 @@ def previous(first="done", second="partial", readme_sha=README_SHA, link=OLD_URL
     return status_text, progress_text
 
 
-def run(status_body, section=SECTION, old=(None, None), docs=DOCS, readme_sha=README_SHA):
-    return check.run_checks(plan(Z if old[0] is None else A, B, readme_sha), FACTS, status_body, section,
+def run(status_body, section=SECTION, old=(None, None), docs=DOCS, readme_sha=README_SHA, facts=FACTS):
+    return check.run_checks(plan(Z if old[0] is None else A, B, readme_sha), facts, status_body, section,
                             *old, docs=docs)
+
+
+def docs_with(*names):
+    """The fixture bundle with further declarations in `Demo/A.lean`, each at its literal URL."""
+    data = json.loads((pathlib.Path(__file__).parent / "fixtures/pages-facts/facts.json").read_text())
+    alpha = data["modules"]["Demo/A.lean"]["Demo.alpha"]
+    for name in names:
+        data["modules"]["Demo/A.lean"][name] = {**alpha, "url": f"{BASE}/Demo/A.html#{name}"}
+    raw = gzip.compress(json.dumps(data).encode("utf-8"), mtime=0)
+    return Docs(base=BASE, cache_dir=tempfile.mkdtemp(dir=ROOT), raw=raw)
 
 
 def test_a_sound_report_passes():
@@ -115,6 +125,19 @@ def test_a_built_url_is_refused():
     elsewhere = "https://example.org/paper.html#section-2"
     fails, *_ = run(status(link=elsewhere) + block("done", "partial"))
     assert fails == [], "a link to another site is not a documentation link"
+
+
+def test_a_link_destination_keeps_a_trailing_question_or_exclamation_mark():
+    docs = docs_with("Demo.alpha?", "Demo.alpha!")
+    for suffix in "?!":
+        fails, *_ = run(status(link=URL + suffix) + block("done", "partial"), docs=docs)
+        assert any("not copied" in f and URL + suffix in f for f in fails), fails
+        canonical = {"declarations": [{"name": "Demo.alpha" + suffix, "url": URL + suffix}]}
+        assert run(status(link=URL + suffix) + block("done", "partial"), docs=docs, facts=canonical)[0] == []
+        fails, *_ = run(status(link=URL + suffix) + block("done", "partial"), facts=canonical)
+        assert any("dead documentation link" in f and URL + suffix in f for f in fails), fails
+    prose = f"See {URL}? It is the main result.\n"
+    assert check.urls(prose) == {URL} and check.urls(f"[a]({URL}?)") == {URL + "?"}
 
 
 def test_a_url_from_the_previous_report_is_allowed_but_must_still_exist():

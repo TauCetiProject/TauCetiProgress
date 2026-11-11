@@ -31,7 +31,36 @@ SECTION_PARAGRAPHS = 3
 STATUS_HEADINGS = ["## Where this roadmap stands", "## The frontier"]
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]\"`]*[^\s<>()\[\]\"`.,;:!?]")
+# A link destination ends at its `)`, so a trailing `?` or `!` is part of a declaration name there.
+LINK_RE = re.compile(r"\]\((https?://[^\s()<>]+)\)")
 ASSESSED = ("done", "partial", "untouched")
+
+
+def urls(text):
+    """The URLs in Markdown `text`: each link destination as written, and any other URL without the
+    punctuation that ends a sentence."""
+    return set(LINK_RE.findall(text)) | set(URL_RE.findall(LINK_RE.sub("]()", text)))
+
+
+def supplied_urls(facts, old_status, old_progress):
+    """The URLs the model was given: each string in the facts that is a URL, the URLs in the facts'
+    docstrings, and those in the previous report."""
+    found = set()
+
+    def walk(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, str):
+            if re.fullmatch(r"https?://\S+", value):
+                found.add(value)
+            found.update(urls(value))
+
+    walk(facts)
+    return found | urls(old_status or "") | urls(old_progress or "")
 
 
 def link_problem(url, docs):
@@ -122,9 +151,8 @@ def run_checks(plan, facts, status_body, section_body, old_status, old_progress,
         failures.append("a body has a top-level `# ` heading; the scripts add those")
 
     base = ((plan.get("documentation") or {}).get("docs_base") or DOCS_BASE).rstrip("/") + "/"
-    supplied = set(URL_RE.findall("\n".join(
-        (json.dumps(facts, ensure_ascii=False), old_status or "", old_progress or ""))))
-    for url in sorted(set(URL_RE.findall(status_body + "\n" + section_body))):
+    supplied = supplied_urls(facts, old_status, old_progress)
+    for url in sorted(urls(status_body + "\n" + section_body)):
         if url not in supplied:
             if url.startswith(base):
                 failures.append(f"documentation URL not copied from the facts or the previous report: {url}")
