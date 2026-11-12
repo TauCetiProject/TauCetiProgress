@@ -174,11 +174,14 @@ def reachable_commits(repo_dir, revision, *, first_parent=False):
 
 
 def first_parent_sources(repo_dir, revision, *, repository=None, legacy_repository=None, legacy_through=None,
-                         migration=None, include_uncited=False, citation_only=False):
+                         migration=None, include_uncited=False, passed=False):
     """Qualified citations from complete commit messages, newest first.
 
     NUL framing preserves body lines; a repair may have appended notes after its
     provenance trailers. A qualified native citation never loses its origin.
+
+    `passed` is for `citation_only_prs`: a commit that cannot be read is left out, not refused,
+    and each row gains a third field, whether the commit's subject carries no number.
     """
     # Use the same revision contract with or without the round cache.
     revision = immutable_revision(repo_dir, revision)
@@ -208,7 +211,7 @@ def first_parent_sources(repo_dir, revision, *, repository=None, legacy_reposito
             cache[cache_key] = saved
             return _sources(saved, legacy_repository, migration, include_uncited=include_uncited,
                             repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip,
-                            citation_only=citation_only)
+                            passed=passed)
     try:
         rows = git_history.read(repo_dir, revision)
     except (git_history.HistoryReadError, OSError) as error:
@@ -219,11 +222,11 @@ def first_parent_sources(repo_dir, revision, *, repository=None, legacy_reposito
         cache[cache_key] = tuple(rows)
     return _sources(rows, legacy_repository, migration, include_uncited=include_uncited,
                     repository=repository, legacy_through=legacy_through, legacy_tip=legacy_tip,
-                    citation_only=citation_only)
+                    passed=passed)
 
 
 def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, repository=None,
-             legacy_through=None, legacy_tip=None, citation_only=False):
+             legacy_through=None, legacy_tip=None, passed=False):
     out = []
     migration = migration if migration is not None else current_migration()
     legacy = legacy_through is None or legacy_tip
@@ -233,13 +236,6 @@ def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, 
         # itself and all following rows belong to the legacy namespace.
         if row.sha == legacy_through:
             legacy = True
-        if citation_only:
-            # See `citation_only_prs`: a numbered subject is skipped before anything is resolved,
-            # and a commit that cannot be read is left alone, not refused.
-            citation = None if row.number is not None else migration.commits.get(row.sha, row.citation)
-            if citation is not None and (row.sha in migration.commits or not row.error):
-                out.append((row.sha, citation))
-            continue
         try:
             if row.sha in migration.commits:
                 citation = migration.commits[row.sha]
@@ -249,8 +245,13 @@ def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, 
                 namespace = legacy_repository if legacy else repository
                 citation = resolve_source(row.citation, row.number, namespace)
         except ProvenanceError as error:
+            if passed:
+                continue
             raise GitError(f"commit {row.sha[:12]}: {error}") from None
-        if citation is not None or include_uncited:
+        if passed:
+            if citation is not None:
+                out.append((row.sha, citation, row.number is None))
+        elif citation is not None or include_uncited:
             out.append((row.sha, citation))
     return out
 
@@ -295,9 +296,9 @@ def citation_only_prs(repo_dir, revision, *, repository=None, legacy_repository=
     """`(sha, number)` for first-parent commits that name their PR only in `Source-PR`, newest first.
 
     For finding work a subject-only reader passed, across history every earlier plan has already
-    accepted. So it must not refuse where they did not: a commit whose subject carries a number is
-    skipped before its citation is resolved, and one whose citation is unreadable, foreign with no
-    migration, or shares its number with a different citation is left out.
+    accepted. So it must not refuse where they did not: a commit whose citation is unreadable or
+    foreign with no migration is left out. So is a number that two distinct citations reach, and
+    there a commit with a numbered subject counts as a citation though it is never returned.
     """
     if repository is None:
         from .gh import CODE_REPO
@@ -313,15 +314,16 @@ def citation_only_prs(repo_dir, revision, *, repository=None, legacy_repository=
     if not isinstance(migration, MigrationMap):
         raise GitError("report migration must be an explicit source map")
     rows, cited = [], {}
-    for sha, citation in first_parent_sources(repo_dir, revision, repository=repository,
-                                               legacy_repository=legacy_repository, legacy_through=legacy_through,
-                                               migration=migration, citation_only=True):
+    for sha, citation, unnumbered in first_parent_sources(
+            repo_dir, revision, repository=repository, legacy_repository=legacy_repository,
+            legacy_through=legacy_through, migration=migration, passed=True):
         try:
             number = migration.number(citation, repository)
         except ProvenanceError:
             continue
-        rows.append((sha, number))
         cited.setdefault(number, set()).add(citation)
+        if unnumbered:
+            rows.append((sha, number))
     return [(sha, number) for sha, number in rows if len(cited[number]) == 1]
 
 

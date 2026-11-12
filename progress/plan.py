@@ -217,22 +217,21 @@ class PassedCitations:
             self._rows = [(self._position[sha], sha, number) for sha, number
                           in window.citation_only_prs(self._repo_dir, self._to_sha, **self._history)]
 
-    def behind(self, cursor, area_prs, reported, fresh=()):
+    def behind(self, cursor, area_prs, reported):
         """`{pr_number: [sha, ...]}`, newest first: labelled, landed at or behind `cursor`, in no section.
 
-        Every citation-only commit of a carried PR is kept, so a later empty landing of it does
-        not hide the one that made the change. `reported` is every number the roadmap's sections
-        list. Unlike a window, this does trust that list: a section claiming a number only stops
-        that number being carried.
+        Every citation-only commit of a carried PR is kept, so a later empty landing of it, behind
+        the cursor or in the new window, does not hide the one that made the change. `reported` is
+        every number the roadmap's sections list. Unlike a window, this does trust that list: a
+        section claiming a number only stops that number being carried.
         """
         self._load()
         at = self._position.get(cursor)
         if at is None:
             return {}  # a cursor off the first-parent chain: nothing can be placed behind it
-        skip = set(reported) | set(fresh)
         found = {}
         for i, sha, number in self._rows:
-            if i >= at and number in area_prs and number not in skip:
+            if i >= at and number in area_prs and number not in reported:
                 found.setdefault(number, []).append(sha)
         return found
 
@@ -528,7 +527,7 @@ def build_plan(
         # not see. It rides in this section's `prs`, since the cursor cannot go back for it.
         carried = {}
         if not bootstrapped:
-            carried = passed.behind(from_sha, area_prs, files.reported_prs(progress_text), fresh)
+            carried = passed.behind(from_sha, area_prs, files.reported_prs(progress_text))
         if not fresh and not carried:
             skipped.append(f"{area}: nothing new since {from_sha[:7]}")
             continue
@@ -538,7 +537,7 @@ def build_plan(
                 "area": area,
                 "rel_dir": rel_dir,
                 "from_sha": from_sha,
-                "prs": fresh + list(carried),
+                "prs": fresh + [number for number in carried if number not in fresh],
                 "carried": carried,
                 "bootstrapped": bootstrapped,
                 "status_text": status_text,

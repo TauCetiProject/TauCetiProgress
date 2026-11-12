@@ -172,7 +172,10 @@ def test_a_carried_pr_is_attributed_though_it_landed_before_the_window():
 
 
 def test_a_carried_pr_keeps_its_change_when_it_landed_again_empty():
-    """The repeated landing from review: `alpha` by citation, an empty replay of #101 at the cursor."""
+    """The repeated landing from review: `alpha` by citation, then an empty replay of #101.
+
+    The cursor is at the replay, or before it so that the replay is in the window.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
         commit(tmp, "init", {"README.md": "x"})
@@ -183,11 +186,13 @@ def test_a_carried_pr_keeps_its_change_when_it_landed_again_empty():
         replay = window.git(["rev-parse", "HEAD"], tmp).strip()
         second = commit(tmp, "feat: beta (#102)", {"TauCeti/A.lean": ALPHA_AND_BETA})
         from progress import plan
-        carried = plan.PassedCitations(tmp, second).behind(replay, {101: None}, set())
-        assert carried == {101: [replay, first]}, carried
-        got = facts.collect(tmp, replay, second, pr_numbers=[102, 101], docs=docs_for(second),
-                            carried={sha: n for n, shas in carried.items() for sha in shas})
-        assert {d["name"]: d["pr"] for d in got["declarations"]} == {"TauCeti.alpha": 101, "TauCeti.beta": 102}
+        for cursor, behind in ((replay, [replay, first]), (first, [first])):
+            carried = plan.PassedCitations(tmp, second).behind(cursor, {101: None}, set())
+            assert carried == {101: behind}, carried
+            got = facts.collect(tmp, cursor, second, pr_numbers=[102, 101], docs=docs_for(second),
+                                carried={sha: n for n, shas in carried.items() for sha in shas})
+            by = {d["name"]: d["pr"] for d in got["declarations"]}
+            assert by == {"TauCeti.alpha": 101, "TauCeti.beta": 102}, by
 
 
 def test_a_carried_commit_must_be_a_citation_only_commit_behind_the_window():

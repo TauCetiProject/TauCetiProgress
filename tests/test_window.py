@@ -479,6 +479,17 @@ def test_every_citation_only_commit_of_a_carried_pr_is_kept():
         assert [(c["number"], c["sha"]) for c in got["carried"]] == [(2, shas[2]), (2, shas[1])], got["carried"]
 
 
+def test_a_landing_behind_the_cursor_is_kept_when_the_pr_lands_again_in_the_window():
+    """#2's change is behind the cursor and its empty replay ahead of it; `prs` lists #2 once."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = commit_messages(code, ["init", f"feat: a\n\n{SOURCE}2\n", "feat: b (#3)",
+                                      f"feat: a again\n\n{SOURCE}2\n", "feat: c (#4)"])
+        make_roadmap(roadmap, {"Curves": reported("Curves", shas[0], shas[2], [3])})
+        got = plan_against(code, roadmap, shas[4], {"Curves": [2, 3, 4]})
+        assert got["prs"] == [4, 2], got["prs"]
+        assert [(c["number"], c["sha"]) for c in got["carried"]] == [(2, shas[1])], got["carried"]
+
+
 def test_passed_citations_places_commits_against_the_cursor():
     with tempfile.TemporaryDirectory() as code:
         shas = passed_history(code)
@@ -487,7 +498,6 @@ def test_passed_citations_places_commits_against_the_cursor():
         assert passed.behind(shas[2], {2: None}, set()) == {2: [shas[2]]}, "the cursor commit is behind itself"
         assert passed.behind(shas[1], {2: None}, set()) == {}, "ahead of the cursor: the window's job"
         assert passed.behind(shas[3], {2: None}, {2}) == {}
-        assert passed.behind(shas[3], {2: None}, set(), fresh=[2]) == {}
         assert passed.behind("0" * 40, {2: None}, set()) == {}
 
 
