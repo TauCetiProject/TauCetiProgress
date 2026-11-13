@@ -169,21 +169,22 @@ def cmd_apply(args):
     from .provenance import saved_migration
 
     p = _load_plan(args.plan)
-    from . import gh
+    from . import gh, window
 
     try:
         try:
-            saved_migration(p, args.plan)
+            migration = saved_migration(p, args.plan)
         except FactsReplanRequired as exc:
             raise ReplanRequired(str(exc)) from None
-        return apply_mod.run(
-            plan=p,
-            status_body_file=args.status_body,
-            section_body_file=args.section_body,
-            roadmap_dir=args.roadmap_dir,
-            dry_run=args.dry_run,
-            version=args.version,
-        )
+        with window.using_migration(migration):
+            return apply_mod.run(
+                plan=p,
+                status_body_file=args.status_body,
+                section_body_file=args.section_body,
+                roadmap_dir=args.roadmap_dir,
+                dry_run=args.dry_run,
+                version=args.version,
+            )
     except gh.PublicationRejected as exc:
         print(f"publication needs recovery: {exc}", file=sys.stderr)
         return 78

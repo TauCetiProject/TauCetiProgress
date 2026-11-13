@@ -17,6 +17,9 @@ import os
 
 import pathlib
 import re
+import hashlib
+import json
+from urllib.parse import quote
 
 from . import files, zulip
 
@@ -30,6 +33,13 @@ ROADMAP_PARENTS = (os.environ.get("TAUCETI_ROADMAP_DIR", "TauCetiRoadmap"), os.e
 
 def section_id(header):
     """A stable id for a window: `<Area>-<from7>-<to7>`."""
+    if "source" in header:
+        source = files._source(header["source"])
+        identity = {key: header[key] for key in ("from_sha", "to_sha")}
+        identity.update({key: source[key] for key in ("content", "roadmap")})
+        identity["area"] = header["roadmap"]
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return f"{header['roadmap']}-{digest}"
     return f"{header['roadmap']}-{header['from_sha'][:7]}-{header['to_sha'][:7]}"
 
 
@@ -86,8 +96,21 @@ def render_message(header, prose, roadmap_url=None, status_url=None, roadmap_par
     body = zulip.sanitize(unwrap_prose(prose))
     if len(body) > MAX_MESSAGE_CHARS:
         body = body[:MAX_MESSAGE_CHARS].rsplit("\n", 1)[0] + "\n\n(truncated; the full section is in `PROGRESS.md`)"
-    progress_link = roadmap_url or roadmap_file_url(area, "PROGRESS.md", roadmap_parent)
-    status_link = status_url or roadmap_file_url(area, "STATUS.md", roadmap_parent)
+    if "source" in header:
+        from tauceti_tools.ci_candidate import RepositoryIdentity
+        source = files._source(header["source"])
+        roadmap = RepositoryIdentity.parse(source["roadmap"]).repository
+        if roadmap_parent not in ROADMAP_PARENTS:
+            raise ValueError("unexpected qualified roadmap parent")
+        prefix = "src/branch" if roadmap.forge.kind == "forgejo" else "blob"
+        def link(filename):
+            return f"{roadmap.url}/{prefix}/main/" + quote(f"{roadmap_parent}/{area}/{filename}", safe="/")
+        progress_link, status_link = link("PROGRESS.md"), link("STATUS.md")
+        if roadmap_url not in (None, progress_link) or status_url not in (None, status_link):
+            raise ValueError("announcement links differ from the qualified source binding")
+    else:
+        progress_link = roadmap_url or roadmap_file_url(area, "PROGRESS.md", roadmap_parent)
+        status_link = status_url or roadmap_file_url(area, "STATUS.md", roadmap_parent)
     return (
         f"**{area}** — progress on {len(prs)} merged pull requests "
         f"(`{header['from_sha'][:7]}` to `{header['to_sha'][:7]}`)\n\n"

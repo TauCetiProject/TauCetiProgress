@@ -96,6 +96,78 @@ def _save_intent(path, value):
         saved.flush()
         os.fsync(saved.fileno())
     temp.replace(path)
+    directory = os.open(path.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def retained_write(args, *, origin, actor, operation, send, reconcile=None, context=None, verified=None,
+                   reconcile_first=False, reconcile_only=False):
+    """Use the existing private outbox for an origin/actor-bound mutation.
+
+    Native transports supply a verification callback; only authoritative reads
+    may acknowledge asynchronous or uncertain native writes.
+    """
+    key = hashlib.sha256(json.dumps([origin, actor, operation]).encode()).hexdigest()
+    root = Path(os.environ.get("TAUCETI_PROGRESS_OUTBOX", Path.home() / ".local/state/tauceti-progress/outbox"))
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = root / (key + ".json")
+    with open(root / (key + ".lock"), "a", opener=lambda p, f: os.open(p, f, 0o600)) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if path.exists():
+            value = json.loads(path.read_text())
+            if value.get("actor") != actor or value.get("context") != context:
+                raise GhError("retained publication identity changed; preserving original intent")
+            outcome = reconcile() if reconcile else None
+            if isinstance(outcome, str):
+                path.unlink()
+                return outcome
+            if reconcile_only:
+                raise GhError("retained publication still needs authoritative reconciliation")
+            if outcome is False and "absent_since" not in value:
+                value["absent_since"] = time.time()
+                _save_intent(path, value)
+            known_unsent = value.get("not_sent") and value["attempts"] == 0
+            if (not known_unsent and (outcome is not False or time.time() - value["absent_since"] < 300
+                    or value["attempts"] >= 2) or value["argv"] != args):
+                raise GhError("publication retained; uncertain outcome must reconcile before replay")
+        else:
+            if reconcile_first or reconcile_only:
+                outcome = reconcile() if reconcile else None
+                if isinstance(outcome, str):
+                    return outcome
+                if reconcile_only or outcome is not False:
+                    raise GhError("publication absence is not authoritative; no mutation was sent")
+            value = {"actor": actor, "argv": args, "created": time.time(), "attempts": 0, "context": context}
+        value.pop("not_sent", None)
+        value["attempts"] += 1
+        _save_intent(path, value)
+        try:
+            proc = send()
+        except OSError:
+            value["attempts"] -= 1
+            value["not_sent"] = True
+            _save_intent(path, value)
+            raise
+        if proc.returncode == 77:
+            value["attempts"] -= 1
+            _save_intent(path, value)
+        if proc.returncode == 0 and args[:2] == ["api", "graphql"]:
+            try:
+                if json.loads(proc.stdout).get("errors"):
+                    proc.returncode = 1
+            except (ValueError, AttributeError):
+                proc.returncode = 1
+        if proc.returncode == 0 and (verified(proc) if verified else args[:2] != ["repo", "fork"]):
+            path.unlink()
+            return proc.stdout
+        outcome = reconcile() if reconcile else None
+        if isinstance(outcome, str):
+            path.unlink()
+            return outcome
+        raise GhError(f"gh publication failed; retained for reconciliation: {proc.stderr.strip()}")
 
 
 def gh(args, retries=3, reconcile=None, context=None):
@@ -133,56 +205,9 @@ def gh(args, retries=3, reconcile=None, context=None):
             for flag in ("--repo", "--head", "--base"):
                 if flag in args:
                     operation += [flag, args[args.index(flag) + 1]]
-        key = hashlib.sha256(json.dumps([os.environ.get("GH_HOST", "github.com"), actor, operation]).encode()).hexdigest()
-        root = Path(os.environ.get("TAUCETI_PROGRESS_OUTBOX", Path.home() / ".local/state/tauceti-progress/outbox"))
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path = root / (key + ".json")
-        with open(root / (key + ".lock"), "a", opener=lambda p, f: os.open(p, f, 0o600)) as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            if path.exists():
-                value = json.loads(path.read_text())
-                if value.get("actor") != actor or value.get("context") != context:
-                    raise GhError("retained publication identity changed; preserving original intent")
-                outcome = reconcile() if reconcile else None
-                if isinstance(outcome, str):
-                    path.unlink()
-                    return outcome
-                if outcome is False and "absent_since" not in value:
-                    value["absent_since"] = time.time()
-                    _save_intent(path, value)
-                known_unsent = value.get("not_sent") and value["attempts"] == 0
-                if (not known_unsent and (outcome is not False or time.time() - value["absent_since"] < 300
-                        or value["attempts"] >= 2) or value["argv"] != args):
-                    raise GhError("publication retained; uncertain outcome must reconcile before replay")
-            else:
-                value = {"actor": actor, "argv": args, "created": time.time(), "attempts": 0, "context": context}
-            value.pop("not_sent", None)
-            value["attempts"] += 1
-            _save_intent(path, value)
-            try:
-                proc = subprocess.run(["gh", *args], capture_output=True, text=True)
-            except OSError:
-                value["attempts"] -= 1
-                value["not_sent"] = True
-                _save_intent(path, value)
-                raise
-            if proc.returncode == 77:
-                value["attempts"] -= 1
-                _save_intent(path, value)
-            if proc.returncode == 0 and args[:2] == ["api", "graphql"]:
-                try:
-                    if json.loads(proc.stdout).get("errors"):
-                        proc.returncode = 1
-                except (ValueError, AttributeError):
-                    proc.returncode = 1
-            if proc.returncode == 0 and args[:2] != ["repo", "fork"]:
-                path.unlink()
-                return proc.stdout
-            outcome = reconcile() if reconcile else None
-            if isinstance(outcome, str):
-                path.unlink()
-                return outcome
-            raise GhError(f"gh publication failed; retained for reconciliation: {proc.stderr.strip()}")
+        return retained_write(args, origin=os.environ.get("GH_HOST", "github.com"), actor=actor,
+                              operation=operation, send=lambda: subprocess.run(["gh", *args], capture_output=True, text=True),
+                              reconcile=reconcile, context=context)
     last = ""
     for attempt in range(retries):
         proc = subprocess.run(["gh", *args], capture_output=True, text=True)

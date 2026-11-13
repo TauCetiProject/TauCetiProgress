@@ -170,14 +170,48 @@ facts as if calculated by the new version. Qualified writer context requires the
 same plan/facts source binding, window endpoints, documentation pin and PR set,
 plus complete, non-duplicated qualified commentary from its content repository.
 
+Qualified generated status/section headers retain the source binding. A log
+cannot silently downgrade or switch that binding; appending to an imported
+unqualified log requires the explicit legacy namespace/cutover. Qualified PR
+descriptions and announcement links select the configured repository origin.
+Announcement IDs include both qualified repositories and full window commits,
+while historical unqualified sections retain their existing IDs. The merge gate
+requires an independently supplied source binding matching both files and PR
+metadata; a PR cannot select its own source configuration.
+
+`native_publish.NativePublisher` accepts an explicitly constructed `NativeSource`,
+the roadmap token and its expected native actor ID. It revalidates content,
+roadmap and actor identities, fetches the configured roadmap directly, and uses
+the same local report preparation as the GitHub publisher. Native fork discovery
+uses owned repository IDs and parent ancestry, including renamed forks. Pushes
+create a branch only when absent; existing remote candidates are fetched and
+validated without overwriting them. PR creation, fork creation and cleanup use
+the existing private publication outbox, keyed by origin, actor and operation.
+Native success is acknowledged through authoritative reads. Ambiguous writes
+remain retained until reconciliation; bounded retries require observed absence.
+Existing PRs also reconcile retained creation intents after process interruption;
+that acknowledgement path cannot send a new mutation.
+Superseded cleanup uses qualified ownership, the live cursor and the same source
+and history policy, and reconciles its comment and close operations separately.
+
+New report commits carry `TauCeti-Progress-Input`, a digest of their source,
+history policy, documentation pin, window, paths and roadmap layer inputs.
+Artifact filenames do not affect the digest. Before writing uncommitted files,
+the existing Git branch configuration records the same input digest; retries
+cannot reinterpret those bytes under another policy. Both retained local and
+remote commits must match the digest and the actual generated-file window.
+Old unbound GitHub reports remain recoverable only under the empty history
+policy. Unknown or mismatched native/nonempty-policy reports require recovery
+and keep their prepared prose. The apply CLI restores the verified saved policy
+snapshot for preparation. Commit metadata describes preparation inputs, not
+approval authority or mathematical truth; merge policy remains independent.
+
 The command-line entry points still use the legacy bootstrap and reject native
-project configurations. Apply also refuses qualified saved plans before any
+project configurations. Legacy apply also refuses qualified saved plans before any
 legacy GitHub operation, including direct library calls, superseded-report cleanup,
 or a lost `--conf`; an explicit null source binding also refuses factual collection;
-prepared prose remains available for the qualified publisher. Native publication/fork handling, trusted runtime binding, announcements and
-workflow integration must be completed before enabling that bootstrap. Retained
-local and remote publication commits must be checked against the policy that
-produced them before a nonempty policy is enabled; a new PR body must not relabel
-old prose under another digest. Worker integration must also compare the source
+prepared prose remains available for the explicitly bound native publisher.
+Trusted runtime binding, announcement/workflow integration and Worker callers
+must be completed before enabling that bootstrap. Worker integration must compare the source
 binding in a facts result with the plan before its Progress pin is upgraded. The explicit reader interfaces prepare that
 integration without routing current operations to a GitHub mirror.
