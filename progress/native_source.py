@@ -261,6 +261,37 @@ class NativeRepository:
         return text
 
 
+class LabelReader:
+    """`label_cache`'s reader for a native repository, whose histories hold labelled pull requests
+    in every state (see `NativeRepository.labelled_histories`).
+
+    Forgejo lists pull requests by creation time, which an import can set out of number order, and
+    cannot search by close or update time, so no listing prefix proves that nothing older changed.
+    Each run therefore reads the complete labelled listing of the areas it plans, as an uncached
+    plan does; the file keeps the cache's binding and format.
+    """
+
+    def __init__(self, repository):
+        self.repository = repository
+        self.binding = f"{repository.repository.key}#{repository.identity.native_id}"
+
+    def full(self, areas):
+        return self.repository.labelled_histories(areas) if areas else {}
+
+    def start(self, areas):
+        return None
+
+    def read(self, path, areas, now=None):
+        from . import label_cache
+
+        return label_cache.read(path, areas, self, self.binding, now=now)
+
+    def refresh(self, path, area):
+        from . import label_cache
+
+        return label_cache.refresh(path, area, self, self.binding)
+
+
 @dataclass(frozen=True)
 class NativeSource:
     content: NativeRepository

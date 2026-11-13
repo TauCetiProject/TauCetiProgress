@@ -6,6 +6,7 @@ Subcommands, in the order a round uses them:
     plan      pick the roadmap and the PR window. exit 75 when nothing qualifies.
     facts     what mathematics actually landed in the window (ground truth for the model)
     prompt    print a writing prompt for the worker to fill in and hand to a model
+    check     hold the model's two bodies to the prompt and the facts. exit 1 on a finding.
     apply     write the files and open the PR (resumable)
     announce  post a new section to Zulip (idempotent)
 
@@ -89,6 +90,11 @@ def cmd_plan(args):
                 idle_hours=args.idle_hours,
                 min_prs=args.min_prs,
                 only_area=args.area,
+                strategy=args.strategy,
+                threshold=args.threshold,
+                table_path=args.table,
+                label_cache=args.label_cache,
+                skip_areas=frozenset(args.skip_area),
             )
     except DocsGenerationChanged as exc:
         return _generation_changed("plan", exc)
@@ -125,15 +131,7 @@ def cmd_facts(args):
     p = _load_plan(args.plan)
     if "source" in p and p["source"] is None:
         raise ReplanRequired("invalid saved source repository binding; replan")
-    pin = p.get("documentation")
-    if pin is None:
-        raise ReplanRequired("the plan pins no documentation facts; replan the window")
-    bundle_path = None
-    if isinstance(pin, dict) and "bundle_file" in pin:
-        name = pin["bundle_file"]
-        if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\\" in name:
-            raise ReplanRequired("invalid saved bundle filename")
-        bundle_path = pathlib.Path(args.plan).parent / name
+    pin, bundle_path = _saved_bundle(p, args.plan)
     # The plan's PR list is the area filter. Without it `collect` would walk every merged PR in the
     # commit range, so a report on one roadmap would be grounded in every roadmap's work.
     try:
@@ -156,6 +154,37 @@ def cmd_facts(args):
     else:
         print(out)
     return 0
+
+
+def _saved_bundle(p, plan_path):
+    """`(pin, bundle_path)`: a saved plan's documentation pin and the bundle retained beside it."""
+    from .docs import ReplanRequired
+
+    pin = p.get("documentation")
+    if pin is None:
+        raise ReplanRequired("the plan pins no documentation facts; replan the window")
+    bundle_path = None
+    if isinstance(pin, dict) and "bundle_file" in pin:
+        name = pin["bundle_file"]
+        if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\\" in name:
+            raise ReplanRequired("invalid saved bundle filename")
+        bundle_path = pathlib.Path(plan_path).parent / name
+    return pin, bundle_path
+
+
+def cmd_check(args):
+    from . import check
+    from .docs import Docs, DocsGenerationChanged
+
+    p = _load_plan(args.plan)
+    docs = None
+    if not args.no_links:
+        pin, bundle_path = _saved_bundle(p, args.plan)
+        try:
+            docs = Docs(pin=pin, bundle_path=bundle_path)
+        except DocsGenerationChanged as exc:
+            return _generation_changed("check", exc)
+    return check.run(p, args.facts, args.status_body, args.section_body, args.roadmap_dir, docs=docs)
 
 
 def _generation_changed(stage, exc):
@@ -230,6 +259,20 @@ def build_parser():
     p.add_argument("--idle-hours", type=float, default=None)
     p.add_argument("--min-prs", type=int, default=None)
     p.add_argument("--area", default=None, help="force a single area (testing)")
+    p.add_argument("--skip-area", action="append", default=[], metavar="AREA",
+                   help="never choose this roadmap (repeatable)")
+    p.add_argument("--strategy", choices=("busiest", "threshold"), default="busiest",
+                   help="busiest (default): the area with the most PRs, subject to --idle-hours and "
+                        "--min-prs. threshold: any roadmap whose PRs plus days since its last "
+                        "report exceed --threshold; see plan.py")
+    p.add_argument("--threshold", type=float, default=None,
+                   help="threshold only: the N + T a roadmap must exceed (default 10)")
+    p.add_argument("--table", default=None,
+                   help="threshold only: write every roadmap's standing under the rule to this "
+                        "JSON file, whether or not one qualifies")
+    p.add_argument("--label-cache", default=None,
+                   help="a JSON file that keeps each area's closed PRs between runs, so a later run "
+                        "asks GitHub only for what closed since")
     p.add_argument("--out", default=None, help="write the plan JSON here instead of stdout")
     p.set_defaults(fn=cmd_plan)
 
@@ -238,6 +281,16 @@ def build_parser():
     f.add_argument("--code-dir", required=True)
     f.add_argument("--out", default=None)
     f.set_defaults(fn=cmd_facts)
+
+    c = sub.add_parser("check", help="hold the model's two bodies to the prompt and the facts")
+    c.add_argument("--plan", required=True)
+    c.add_argument("--facts", required=True, help="the facts file the model was given")
+    c.add_argument("--status-body", required=True)
+    c.add_argument("--section-body", required=True)
+    c.add_argument("--roadmap-dir", required=True, help="the TauCetiRoadmap checkout the plan was made from")
+    c.add_argument("--no-links", action="store_true",
+                   help="do not look links up in the plan's pinned documentation facts")
+    c.set_defaults(fn=cmd_check)
 
     a = sub.add_parser("apply", help="write the files and open the PR")
     a.add_argument("--plan", required=True)
@@ -283,6 +336,8 @@ def main(argv=None):
         args.idle_hours = plan_mod.IDLE_HOURS
     if getattr(args, "min_prs", None) is None:
         args.min_prs = plan_mod.MIN_PRS
+    if getattr(args, "threshold", None) is None:
+        args.threshold = plan_mod.THRESHOLD
     if getattr(args, "ref", None) is None:
         args.ref = plan_mod.CODE_REF
     from .docs import ArtifactError, ConfigurationError, FactsReplanRequired, ReplanRequired

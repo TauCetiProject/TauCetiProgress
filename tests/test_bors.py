@@ -1,5 +1,6 @@
 """Native and bors merges share commit windows, including the gate's bootstrap cursor."""
 
+import datetime
 import importlib.util
 import json
 import os
@@ -81,6 +82,10 @@ class BorsTests(unittest.TestCase):
                 for i, chunk in enumerate(chunks)])
         if args[:2] == ["api", "user"]:
             return "operator"
+        if args[:2] == ["pr", "list"]:
+            self.assertEqual(args[args.index("--state") + 1], "closed")
+            self.assertTrue(args[args.index("--search") + 1].startswith("closed:>="))
+            return json.dumps(self.closed_since)
         self.fail(f"unexpected network request: {args}")
 
     def build(self):
@@ -108,6 +113,51 @@ class BorsTests(unittest.TestCase):
         self.rows = [self.rows[3]]
         with self.assertRaises(plan.NotDue):
             self.build()
+
+    def test_the_label_cache_counts_a_bors_merge_found_by_its_closure(self):
+        self.run_git("init", "-q", "-b", "main", str(self.roadmap))
+        self.run_git("-C", str(self.roadmap), "add", "-A")
+        self.run_git("-C", str(self.roadmap), "commit", "-q", "-m", "PDE roadmap")
+        cache = pathlib.Path(self.tmp.name) / "labels.json"
+        start = datetime.datetime.now(datetime.timezone.utc)
+
+        def run(now):
+            with patch.object(gh, "gh", side_effect=self.github), \
+                 patch("progress.docs.discover") as discover:
+                discover.return_value.source_commit.return_value = self.tip
+                discover.return_value.pin.return_value = {"source_commit": self.tip}
+                return plan.build_plan(self.roadmap, self.code, open_prs=[], ref="main", now=now,
+                                       strategy="threshold", label_cache=cache)
+
+        self.assertEqual(run(start)["prs"], [102, 100, 101])
+        self.calls.clear()
+        self.commit("feat: another bors squash (#104)")
+        self.tip = window.head_sha(self.code, ref="main")
+        self.closed_since = [{"number": 104, "labels": [{"name": "roadmap/PDE"}],
+                              "mergedAt": None, "mergeCommit": None}]
+        self.rows.append({"number": 104, "mergedAt": None, "mergeCommit": None})
+        self.assertEqual(run(start + datetime.timedelta(hours=1))["prs"], [104, 102, 100, 101])
+        self.assertEqual([call[:2] for call in self.calls], [["pr", "list"], ["api", "graphql"]])
+
+    def test_a_label_added_after_closure_reaches_the_plan_that_moves_the_cursor(self):
+        (self.area / "PROGRESS.md").write_text(
+            files.new_progress_file("PDE") + files.render_section(
+                "PDE", self.root, self.bors, [101], "2026-01-01", "prose " * 60))
+        cache = pathlib.Path(self.tmp.name) / "labels.json"
+        start = datetime.datetime.now(datetime.timezone.utc)
+        labelled, self.rows = self.rows, [row for row in self.rows if row["number"] != 100]
+        with patch.object(gh, "gh", side_effect=self.github):
+            gh.cached_closed_prs_for_areas(cache, ["PDE"], now=start)
+        # #100 closed long before the cache's last search, so only a full read sees its new label.
+        self.rows, self.closed_since = labelled, []
+        with patch.object(gh, "gh", side_effect=self.github), \
+             patch("progress.docs.discover") as discover:
+            discover.return_value.source_commit.return_value = self.tip
+            discover.return_value.pin.return_value = {"source_commit": self.tip}
+            result = plan.build_plan(self.roadmap, self.code, commits=[], open_prs=[], ref="main",
+                                     min_prs=1, now=start + datetime.timedelta(hours=1), label_cache=cache)
+        self.assertEqual(result["prs"], [102, 100])
+        self.assertIn("100", json.loads(cache.read_text())["areas"]["PDE"])
 
     def test_unmerged_reachable_test_merge_sha_is_ignored(self):
         with patch.object(gh, "gh", side_effect=self.github):

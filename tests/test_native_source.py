@@ -624,6 +624,68 @@ class NativePlanning(unittest.TestCase):
         )
         self.assertTrue(owns({"source_head_repository": self.roadmap.identity.record(), "headRepositoryOwner": {}}))
 
+    def open_row(self, number, area="Area"):
+        return {**self.row(number, area), "state": "open"}
+
+    def test_the_label_cache_reads_the_complete_labelled_listing_each_run(self):
+        from progress.native_source import LabelReader
+
+        cache = self.root / "labels.json"
+        reader = LabelReader(self.content)
+        self.open = [self.open_row(9), self.open_row(8, "Other")]
+        self.closed = [self.row(7, merged=True, sha="a" * 40), self.row(6), self.row(5, "Other")]
+        self.assertEqual(reader.read(cache, ["Area", "Other"]),
+                         {"Area": {9: None, 7: "a" * 40, 6: None}, "Other": {8: None, 5: None}})
+        self.assertEqual(json.loads(cache.read_text())["binding"], f"{self.content.repository.key}#11")
+        # 9 merged; 11 was opened and merged; 10 was labelled while open; 8 lost its label.
+        self.open = [self.open_row(10)]
+        self.closed = [self.row(11, merged=True, sha="b" * 40), self.row(9, merged=True, sha="c" * 40),
+                       {**self.row(8), "labels": []}, *self.closed]
+        expected = {"Area": {11: "b" * 40, 10: None, 9: "c" * 40, 7: "a" * 40, 6: None}, "Other": {5: None}}
+        self.assertEqual(reader.read(cache, ["Area", "Other"]), expected)
+        self.assertEqual(self.content.labelled_histories(["Area", "Other"]), expected)
+
+    def test_the_label_cache_finds_an_imported_pr_listed_after_older_numbers(self):
+        from progress.native_source import LabelReader
+
+        cache, reader = self.root / "labels.json", LabelReader(self.content)
+        self.closed = [self.row(9), self.row(7)]
+        reader.read(cache, ["Area"])
+        # #40 was imported with its original, older creation date, so it lists after #7.
+        self.closed = [self.row(9), self.row(7), self.row(40)]
+        self.assertEqual(reader.read(cache, ["Area"]), {"Area": {9: None, 7: None, 40: None}})
+
+    def test_a_github_label_cache_is_never_read_for_a_native_repository(self):
+        from progress.native_source import LabelReader
+
+        cache = self.root / "labels.json"
+        with patch.object(gh, "closed_prs_for_areas", lambda areas, repo=None: {a: {1: None} for a in areas}):
+            gh.cached_closed_prs_for_areas(cache, ["Area"])
+        self.closed = [self.row(7)]
+        self.assertEqual(LabelReader(self.content).read(cache, ["Area"]), {"Area": {7: None}})
+        self.assertTrue(json.loads(cache.read_text())["binding"].startswith("forgejo:"))
+        with patch.object(gh, "closed_prs_for_areas", lambda areas, repo=None: {a: {1: None} for a in areas}), \
+             patch.object(gh, "gh", side_effect=AssertionError("a native file is not searched on GitHub")):
+            self.assertEqual(gh.cached_closed_prs_for_areas(cache, ["Area"]), {"Area": {1: None}})
+
+    def test_a_bound_plan_reads_through_the_label_cache_and_rereads_its_choice(self):
+        from progress.native_source import LabelReader
+
+        self.commit("Earlier proof\n\nSource-PR: " + self.content.repository.key + "#7", "TauCeti/A.lean")
+        sha = self.commit("Queue accepted\n\nSource-PR: " + self.content.repository.key + "#9", "TauCeti/A.lean")
+        roadmap = self.root / "roadmap"
+        (roadmap / "TauCetiRoadmap/Area").mkdir(parents=True)
+        (roadmap / "TauCetiRoadmap/Area/README.md").write_text("# Area\n")
+        cache, docs = self.root / "labels.json", self.docs(sha)
+        self.closed = [self.row(9), self.row(6)]
+        LabelReader(self.content).read(cache, ["Area"])
+        # #7 closed before the cursor and is labelled only now: no incremental read can see it.
+        self.closed = [self.row(9), self.row(7), self.row(6)]
+        with patch.object(gh, "gh", side_effect=AssertionError("native work must not fall back to gh")):
+            result = plan.build_plan(roadmap, self.code, source=self.source, ref="main", min_prs=1, docs=docs,
+                                     label_cache=cache)
+        self.assertEqual(result["prs"], [9, 7])
+        self.assertIn("7", json.loads(cache.read_text())["areas"]["Area"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ Two design points worth stating, because both were defects in an earlier draft:
 """
 
 import base64
+import datetime
 import fcntl
 import hashlib
 import json
@@ -328,6 +329,78 @@ def closed_prs_for_areas(areas, repo=CODE_REPO):
             except (ValueError, KeyError, TypeError, AttributeError) as exc:
                 raise GhError(f"could not read complete closed PR histories: {exc}") from exc
     return histories
+
+
+def closed_prs_since(since, repo=CODE_REPO, limit=1000):
+    """`{number: (label_names, native_merge_sha_or_None)}` for PRs closed at or after `since`.
+
+    One search, which GitHub caps at 1000 results: a caller must read a full result as "possibly
+    more". The SHA means what it does in `closed_prs_for_area`.
+    """
+    stamp = since.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = gh([
+        "pr", "list", "--repo", repo, "--state", "closed", "--search", f"closed:>={stamp}",
+        "--limit", str(int(limit)), "--json", "number,labels,mergedAt,mergeCommit",
+    ])
+    try:
+        found = {}
+        for row in json.loads(out):
+            sha = (row.get("mergeCommit") or {}).get("oid") if row["mergedAt"] else None
+            if row["mergedAt"] and not sha:
+                raise GhError(f"native merge SHA unavailable for PR #{row['number']}")
+            found[int(row["number"])] = ([label["name"] for label in row["labels"]], sha)
+        return found
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise GhError(f"could not parse closed PR search output: {exc}") from exc
+
+
+# The search is by close time; the margin absorbs clock skew between this host and GitHub and a
+# closure that was being recorded while the previous search ran.
+LABEL_CACHE_MARGIN = datetime.timedelta(hours=1)
+LABEL_CACHE_SEARCH_LIMIT = 1000
+
+
+class _LabelReader:
+    """`label_cache`'s reader for a GitHub repository: the cursor is the time of the last search."""
+
+    def __init__(self, repo, now):
+        self.repo, self.now = repo, now
+
+    def full(self, areas):
+        return closed_prs_for_areas(areas, repo=self.repo) if areas else {}
+
+    def start(self, areas):
+        return self.now.isoformat(timespec="seconds")
+
+    def changes(self, cursor, areas):
+        since = datetime.datetime.fromisoformat(cursor) - LABEL_CACHE_MARGIN
+        closed = closed_prs_since(since, repo=self.repo, limit=LABEL_CACHE_SEARCH_LIMIT)
+        if len(closed) >= LABEL_CACHE_SEARCH_LIMIT:
+            raise ValueError("more closed than one search returns")
+        prefix = ROADMAP_LABEL_PREFIX
+        return {number: ({label[len(prefix):] for label in labels if label.startswith(prefix)}, sha)
+                for number, (labels, sha) in closed.items()}
+
+
+def cached_closed_prs_for_areas(path, areas, repo=CODE_REPO, now=None):
+    """`closed_prs_for_areas`, answered from the label cache at `path` (see `label_cache`).
+
+    A run after the first makes one search for the PRs closed since the previous run and files them
+    under their labels; only areas the file has not seen are read in full. The search cannot see a
+    label changed on a PR that closed before the previous run, and comes back full when more than
+    `LABEL_CACHE_SEARCH_LIMIT` closed, so the file is read in full daily and after a full search.
+    """
+    from . import label_cache
+
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return label_cache.read(path, areas, _LabelReader(repo, now), f"github:{repo}", now=now)
+
+
+def refresh_cached_area(path, area, repo=CODE_REPO):
+    """`closed_prs_for_area`, read in full and filed in the label cache at `path`."""
+    from . import label_cache
+
+    return label_cache.refresh(path, area, _LabelReader(repo, None), f"github:{repo}")
 
 
 def pr_details(numbers, repo=CODE_REPO):
