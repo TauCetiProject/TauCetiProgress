@@ -97,7 +97,7 @@ guards still apply.
 ## Documentation facts bundles
 
 Each plan fetches `<docs base>/facts.json.gz` once. The base is `TAUCETI_DOCS_URL` (default
-`https://taucetiproject.org/docs`). The
+`https://taucetiproject.github.io/TauCeti/docs`, the Pages site TauCeti deploys). The
 [TauCeti producer](https://github.com/TauCetiProject/TauCeti/pull/19012) deploys that single gzip
 file beside `SOURCE_SHA` and the HTML it describes, and
 [documents the format](https://github.com/TauCetiProject/TauCeti/blob/0424be258106fab1fc976fe35588a95d74a3e563/scripts/docs-facts.md).

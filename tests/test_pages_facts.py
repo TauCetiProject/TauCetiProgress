@@ -20,7 +20,7 @@ from progress.docs import (ArtifactError, ArtifactNotFound, ConfigurationError, 
                            FactsReplanRequired, ReplanRequired, UnsupportedFactsSchema, discover)
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures/pages-facts"
-BASE = "https://taucetiproject.org/docs"
+BASE = docs.DOCS_BASE
 
 
 def gzip_bytes(raw):
@@ -77,7 +77,7 @@ class PagesFactsTests(unittest.TestCase):
         self.assertEqual(decls["Demo.instReprPoint"]["start"], 23)
         self.assertEqual(decls["Demo.alpha"]["doc"],
                          "**Alpha's theorem.** It states `True`.\n\nA second paragraph.")
-        self.assertEqual(decls["Demo.alpha"]["url"], BASE + "/Demo/A.html#Demo.alpha")
+        self.assertEqual(decls["Demo.alpha"]["url"], "https://taucetiproject.org/docs/Demo/A.html#Demo.alpha")
         # No manifest, pointer, HTML, SOURCE_SHA, or provider request is needed.
         self.assertEqual(len(self.requests), 1)
 
