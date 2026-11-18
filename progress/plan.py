@@ -176,11 +176,12 @@ def roadmap_commits(roadmap_dir, ref):
     return [tuple(line.split("\t", 1)) for line in rows.splitlines() if "\t" in line]
 
 
-def area_window(repo_dir, area_prs, from_sha, to_sha, **history):
+def area_window(repo_dir, area_prs, from_sha, to_sha, commit_prs=(), **history):
     """PR numbers in `(from_sha, to_sha]` that belong to an area, newest first.
 
     Attribution is an intersection: git says which PRs are in the range, one label query says
-    which PRs belong to the area. Order comes from git (newest first).
+    which PRs belong to the area. Order comes from git (newest first). `commit_prs` are the area's
+    commit-attributed keys (`commit_attribution.area_prs`), which stand in for labels.
     """
     revision = window.immutable_revision(repo_dir, f"{from_sha}..{to_sha}")
     from_sha, to_sha = revision.split("..")
@@ -195,7 +196,7 @@ def area_window(repo_dir, area_prs, from_sha, to_sha, **history):
         if unaccounted:
             raise window.GitError("native merge has no matching source provenance in this window: "
                                   + ", ".join(f"#{n}" for n in unaccounted[:5]))
-    wanted = set(area_prs)
+    wanted = set(area_prs) | set(commit_prs)
     return [n for n in numbers if n in wanted]
 
 
@@ -231,20 +232,39 @@ def _unaccounted_merges(area_prs, rows, reachable, *, migration=None):
             and not (sha in migration.commits and migration.commits[sha] is None)]
 
 
-def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF, **history):
+def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF, commit_prs=None, **history):
     """A `from_sha` for an unreported area, or None if no labelled merge is in `ref` yet.
 
     The window is half-open, so the cursor must be the *parent* of the area's earliest labelled
     merge; using the merge itself would drop that first PR from every area's first report.
+    `commit_prs` maps the area's commit-attributed keys to their earliest commits in `ref`, and
+    competes with the labelled merges for that first place.
     """
     numbers = list(area_prs)
-    if not numbers:
+    landed = list(dict.fromkeys((commit_prs or {}).values()))
+    if not numbers and not landed:
         return None
     # A shallow history can contain a later labelled merge while omitting the first one. Refuse
     # before choosing a cursor or treating an unfetched earlier merge as documentation lag.
     if window.git(["rev-parse", "--is-shallow-repository"], repo_dir).strip() == "true":
         raise window.GitError(f"a full-history checkout is required to bootstrap an area ({area})")
     ref = window.immutable_revision(repo_dir, ref)
+    if numbers:
+        found = _earliest_labelled(repo_dir, area, area_prs, ref, **history)
+        if found is not None:
+            landed.append(found)
+    if not landed:
+        return None
+    # Every candidate is on `ref`'s first-parent chain, where the earlier commit is the ancestor.
+    earliest = landed[0]
+    for sha in landed[1:]:
+        if window.is_ancestor(repo_dir, sha, earliest):
+            earliest = sha
+    return window.first_parent_before(repo_dir, earliest)
+
+
+def _earliest_labelled(repo_dir, area, area_prs, ref, **history):
+    numbers = list(area_prs)
     # The earliest to MERGE, not the lowest-numbered. Numbers are assigned when a pull request is
     # opened, and pull requests do not merge in the order they were opened; starting from the lowest
     # number would put the cursor after any labelled pull request that opened later but merged
@@ -260,12 +280,10 @@ def bootstrap_from_sha(repo_dir, area, area_prs, ref=CODE_REF, **history):
             f"cannot be determined from commit subjects"
         )
     found = window.earliest_merged(repo_dir, numbers, ref=ref, **history)
-    if found is None:
-        # GitHub's label query follows merges before docgen necessarily reaches them. In a complete
-        # checkout, unaccounted_prs already ruled out an unrecognised merge in this history. Defer
-        # this area until one of its merges reaches ref; do not invent or advance a cursor.
-        return None
-    return window.first_parent_before(repo_dir, found[1])
+    # None: GitHub's label query follows merges before docgen necessarily reaches them. In a
+    # complete checkout, unaccounted_prs already ruled out an unrecognised merge in this history.
+    # Defer this area until one of its merges reaches ref; do not invent or advance a cursor.
+    return None if found is None else found[1]
 
 
 def _own_login():
@@ -380,6 +398,7 @@ def build_plan(
                                    owner_filter=source.roadmap.report_owner_filter() if source else None)
 
     areas = discover_areas(roadmap_dir)
+    all_areas = set(areas)
     if only_area:
         if only_area not in areas:
             raise NotDue(f"{only_area} is not a roadmap area in this checkout")
@@ -427,15 +446,22 @@ def build_plan(
     # Only histories used below need reading. Current and malformed cursors
     # must not turn a neighbour's useful plan into an all-area history scan.
     histories = (source.content.labelled_histories(eligible) if source else gh.closed_prs_for_areas(eligible)) if eligible else {}
+    # Commit-attributed pull requests have no label history; their commits are classified instead,
+    # against every roadmap so that a pull request naming another area is not credited here.
+    from .commit_attribution import area_prs as commit_area_prs
+
+    attributed = commit_area_prs(code_dir, window.first_parent_prs(code_dir, tip, **history),
+                                 all_areas) if eligible else {}
     for area, (rel_dir, status_text, progress_text, from_sha) in eligible.items():
         area_prs = histories[area]
-        if not area_prs:
+        commit_prs = attributed.get(area, {})
+        if not area_prs and not commit_prs:
             skipped.append(f"{area}: no merged PRs yet")
             continue
 
         bootstrapped = False
         if from_sha is None:
-            from_sha = bootstrap_from_sha(code_dir, area, area_prs, ref=ref, **history)
+            from_sha = bootstrap_from_sha(code_dir, area, area_prs, ref=ref, commit_prs=commit_prs, **history)
             bootstrapped = True
             if from_sha is None:
                 skipped.append(f"{area}: no labelled merges in {ref} yet; waiting for documentation")
@@ -484,7 +510,7 @@ def build_plan(
         # The failure it guarded against is a PR appearing in two reports after someone changed its
         # label. That is cosmetic. Silently unreportable history is not, so the trade goes the other
         # way.
-        fresh = area_window(code_dir, area_prs, from_sha, to_sha, **history)
+        fresh = area_window(code_dir, area_prs, from_sha, to_sha, commit_prs, **history)
         if not fresh:
             skipped.append(f"{area}: nothing new since {from_sha[:7]}")
             continue
