@@ -8,7 +8,8 @@ prompt asks and to the material the model was given:
 * **Links the model built.** Every documentation URL must be copied from the facts file or from the
   roadmap's previous STATUS.md or PROGRESS.md.
 * **Links that died.** A URL carried over from an old STATUS.md can name a declaration that has since
-  been renamed or moved, so each one is looked up in the plan's pinned documentation facts.
+  been renamed or moved, so every link whose module path the facts know, on any host, is looked up
+  in the plan's pinned documentation facts.
 * **Assessments lost.** A layer the previous report judged `done`, `partial` or `untouched` must not
   become `unassessed` against the same README, and a report must assess at least one layer.
 
@@ -184,9 +185,8 @@ def run_checks(plan, facts, status_body, section_body, old_status, old_progress,
     for url in sorted(suffix_dropped(status_body + "\n" + section_body) & supplied):
         failures.append(f"a bare URL loses its final `{url[-1]}` when rendered; write it as <{url}>")
     for url in sorted(urls(status_body + "\n" + section_body)):
-        if url not in supplied:
-            if url.startswith(base):
-                failures.append(f"documentation URL not copied from the facts or the previous report: {url}")
+        if url not in supplied and url.startswith(base):
+            failures.append(f"documentation URL not copied from the facts or the previous report: {url}")
         elif docs is not None and (why := link_problem(url, docs)):
             failures.append(f"dead documentation link ({why}): {url}")
 

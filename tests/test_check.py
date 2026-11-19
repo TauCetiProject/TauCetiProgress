@@ -204,6 +204,9 @@ def test_a_link_on_a_former_documentation_host_is_checked_by_its_module_path():
     renamed = former + "_old"
     fails, *_ = run(status(link=renamed) + block("done", "partial"), old=previous(link=renamed))
     assert any("dead documentation link" in f and renamed in f for f in fails), fails
+    made_up = former.replace("Demo.Sub.beta", "Demo.Sub.doesNotExist")
+    fails, *_ = run(status(link=made_up) + block("done", "partial"), old=previous())
+    assert any("dead documentation link (no such declaration" in f and made_up in f for f in fails), fails
 
 
 def test_an_assessed_layer_may_not_become_unassessed():
