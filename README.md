@@ -31,12 +31,64 @@ done by tested Python too.
 tauceti-progress due                      is an update due? (one API call, no clone)
 tauceti-progress plan   --roadmap-dir DIR pick the roadmap and the PR window
 tauceti-progress facts  --plan FILE       what declarations actually landed in the window
+tauceti-progress check  --plan FILE ...   hold the model's two bodies to the prompt and the facts
 tauceti-progress apply  --plan FILE ...   write the files, open the PR (resumable)
 tauceti-progress announce --section FILE  post a new section to Zulip (idempotent)
 ```
 
 `due` is the only one that runs often; it exits 75 ("no progress") when nothing is due, matching
 the worker's convention. `plan` runs at most once a day.
+
+### Choosing the roadmap
+
+`plan` uses the `busiest` strategy by default: it waits until no report has landed anywhere for 8
+hours, then takes the roadmap with the most PRs in its window, if it has at least 10.
+
+`plan --strategy threshold` decides per roadmap and has no project-wide cadence, for a caller that
+polls for work. With N the PRs in a roadmap's window and T the days since its last report landed
+(since its README was added, if it has never been reported), a roadmap qualifies when N > 0 and one
+of these holds: N + T > 10 (`--threshold`); it is archived under `Completed/`; or it is not yet
+assessed, meaning it has no report, or its report carries no coverage header bound to the README as
+it now stands, for it and each sub-roadmap. The merge gate's six-hour interval per roadmap is
+applied as well. Among the roadmaps that qualify the unassessed go first, then the largest N + T.
+An open report holds its area for 72 hours whoever opened it, as long as its head repository still
+exists. T is read from the roadmap checkout's history at `--roadmap-ref` (default `HEAD`), which
+must be complete.
+
+`--table FILE` (threshold only) writes every roadmap's standing as JSON, whether or not one
+qualifies: `chosen`, `next_qualifies_at`, `to_sha`, and one row per roadmap with `area`, `prs`,
+`days`, `score`, `assessed`, `complete`, `qualifies`, `qualifies_from` and `note`. When `plan` exits
+75, `next_qualifies_at` is the earliest time a roadmap qualifies with the PRs it has now or an open
+report stops holding its roadmap (a held row's `qualifies_from` is when its report goes stale), or
+null when only new PRs, or a report closing, can make one qualify.
+
+`--skip-area AREA` (repeatable, either strategy) keeps a roadmap from being chosen.
+`--label-cache FILE` (either strategy) keeps each area's labelled PRs between runs: a later run makes
+one search for what closed since the previous one, and the full labelled histories are read again
+once a day. The search misses a label added to a PR that had already closed, so the chosen roadmap's
+history is read in full before its plan is written: one more GraphQL query per plan, a page per 100
+labelled PRs.
+
+`build_plan` also plans from a bound `NativeSource`, whose content and roadmap repositories are both
+on Forgejo; the command line binds none. Both strategies, the table, `--skip-area` and the label
+cache work with one. Forgejo cannot search by close or update time, and lists by creation time,
+which an import can set out of number order, so there each run reads the complete labelled listing,
+as an uncached plan does. The cache file names its forge and repository, so a file written for one
+is never read for another. Two things
+are not supported: content on Forgejo with the roadmap on GitHub, and `apply` of a plan made from a
+bound source, which it refuses.
+
+### Checking the prose
+
+`check --plan FILE --facts FILE --status-body FILE --section-body FILE --roadmap-dir DIR` renders
+the report as `apply` would, without committing anything, and then holds it to what the prompt asks:
+750 and 300 words, three paragraphs, the two status headings. It refuses a documentation link that
+was not copied from the facts or the previous report, one whose declaration is not in the plan's
+pinned documentation facts, a layer the previous report assessed that is now `unassessed` against
+the same README, a report that assesses no layer, and a bare URL whose final `?` or `!` the
+rendered link would drop. Findings are printed as `FAIL:` lines and the
+exit code is 1; the writing model can run it and repair what it reports. `--no-links` skips the
+lookup in the pinned facts.
 
 ## The window cursor is a SHA, on the docs-tracking branch
 
