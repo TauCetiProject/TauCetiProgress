@@ -13,7 +13,15 @@ Source-PR: forgejo:https://forge.example/team/Math#7
 ```
 
 The forge kind, origin and repository name remain part of the citation. PR 7 on
-GitHub and PR 7 on two Forgejo origins are three different objects. Only complete
+GitHub and PR 7 on two Forgejo origins are three different objects. A queue may
+also name the repository's native ID, `forgejo:https://forge.example/team/Math@3#7`;
+the ID is then part of the citation, so a recreated repository of the same name
+is a different source. A cited ID numbers a report-repository pull request only
+when it equals that repository's own (`repository_id`, carried by native source
+bindings); otherwise the citation is foreign, and a migration between the two
+same-name repositories is allowed. A citation without an ID matches by URL,
+unless a migration maps it into the report repository; the mapping then wins.
+Only complete
 trailers matching the queue's grammar count; prose and empty or lookalike fields
 are ignored. Malformed or conflicting recognized citations, or disagreement with
 the subject number, abort the read.
@@ -26,6 +34,41 @@ current-repository numbers only after checking the origin or applying that map.
 An unqualified historical subject needs an explicit legacy namespace when the
 report repository is native. Foreign citations without a matching map refuse;
 they never become matching current PR numbers by coincidence.
+
+## Commit-attributed sources
+
+A second forge can land pull requests on the same mainline while the report
+repository keeps merging its own. Tau Ceti's Forgejo queue has done so beside
+Bors since 2026-11-15. Those pull requests have no report number and no
+`roadmap/<Area>` label, so `TAUCETI_PROGRESS_COMMIT_SOURCES` names the
+repositories whose citations are kept instead of refused: whitespace-separated
+qualified repositories with their native IDs, by default
+`forgejo:https://git.taucetiproject.org/TauCetiProject/TauCeti@1`, and empty to
+disable. Each such pull request is identified everywhere by its canonical
+`PullSource.key` string. That includes plans, facts and the `prs` list of a
+`PROGRESS.md` section, where it sorts after the report repository's integers.
+Readers are shown its web page rather than `TauCeti#N`.
+
+`commit_attribution` decides its roadmap with the labeller's own `classify`,
+loaded from the pinned TauCetiTools. It reads the commit message without its
+subject paragraph as the description, and the commit's first-parent paths as
+the diff. A pull request the queue landed as several commits is classified on
+the union of their paths, once per message, and counts only if every message
+agrees. `roadmap/none` and `roadmap/Unknown` count for no roadmap, as those
+labels do. Classification needs no forge read, and rename detection stays off.
+
+Only the history a report needs is read, through `commit_attribution.Attribution`
+(one per planning round): an area's window, or, for an area with no cursor, all
+first-parent history through the documented commit, where its earliest
+commit-attributed pull request competes with the labelled merges to start the
+first window. A pull request split across a window boundary is read across up to
+32 consecutive commits on either side, so neighbouring windows classify it alike;
+the first commit citing anything else ends that read, and only its message is read.
+Provenance errors outside those reads cannot stop a report, and an unreported
+area that only commit attribution could start is set aside when its history is
+unreadable. Disabled, nothing extra is read. The merge collector computes a first
+report's cursor with the same functions, given the base branch's roadmaps and the
+report's `to_sha`; without either it refuses.
 
 `MigrationMap.parse()` accepts this versioned, one-to-one correspondence:
 
@@ -168,7 +211,10 @@ pin upgrade, mechanically regenerate facts for unfinished windows under the new
 version and retain existing paid prose for inspection; do not silently reuse old
 facts as if calculated by the new version. Qualified writer context requires the
 same plan/facts source binding, window endpoints, documentation pin and PR set,
-plus complete, non-duplicated qualified commentary from its content repository.
+plus complete, non-duplicated qualified commentary, each row from the repository
+its pull request cites: the content repository's own through `pr_details`, a
+commit-attributed one through `commit_attribution.commentary`, which reads its
+merged commit message and asks no forge.
 
 The command-line entry points still use the legacy bootstrap and reject native
 project configurations. Apply also refuses qualified saved plans before any
