@@ -151,6 +151,16 @@ class SourceWindows(unittest.TestCase):
         with self.assertRaises(ProvenanceError):
             MigrationMap([(old, new), (new, PullSource(self.other, 9))])
 
+    def test_the_carry_scan_leaves_out_a_number_a_numbered_subject_also_claims(self):
+        old, new = PullSource(self.github, 7), PullSource(self.native, 103)
+        history = dict(repository=self.native, legacy_repository=self.github, migration=MigrationMap([(old, new)]))
+        imported = self.commit(f"imported proof\n\nSource-PR: {old.key}")
+        self.assertEqual(window.citation_only_prs(self.root, imported, **history), [(imported, 103)])
+        tip = self.commit(f"native merge (#103)\n\nSource-PR: {new.key}")
+        with self.assertRaisesRegex(window.GitError, "distinct source citations"):
+            window.window_prs(self.root, self.initial, tip, **history)
+        self.assertEqual(window.citation_only_prs(self.root, tip, **history), [])
+
     def test_migration_duplicate_sources_destinations_and_wrong_target_refuse(self):
         old = PullSource(self.github, 7)
         new = PullSource(self.native, 103)

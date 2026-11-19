@@ -49,10 +49,22 @@ def sanitize_untrusted(text):
     return out.strip()
 
 
+def _cites(repository, number, content):
+    """Whether commentary from `repository` is that of the plan's pull request `number`: the content
+    repository's for a number, the cited one for a commit-attributed key, whose name is lowercased."""
+    if isinstance(number, int):
+        return repository == content
+    from .provenance import PullSource
+
+    citation = PullSource.parse(number)
+    return (repository.repository.key, repository.native_id) == (citation.repository.key, citation.native_id)
+
+
 def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_bodies=MAX_BODIES):
     """The context block for one window, as text.
 
-    `pr_details` is `[{number,title,body,url,merged_at}]`, newest first.
+    `pr_details` is `[{number,title,body,url,merged_at}]`, newest first: the report repository's
+    from `pr_details`, commit-attributed ones from `commit_attribution.commentary`.
     """
     if "source" in plan or "source" in fact_data:
         from tauceti_tools.ci_candidate import RepositoryIdentity
@@ -78,13 +90,12 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
             factual = [row["number"] for row in fact_data["prs"]]
             commentary = [row["number"] for row in pr_details]
             for observed in (numbers, factual, commentary):
-                if any(type(number) is not int or number < 1 for number in observed) \
-                        or len(set(observed)) != len(observed) or set(observed) != set(numbers):
+                if set(files.require_pr_numbers(observed)) != set(numbers):
                     raise ValueError("facts or commentary PRs differ from plan")
-            expected = RepositoryIdentity.parse(source["content"])
+            content = RepositoryIdentity.parse(source["content"])
             for row in pr_details:
                 actual = RepositoryIdentity.parse(row.get("repository"))
-                if actual != expected or row.get("number") not in plan["prs"]:
+                if row.get("number") not in plan["prs"] or not _cites(actual, row["number"], content):
                     raise ValueError("PR commentary belongs to another source or window")
         except (ValueError, TypeError, KeyError):
             raise ReplanRequired("writing context source binding mismatch; preserve prepared artifacts") from None
@@ -102,6 +113,18 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
         intro.append(
             "This is the FIRST report for this roadmap, so the window covers its whole history "
             "rather than a single day."
+        )
+    carried = plan.get("carried") or []
+    if carried:
+        landed = sorted({str(row.get("landed") or "")[:10] for row in carried} - {""})
+        numbers = list(dict.fromkeys(row["number"] for row in carried))
+        intro.append(
+            f"{len(numbers)} of these pull requests landed before this window"
+            + (f" (on {', '.join(landed)})" if landed else "")
+            + " and no earlier section reported them: "
+            + ", ".join(f"#{number}" for number in numbers)
+            + ". Their declarations are listed with the window's own. Report the work, and say once "
+            "that it landed earlier and is recorded here late."
         )
 
     decls = fact_data["declarations"]
@@ -162,7 +185,7 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
         doc = f" -- {d['doc']}" if d["doc"] else ""
         url = f" <{d['url']}>" if d.get("url") else ""
         state = "" if d.get("new") else " [revised, not new]"
-        body.append(f"- `{d['name']}` ({d['kind']}, {PROJECT_NAME}#{d['pr']}, {d['file']}){state}{doc}{url}")
+        body.append(f"- `{d['name']}` ({d['kind']}, {files.pr_reference(d['pr'], PROJECT_NAME)}, {d['file']}){state}{doc}{url}")
 
     body += [
         "",
@@ -175,13 +198,13 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
     ]
     for pr in with_bodies:
         body.append("")
-        body.append(f"### {PROJECT_NAME}#{pr['number']}: {pr['title'][:MAX_TITLE_CHARS]}")
+        body.append(f"### {files.pr_reference(pr['number'], PROJECT_NAME)}: {pr['title'][:MAX_TITLE_CHARS]}")
         text = sanitize_untrusted(pr.get("body") or "")[:MAX_BODY_CHARS]
         body.append(f"{FENCE}\n{text}\n{FENCE_END}" if text else "(no description)")
 
     if without:
         body += ["", "### Remaining pull requests in this window (titles only)", ""]
         for pr in without:
-            body.append(f"- {PROJECT_NAME}#{pr['number']}: {pr['title'][:MAX_TITLE_CHARS]}")
+            body.append(f"- {files.pr_reference(pr['number'], PROJECT_NAME)}: {pr['title'][:MAX_TITLE_CHARS]}")
 
     return "\n".join(intro + body) + "\n"

@@ -165,6 +165,8 @@ class NativeRepository:
         self._check_binding()
         result = []
         for number in numbers:
+            if isinstance(number, str):
+                raise ValueError(f"{number} is commit-attributed: use commit_attribution.commentary")
             _number(number, "PR number")
             row = self.api.pull(self.repository, number)
             if "body" not in row:
@@ -308,8 +310,8 @@ class NativeSource:
 
     @property
     def history_options(self):
-        return {"repository": self.content.repository, "legacy_repository": self.legacy_content,
-                "legacy_through": self.legacy_through}
+        return {"repository": self.content.repository, "repository_id": self.content.identity.native_id,
+                "legacy_repository": self.legacy_content, "legacy_through": self.legacy_through}
 
     def record(self):
         legacy = self.legacy_content
@@ -354,4 +356,5 @@ def history_options_from_record(value):
             raise ValueError("invalid saved legacy source origin")
         legacy = RepositoryRef(Forge(**legacy["forge"]), legacy["name"])
     _validate_boundary(legacy, value["legacy_through"])
-    return {"repository": content.repository, "legacy_repository": legacy, "legacy_through": value["legacy_through"]}
+    return {"repository": content.repository, "repository_id": content.native_id, "legacy_repository": legacy,
+            "legacy_through": value["legacy_through"]}

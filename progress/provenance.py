@@ -18,6 +18,9 @@ from tauceti_tools.forge import GITHUB, Forge, RepositoryRef
 
 _TRAILER_RE = re.compile(r"^(?P<token>[A-Za-z][A-Za-z0-9-]*):[ \t]+(?P<value>\S.*?)\s*$")
 MAX_MAP_BYTES = 16 * 1024 * 1024
+COMMIT_SOURCES_ENV = "TAUCETI_PROGRESS_COMMIT_SOURCES"
+# The Forgejo queue has landed Tau Ceti pull requests beside Bors since 2026-11-15.
+DEFAULT_COMMIT_SOURCES = "forgejo:https://git.taucetiproject.org/TauCetiProject/TauCeti@1"
 
 
 class ProvenanceError(ValueError):
@@ -28,18 +31,25 @@ class ProvenanceError(ValueError):
 class PullSource:
     repository: RepositoryRef
     number: int
+    native_id: int | None = None
 
     def __post_init__(self):
         if (
             not isinstance(self.repository, RepositoryRef)
             or type(self.number) is not int
             or not 0 < self.number < 2**63
+            or not (self.native_id is None or (type(self.native_id) is int and 0 < self.native_id < 2**63))
         ):
             raise ProvenanceError("source citation needs a qualified repository and positive PR number")
 
     @property
+    def namespace(self):
+        """The repository this number belongs to: its URL, and its native ID when cited."""
+        return self.repository.key + ("" if self.native_id is None else f"@{self.native_id}")
+
+    @property
     def key(self):
-        return f"{self.repository.key}#{self.number}"
+        return f"{self.namespace}#{self.number}"
 
     def __hash__(self):
         return hash(self.key)
@@ -55,18 +65,48 @@ class PullSource:
             repository, separator, number = value.rpartition("#")
             if not separator or re.fullmatch(r"[1-9][0-9]*", number) is None:
                 raise ValueError
+            native_id = None
             if repository.startswith(("github:", "forgejo:")):
                 kind, _, location = repository.partition(":")
                 parsed = urlsplit(location)
                 if "?" in location or "#" in location or parsed.path.count("/") != 2:
                     raise ValueError
+                # A queue names its repository by native ID as well (`.../TauCeti@1`), so a
+                # deleted and recreated repository of the same name is a different source.
+                name, at, native = parsed.path.removeprefix("/").partition("@")
+                if at:
+                    if re.fullmatch(r"[1-9][0-9]*", native) is None:
+                        raise ValueError
+                    native_id = int(native)
                 forge = Forge(kind, parsed.scheme + "://" + parsed.netloc)
-                reference = RepositoryRef(forge, parsed.path.removeprefix("/"))
+                reference = RepositoryRef(forge, name)
             else:
                 reference = RepositoryRef(GITHUB, repository)
-            return cls(reference, int(number))
+            return cls(reference, int(number), native_id)
         except (ValueError, TypeError):
             raise ProvenanceError("invalid Source-PR citation") from None
+
+
+def commit_sources(value=None):
+    """`{(repository key, native ID)}` whose merged commits are attributed to roadmaps directly.
+
+    Pull requests from these repositories carry no `roadmap/<Area>` label, so their citations are
+    kept as qualified keys rather than refused as foreign; `commit_attribution` classifies the
+    merged commits instead. Entries are whitespace-separated qualified repositories with the native
+    ID the queue writes (`forgejo:https://forge.example/team/Math@7`); an empty value disables this.
+    """
+    raw = os.environ.get(COMMIT_SOURCES_ENV, DEFAULT_COMMIT_SOURCES) if value is None else value
+    out = set()
+    for item in raw.split():
+        try:
+            source = PullSource.parse(f"{item}#1")
+        except ProvenanceError:
+            source = None
+        if source is None or not item.startswith(("github:", "forgejo:")) or source.native_id is None:
+            raise ProvenanceError(f"invalid {COMMIT_SOURCES_ENV} entry {item!r}: a qualified repository "
+                                  f"with its native ID is required")
+        out.add((source.repository.key, source.native_id))
+    return frozenset(out)
 
 
 def subject_number(subject):
@@ -124,7 +164,7 @@ class MigrationMap:
                 raise ProvenanceError("migration entries must be qualified source citations")
             if before in self._mapping or after in targets:
                 raise ProvenanceError("migration map contains duplicate source or destination citations")
-            if before.repository.key == after.repository.key:
+            if before.namespace == after.namespace:
                 raise ProvenanceError("migration entries must cross repository namespaces")
             self._mapping[before] = after
             targets.add(after)
@@ -188,13 +228,28 @@ class MigrationMap:
     def empty(self):
         return not self._mapping and not self.commits
 
-    def number(self, citation, repository):
-        if citation.repository.key == repository.key:
-            return citation.number
+    def number(self, citation, repository, repository_id=None):
+        # A mapping into the report repository wins: a citation without a native ID matches by URL
+        # alone, and may be mapped exactly because it predates the ID of a recreated repository.
         mapped = self._mapping.get(citation)
-        if mapped is None or mapped.repository.key != repository.key:
-            raise ProvenanceError("foreign source citation needs an explicit migration to the report repository")
-        return mapped.number
+        if mapped is not None and same_source(mapped, repository, repository_id):
+            return mapped.number
+        if same_source(citation, repository, repository_id):
+            return citation.number
+        raise ProvenanceError("foreign source citation needs an explicit migration to the report repository")
+
+
+def same_source(citation, repository, repository_id=None):
+    """Whether `citation` numbers a pull request of the report repository.
+
+    The URL must match. A cited native ID must also equal `repository_id`, the report repository's
+    own, so a recreated repository of the same name never inherits its predecessor's numbers; an
+    unknown `repository_id` matches no cited ID. A citation without one (a bare subject, or a writer
+    that records none) is matched by URL alone.
+    """
+    return citation.repository.key == repository.key and (
+        citation.native_id is None or citation.native_id == repository_id
+    )
 
 
 def configured_migration():

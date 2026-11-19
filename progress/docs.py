@@ -35,7 +35,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-DOCS_BASE = os.environ.get("TAUCETI_DOCS_URL", "https://taucetiproject.org/docs")
+DOCS_BASE = os.environ.get("TAUCETI_DOCS_URL", "https://taucetiproject.github.io/TauCeti/docs")
 
 
 class DocsError(RuntimeError):

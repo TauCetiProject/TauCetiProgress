@@ -133,6 +133,16 @@ def test_bootstrap_is_flagged():
     assert "FIRST report" not in text2
 
 
+def test_carried_pull_requests_are_flagged():
+    plan, fact_data, details = make()
+    plan["carried"] = [{"number": 7, "sha": A, "landed": "2026-11-05T13:35:35+00:00"},
+                       {"number": 9, "sha": A, "landed": "2026-11-05T13:35:40+00:00"}]
+    text = context.render(plan, fact_data, details)
+    assert "2 of these pull requests landed before this window (on 2026-11-05)" in text, text[:400]
+    assert "#7, #9" in text and "recorded here late" in text
+    assert "landed before this window" not in context.render(*make())
+
+
 def test_long_body_is_capped():
     plan, fact_data, prs = make(n_prs=1)
     prs[0]["body"] = "x" * (context.MAX_BODY_CHARS * 3)

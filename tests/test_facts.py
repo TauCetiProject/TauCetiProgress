@@ -150,6 +150,71 @@ def test_declarations_predating_the_window_are_not_reported():
         assert names == {"TauCeti.beta"}, sorted(names)
 
 
+def repo_with_a_citation_only_pr(tmp):
+    """Like `repo_with_two_prs`, but `alpha` lands with its PR named only by `Source-PR`."""
+    subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
+    root = commit(tmp, "init", {"README.md": "x"})
+    first = commit(tmp, "feat: alpha\n\nSource-PR: TauCetiProject/TauCeti#101\n", {"TauCeti/A.lean": ALPHA})
+    second = commit(tmp, "feat: beta (#102)", {"TauCeti/A.lean": ALPHA_AND_BETA})
+    return root, first, second
+
+
+def test_a_carried_pr_is_attributed_though_it_landed_before_the_window():
+    """`alpha` landed at `first`, the window's start; the plan carries #101 by its commit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_a_citation_only_pr(tmp)
+        got = facts.collect(tmp, first, second, pr_numbers=[102, 101], carried={first: 101},
+                            docs=docs_for(second))
+        by = {d["name"]: d["pr"] for d in got["declarations"]}
+        assert by == {"TauCeti.alpha": 101, "TauCeti.beta": 102}, by
+        assert {p["number"]: p["carried"] for p in got["prs"]} == {101: True, 102: False}, got["prs"]
+        assert facts.required_modules(tmp, first, second, [101], carried={first: 101}) == ["TauCeti/A.lean"]
+
+
+def test_a_carried_pr_keeps_its_change_when_it_landed_again_empty():
+    """The repeated landing from review: `alpha` by citation, then an empty replay of #101.
+
+    The cursor is at the replay, or before it so that the replay is in the window.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
+        commit(tmp, "init", {"README.md": "x"})
+        cited = "\n\nSource-PR: TauCetiProject/TauCeti#101\n"
+        first = commit(tmp, "feat: alpha" + cited, {"TauCeti/A.lean": ALPHA})
+        subprocess.run(["git", "-C", tmp, "commit", "-q", "--allow-empty", "-m", "feat: alpha again" + cited],
+                       check=True, capture_output=True, env=ENV)
+        replay = window.git(["rev-parse", "HEAD"], tmp).strip()
+        second = commit(tmp, "feat: beta (#102)", {"TauCeti/A.lean": ALPHA_AND_BETA})
+        from progress import plan
+        for cursor, behind in ((replay, [replay, first]), (first, [first])):
+            carried = plan.PassedCitations(tmp, second).behind(cursor, {101: None}, set())
+            assert carried == {101: behind}, carried
+            got = facts.collect(tmp, cursor, second, pr_numbers=[102, 101], docs=docs_for(second),
+                                carried={sha: n for n, shas in carried.items() for sha in shas})
+            by = {d["name"]: d["pr"] for d in got["declarations"]}
+            assert by == {"TauCeti.alpha": 101, "TauCeti.beta": 102}, by
+
+
+def test_a_carried_commit_must_be_a_citation_only_commit_behind_the_window():
+    def refused(tmp, from_sha, to_sha, prs, carried):
+        try:
+            facts.collect(tmp, from_sha, to_sha, pr_numbers=prs, carried=carried, docs=docs_for(to_sha))
+        except ReplanRequired as exc:
+            assert "carried" in str(exc), exc
+        else:
+            raise AssertionError(f"accepted {carried}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        refused(tmp, first, second, [102, 101], {first: 101})  # every reader saw `(#101)`
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_a_citation_only_pr(tmp)
+        refused(tmp, first, second, [102, 101], {first: 102})  # the commit cites another PR
+        refused(tmp, first, second, [102], {first: 101})  # not one of the plan's PRs
+        refused(tmp, root, second, [102, 101], {first: 101})  # inside the window, not behind it
+        refused(tmp, first, second, [102, 101], {second: 101})  # ahead of the cursor
+
+
 def test_the_pr_filter_is_honoured():
     with tempfile.TemporaryDirectory() as tmp:
         root, first, second = repo_with_two_prs(tmp)
@@ -263,12 +328,12 @@ def test_module_page_for_file():
     assert facts.module_page_for_file("TauCeti/A.txt") is None
 
 
-def cli_facts(tmp, from_sha, to_sha, prs, docs):
+def cli_facts(tmp, from_sha, to_sha, prs, docs, **extra):
     """`facts` on a plan pinning `docs`, as `plan --out` writes it. Returns (exit code, output path)."""
     plan_file = pathlib.Path(tmp) / "plan.json"
     out_file = pathlib.Path(tmp) / "facts.json"
     plan_file.write_text(json.dumps({"roadmap": "Algebra", "from_sha": from_sha, "to_sha": to_sha,
-                                     "prs": prs, "documentation": docs.pin()}))
+                                     "prs": prs, "documentation": docs.pin(), **extra}))
     rc = cli.main(["facts", "--plan", str(plan_file), "--code-dir", tmp, "--out", str(out_file)])
     return rc, out_file
 
@@ -283,6 +348,16 @@ def test_cli_facts_passes_the_plan_filter():
         got = json.loads(out_file.read_text())
         names = {d["name"] for d in got["declarations"]}
         assert names == {"TauCeti.alpha"}, f"filter dropped: got {sorted(names)}"
+
+
+def test_cli_facts_passes_the_plan_s_carried_commits():
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_a_citation_only_pr(tmp)
+        carried = [{"number": 101, "sha": first, "landed": "2026-11-05T13:35:35+00:00"}]
+        rc, out_file = cli_facts(tmp, first, second, [102, 101], docs_for(second), carried=carried)
+        assert rc == 0, rc
+        names = {d["name"] for d in json.loads(out_file.read_text())["declarations"]}
+        assert names == {"TauCeti.alpha", "TauCeti.beta"}, sorted(names)
 
 
 def test_cli_facts_reports_a_refusal_as_an_error():
