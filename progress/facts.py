@@ -94,20 +94,31 @@ def _first_sentence(flat):
     return (flat[: m.end()] if m else flat).strip()
 
 
-def pr_commits(repo_dir, from_sha, to_sha, numbers, **history):
-    """The first-parent merge commits attributed to a selected set of PRs."""
+def pr_commits(repo_dir, from_sha, to_sha, numbers, carried=None, **history):
+    """The first-parent merge commits attributed to a selected set of PRs.
+
+    `carried` is `{sha: number}` for selected PRs that landed at or before `from_sha` (see
+    `plan.PassedCitations`), one entry per commit; each must be a commit there that cites that PR
+    by `Source-PR` alone.
+    """
     wanted = set(numbers)
     result = {}
     for sha, number in window.first_parent_prs(repo_dir, f"{from_sha}..{to_sha}", **history):
         if number is not None and number in wanted:
             result[sha.strip()] = number
+    if carried:
+        passed = set(window.citation_only_prs(repo_dir, from_sha, **history))
+        if any(pair not in passed or pair[1] not in wanted for pair in carried.items()):
+            raise window.GitError("a carried pull request is not a citation-only commit behind the window")
+        result.update(carried)
     return result
 
 
-def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None, **history):
+def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None, carried=None, **history):
     """Touched modules still present at the documented commit, including empty modules."""
     if touched is None:
-        touched = changed_lean_files(repo_dir, pr_commits(repo_dir, from_sha, to_sha, numbers, **history))
+        touched = changed_lean_files(
+            repo_dir, pr_commits(repo_dir, from_sha, to_sha, numbers, carried=carried, **history))
     present = set(window.git(["ls-tree", "-r", "-z", "--name-only", to_sha, "--", LEAN_PREFIX],
                              repo_dir).split("\0"))
     return [path for path in touched if path in present]
@@ -115,13 +126,14 @@ def required_modules(repo_dir, from_sha, to_sha, numbers, touched=None, **histor
 
 @window.history_round
 def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentation=None, bundle_path=None,
-            source_record=_UNSET_SOURCE):
+            source_record=_UNSET_SOURCE, carried=None):
     """The factual spine of a window.
 
     `to_sha` is the documented window end chosen by the plan, and `documentation` the plan's pin of
     the facts bundle that describes it (`docs` supplies a reader directly instead). Accepting any
     other build would advance the report's cursor past pull requests whose declarations were never
-    inspected.
+    inspected. `carried` is the plan's `{sha: number}` for pull requests that landed before the
+    window; their commits are attributed like the window's own.
     """
     from .docs import ArtifactError, Docs, ReplanRequired
 
@@ -151,7 +163,13 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
     numbers = (window.window_prs(repo_dir, from_sha, docs_sha, **history)
                if pr_numbers is None else list(pr_numbers))
     # Which commit belongs to which PR, so a blamed line can be attributed.
-    pr_of_commit = pr_commits(repo_dir, from_sha, docs_sha, numbers, **history)
+    try:
+        pr_of_commit = pr_commits(repo_dir, from_sha, docs_sha, numbers, carried=carried, **history)
+    except window.GitError as exc:
+        if carried:
+            raise ReplanRequired(f"{exc}; replan the window") from None
+        raise
+    carried_numbers = set((carried or {}).values())
 
     files = changed_lean_files(repo_dir, pr_of_commit)
     required = set(required_modules(repo_dir, from_sha, docs_sha, numbers, touched=files, **history))
@@ -215,7 +233,8 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
         keep = names[:MAX_DECLS_PER_PR]
         dropped += len(names) - len(keep)
         prs.append({"number": number, "declarations": keep,
-                    "truncated_declarations": len(names) - len(keep)})
+                    "truncated_declarations": len(names) - len(keep),
+                    "carried": number in carried_numbers})
 
     # Documented declarations first: one is more likely to be a result worth naming than an
     # undocumented helper. A presentation order, not a judgement.

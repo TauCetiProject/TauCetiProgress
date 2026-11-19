@@ -137,10 +137,14 @@ def cmd_facts(args):
     # The plan's PR list is the area filter. Without it `collect` would walk every merged PR in the
     # commit range, so a report on one roadmap would be grounded in every roadmap's work.
     try:
+        carried = {row["sha"]: row["number"] for row in p.get("carried") or []}
+    except (TypeError, KeyError):
+        raise ReplanRequired("invalid saved carried pull requests; replan") from None
+    try:
         migration = saved_migration(p, args.plan)
         with window.using_migration(migration):
             result = facts.collect(args.code_dir, p["from_sha"], p["to_sha"], pr_numbers=p["prs"],
-                                   documentation=pin, bundle_path=bundle_path,
+                                   documentation=pin, bundle_path=bundle_path, carried=carried,
                                    **({"source_record": p["source"]} if "source" in p else {}))
     except DocsGenerationChanged as exc:
         return _generation_changed("facts", exc)

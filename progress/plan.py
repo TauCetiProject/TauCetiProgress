@@ -199,6 +199,43 @@ def area_window(repo_dir, area_prs, from_sha, to_sha, **history):
     return [n for n in numbers if n in wanted]
 
 
+class PassedCitations:
+    """Mainline commits that cite their PR by `Source-PR` alone, by position on the chain to `to_sha`.
+
+    Readers before #52 saw only subjects, so a report whose window held such a commit left its PR
+    out and moved the cursor past it (#58). `behind` finds those for one roadmap, so its next
+    section can carry them. One history read serves every roadmap in a plan.
+    """
+
+    def __init__(self, repo_dir, to_sha, **history):
+        self._repo_dir, self._to_sha, self._history, self._rows = repo_dir, to_sha, history, None
+
+    def _load(self):
+        if self._rows is None:
+            chain = window.git(["rev-list", "--first-parent", self._to_sha, "--"], self._repo_dir).split()
+            self._position = {sha: i for i, sha in enumerate(chain)}  # newest first
+            self._rows = [(self._position[sha], sha, number) for sha, number
+                          in window.citation_only_prs(self._repo_dir, self._to_sha, **self._history)]
+
+    def behind(self, cursor, area_prs, reported):
+        """`{pr_number: [sha, ...]}`, newest first: labelled, landed at or behind `cursor`, in no section.
+
+        Every citation-only commit of a carried PR is kept, so a later empty landing of it, behind
+        the cursor or in the new window, does not hide the one that made the change. `reported` is
+        every number the roadmap's sections list. Unlike a window, this does trust that list: a
+        section claiming a number only stops that number being carried.
+        """
+        self._load()
+        at = self._position.get(cursor)
+        if at is None:
+            return {}  # a cursor off the first-parent chain: nothing can be placed behind it
+        found = {}
+        for i, sha, number in self._rows:
+            if i >= at and number in area_prs and number not in reported:
+                found.setdefault(number, []).append(sha)
+        return found
+
+
 def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF, **history):
     """Labelled pull requests that are in `ref`'s history but were not recognised in it.
 
@@ -427,6 +464,7 @@ def build_plan(
     # Only histories used below need reading. Current and malformed cursors
     # must not turn a neighbour's useful plan into an all-area history scan.
     histories = (source.content.labelled_histories(eligible) if source else gh.closed_prs_for_areas(eligible)) if eligible else {}
+    passed = PassedCitations(code_dir, to_sha, **history)
     for area, (rel_dir, status_text, progress_text, from_sha) in eligible.items():
         area_prs = histories[area]
         if not area_prs:
@@ -485,7 +523,12 @@ def build_plan(
         # label. That is cosmetic. Silently unreportable history is not, so the trade goes the other
         # way.
         fresh = area_window(code_dir, area_prs, from_sha, to_sha, **history)
-        if not fresh:
+        # The one exception to the window being the only authority: work an earlier reader could
+        # not see. It rides in this section's `prs`, since the cursor cannot go back for it.
+        carried = {}
+        if not bootstrapped:
+            carried = passed.behind(from_sha, area_prs, files.reported_prs(progress_text))
+        if not fresh and not carried:
             skipped.append(f"{area}: nothing new since {from_sha[:7]}")
             continue
 
@@ -494,7 +537,8 @@ def build_plan(
                 "area": area,
                 "rel_dir": rel_dir,
                 "from_sha": from_sha,
-                "prs": fresh,
+                "prs": fresh + [number for number in carried if number not in fresh],
+                "carried": carried,
                 "bootstrapped": bootstrapped,
                 "status_text": status_text,
                 "progress_text": progress_text,
@@ -519,7 +563,9 @@ def build_plan(
 
     from .facts import required_modules
 
-    docs.require_coverage(required_modules(code_dir, best["from_sha"], to_sha, best["prs"], **history))
+    docs.require_coverage(required_modules(
+        code_dir, best["from_sha"], to_sha, best["prs"],
+        carried={sha: number for number, shas in best["carried"].items() for sha in shas}, **history))
 
     if source:
         source.content.revalidate()
@@ -536,10 +582,15 @@ def build_plan(
         "from_sha": best["from_sha"],
         "to_sha": to_sha,
         "prs": best["prs"],
+        "carried": [
+            {"number": number, "sha": sha, "landed": window.commit_date(code_dir, sha)}
+            for number, shas in best["carried"].items() for sha in shas
+        ],
         "bootstrapped": best["bootstrapped"],
         "reason": (
             f"{cadence_reason}; {best['area']} has {len(best['prs'])} PR(s) since "
             f"{best['from_sha'][:7]}"
+            + (f" ({len(best['carried'])} carried from before it)" if best["carried"] else "")
         ),
         "skipped": skipped,
         "status_path": f"{best['rel_dir']}/{STATUS_NAME}",

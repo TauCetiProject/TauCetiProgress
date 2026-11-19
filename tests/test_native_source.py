@@ -502,6 +502,33 @@ class NativePlanning(unittest.TestCase):
             )
         self.assertIn("preserve the prepared report", errors.getvalue())
 
+    def test_carry_scan_needs_no_migration_for_numbered_history_behind_the_cursor(self):
+        """An imported `(#99)` with no mapping lies behind the cursor; base plans never read it."""
+        old = RepositoryRef(GITHUB, "old/Math")
+        key = self.content.repository.key
+        imported = self.commit("Imported proof (#99)", "old.txt")
+        missed = self.commit("Queue accepted\n\nSource-PR: " + key + "#6", "TauCeti/A.lean")
+        before = self.commit("Queue accepted\n\nSource-PR: " + key + "#7")
+        tip = self.commit("Queue accepted\n\nSource-PR: " + key + "#8")
+        source = NativeSource(self.content, self.roadmap, legacy_content=old, legacy_through=imported)
+        roadmap = self.root / "roadmap"
+        area = roadmap / "TauCetiRoadmap/Area"
+        area.mkdir(parents=True)
+        (area / "README.md").write_text("# Area\n")
+        (area / "PROGRESS.md").write_text(
+            files.new_progress_file("Area")
+            + files.render_section("Area", self.initial, before, [7], "earlier", "Earlier report.")
+        )
+        docs = self.docs(tip)
+        self.closed = [self.row(8), self.row(7)]
+        result = plan.build_plan(roadmap, self.code, source=source, ref="main", min_prs=1, docs=docs)
+        self.assertEqual((result["prs"], result["carried"]), ([8], []))
+        # A native PR the earlier report passed is still carried from the same history.
+        self.closed = [self.row(8), self.row(7), self.row(6)]
+        result = plan.build_plan(roadmap, self.code, source=source, ref="main", min_prs=1, docs=docs)
+        self.assertEqual(result["prs"], [8, 6])
+        self.assertEqual([(row["number"], row["sha"]) for row in result["carried"]], [(6, missed)])
+
     def test_saved_source_schema_and_legacy_namespace_are_explicit(self):
         record = self.source.record()
         self.assertEqual(history_options_from_record(record)["repository"], self.content.repository)
