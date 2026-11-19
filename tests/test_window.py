@@ -336,6 +336,22 @@ def test_a_labelled_pr_merged_after_the_tip_is_not_flagged():
 # ----- an area ahead of the published documentation --------------------------------------------
 
 
+SOURCE = "Source-PR: TauCetiProject/TauCeti#"
+
+
+def commit_messages(tmp, messages):
+    """Empty mainline commits with full messages (subject and body), oldest first. Returns [sha]."""
+    subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@e"}
+    shas = []
+    for message in messages:
+        subprocess.run(["git", "-C", tmp, "commit", "-q", "--allow-empty", "-F", "-"],
+                       input=message, text=True, check=True, capture_output=True, env=env)
+        shas.append(window.git(["rev-parse", "HEAD"], tmp).strip())
+    return shas
+
+
 def make_roadmap(root, areas):
     """A roadmap checkout: `{area: progress_text_or_None}` under `TauCetiRoadmap/`."""
     for area, progress_text in areas.items():
@@ -368,6 +384,121 @@ def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, *, ref="main", merge
     finally:
         docs_mod.discover, gh_mod.closed_prs_for_areas = orig_docs, orig_labels
         plan_mod._own_login = orig_login
+
+
+def passed_history(code):
+    """init, #1, #2 cited by Source-PR alone, #3, #4."""
+    return commit_messages(code, ["init", "feat: a (#1)", f"feat: queue landed\n\n{SOURCE}2\n",
+                                  "feat: b (#3)", "feat: c (#4)"])
+
+
+def reported(area, from_sha, to_sha, prs):
+    return files.new_progress_file(area) + files.render_section(area, from_sha, to_sha, prs, "then", "Body.")
+
+
+def test_citation_only_prs_are_the_commits_a_subject_reader_could_not_see():
+    with tempfile.TemporaryDirectory() as code:
+        shas = passed_history(code)
+        assert window.citation_only_prs(code, shas[4]) == [(shas[2], 2)]
+        assert window.citation_only_prs(code, shas[1]) == []
+
+
+def test_a_citation_the_scan_cannot_attribute_is_left_out_not_refused():
+    """These commits sit behind cursors that earlier plans accepted; the scan must accept them too."""
+    with tempfile.TemporaryDirectory() as code:
+        shas = commit_messages(code, [
+            "init",
+            "feat: unreadable\n\nSource-PR: not-a-citation\n",
+            "feat: from elsewhere\n\nSource-PR: other/Repo#5\n",
+            f"feat: numbered and unreadable (#6)\n\n{SOURCE}7\n",
+            f"feat: fine\n\n{SOURCE}8\n",
+        ])
+        assert window.citation_only_prs(code, shas[4]) == [(shas[4], 8)]
+        raises(window.GitError, lambda: window.first_parent_prs(code, shas[4]))
+
+
+def test_a_pr_the_cursor_passed_unreported_is_carried_into_the_next_window():
+    """#58: a subject-only reader reported `(init, #3]` as #1 and #3, leaving #2 out."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = passed_history(code)
+        make_roadmap(roadmap, {"Curves": reported("Curves", shas[0], shas[3], [1, 3])})
+        got = plan_against(code, roadmap, shas[4], {"Curves": [1, 2, 3, 4]})
+        assert got["from_sha"] == shas[3], got["from_sha"]
+        assert got["prs"] == [4, 2], got["prs"]
+        assert [(c["number"], c["sha"]) for c in got["carried"]] == [(2, shas[2])], got["carried"]
+        assert got["carried"][0]["landed"] == window.commit_date(code, shas[2])
+        assert "(1 carried from before it)" in got["reason"], got["reason"]
+
+
+def test_carried_prs_alone_make_a_quiet_roadmap_reportable():
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = passed_history(code)
+        make_roadmap(roadmap, {"Curves": reported("Curves", shas[0], shas[3], [1, 3])})
+        got = plan_against(code, roadmap, shas[4], {"Curves": [1, 2, 3]})
+        assert got["prs"] == [2] and [c["number"] for c in got["carried"]] == [2], got
+
+
+def test_a_carried_pr_is_carried_once():
+    """Once a section lists it, it is reported: the next plan has nothing to carry."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = passed_history(code)
+        make_roadmap(roadmap, {"Curves": reported("Curves", shas[0], shas[3], [1, 2, 3])})
+        raises(plan.NotDue, lambda: plan_against(code, roadmap, shas[4], {"Curves": [1, 2, 3]}), "nothing new")
+        got = plan_against(code, roadmap, shas[4], {"Curves": [1, 2, 3, 4]})
+        assert got["prs"] == [4] and got["carried"] == [], got
+
+
+def test_only_citation_only_commits_are_carried():
+    """#1 has its number in the subject, so every reader saw it; a section that omits it reflects
+    its label at the time, and the window stays the only authority for such a PR."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = passed_history(code)
+        make_roadmap(roadmap, {"Curves": reported("Curves", shas[0], shas[3], [3])})
+        got = plan_against(code, roadmap, shas[4], {"Curves": [1, 2, 3, 4]})
+        assert got["prs"] == [4, 2], got["prs"]
+
+
+def test_a_first_report_carries_nothing():
+    """Its window starts before its earliest labelled PR, so #2 is simply in the window."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = passed_history(code)
+        make_roadmap(roadmap, {"Curves": None})
+        got = plan_against(code, roadmap, shas[4], {"Curves": [2, 3]})
+        assert got["bootstrapped"] and got["from_sha"] == shas[1], got
+        assert got["prs"] == [3, 2] and got["carried"] == [], got
+
+
+def test_every_citation_only_commit_of_a_carried_pr_is_kept():
+    """A later empty landing of #2 must not hide the commit that made the change."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = commit_messages(code, ["init", f"feat: a\n\n{SOURCE}2\n", f"feat: a again\n\n{SOURCE}2\n",
+                                      "feat: b (#3)", "feat: c (#4)"])
+        make_roadmap(roadmap, {"Curves": reported("Curves", shas[0], shas[3], [3])})
+        got = plan_against(code, roadmap, shas[4], {"Curves": [2, 3, 4]})
+        assert got["prs"] == [4, 2], got["prs"]
+        assert [(c["number"], c["sha"]) for c in got["carried"]] == [(2, shas[2]), (2, shas[1])], got["carried"]
+
+
+def test_a_landing_behind_the_cursor_is_kept_when_the_pr_lands_again_in_the_window():
+    """#2's change is behind the cursor and its empty replay ahead of it; `prs` lists #2 once."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = commit_messages(code, ["init", f"feat: a\n\n{SOURCE}2\n", "feat: b (#3)",
+                                      f"feat: a again\n\n{SOURCE}2\n", "feat: c (#4)"])
+        make_roadmap(roadmap, {"Curves": reported("Curves", shas[0], shas[2], [3])})
+        got = plan_against(code, roadmap, shas[4], {"Curves": [2, 3, 4]})
+        assert got["prs"] == [4, 2], got["prs"]
+        assert [(c["number"], c["sha"]) for c in got["carried"]] == [(2, shas[1])], got["carried"]
+
+
+def test_passed_citations_places_commits_against_the_cursor():
+    with tempfile.TemporaryDirectory() as code:
+        shas = passed_history(code)
+        passed = plan.PassedCitations(code, shas[4])
+        assert passed.behind(shas[3], {2: None}, set()) == {2: [shas[2]]}
+        assert passed.behind(shas[2], {2: None}, set()) == {2: [shas[2]]}, "the cursor commit is behind itself"
+        assert passed.behind(shas[1], {2: None}, set()) == {}, "ahead of the cursor: the window's job"
+        assert passed.behind(shas[3], {2: None}, {2}) == {}
+        assert passed.behind("0" * 40, {2: None}, set()) == {}
 
 
 def test_a_first_merge_beyond_docgen_does_not_block_other_areas():
