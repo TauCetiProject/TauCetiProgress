@@ -457,6 +457,8 @@ class PagesFactsTests(unittest.TestCase):
                      ["config", "user.email", "t@e"], ["add", "."], ["commit", "-qm", "base"],
                      ["update-ref", "refs/remotes/origin/main", "HEAD"]):
             window.git(args, self.roadmap)
+        window.git(["init", "--bare", "-q", str(self.root / "report-remote.git")], self.roadmap)
+        window.git(["remote", "add", "fork", str(self.root / "report-remote.git")], self.roadmap)
         status, section = self.root / "status", self.root / "section"
         prose = "The algebra roadmap now has Alpha's theorem and the supporting compiler-generated instances. " * 4
         status.write_text(prose)
@@ -469,7 +471,6 @@ class PagesFactsTests(unittest.TestCase):
             self.requests.clear()
             with patch.object(apply, "render_update", side_effect=AssertionError("must reuse prose")), \
                  patch.object(apply, "push_target", return_value=("fork", "tester")), \
-                 patch.object(apply, "remote_branch_exists", return_value=True), \
                  patch.object(apply, "sweep", return_value=0), \
                  patch.object(gh, "gh", return_value="https://github.com/org/roadmap/pull/1") as publish:
                 self.assertEqual(apply.run(p, status, section, self.roadmap), 0)

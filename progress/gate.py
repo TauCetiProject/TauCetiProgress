@@ -102,6 +102,27 @@ def check_history_policy(pr, expected, *, empty):
         _refuse("history policy differs from the protected merge configuration; replan after aligning its digest")
 
 
+def check_source_binding(pr, section, expected):
+    """Untrusted headers and PR prose can only match an independently bound source."""
+    if expected is not None:
+        try:
+            files._source(expected)
+        except files.FormatError:
+            _refuse("protected report source binding is invalid")
+    if section.get("source") != expected:
+        _refuse("report source differs from independently configured gate source")
+    matches = re.findall(r"<!--tauceti-progress-pr:v1 (.*?)-->", pr.get("body") or "", flags=re.S)
+    if expected is not None and len(matches) != 1:
+        _refuse("qualified report metadata is missing or ambiguous")
+    for raw in matches:
+        try:
+            metadata = json.loads(raw)
+            if not isinstance(metadata, dict) or metadata.get("source") != expected:
+                raise ValueError
+        except (ValueError, TypeError):
+            _refuse("PR source metadata differs from independently configured gate source")
+
+
 def check_provenance(pr, base_repo, base_branch="main"):
     """Provenance first: is this pull request even a candidate?
 
@@ -373,7 +394,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
            current_main_cursor=None, main_sha="",
            old_paths=None, code_window=None, last_report_at=None, now=None,
            area_exists=None, expected_bootstrap_from_sha=None,
-           history_migration_sha256=None, history_migration_empty=True):
+           history_migration_sha256=None, history_migration_empty=True, source_binding=None):
     """Run the whole gate. Returns `{"area", "parent", "head_sha", "main_sha", "section", "blobs"}`
     or raises `Refused`.
 
@@ -434,6 +455,7 @@ def decide(pr, changed_files, tree_entries, old_status, new_status_bytes, old_pr
         area, old_status, new_status_bytes, old_progress, new_progress_bytes,
         expect_from_sha=current_main_cursor,
     )
+    check_source_binding(pr, section, source_binding)
     check_window(code_window, section)
     check_rate(last_report_at, now, area)
 
