@@ -109,8 +109,9 @@ LAYER_STATES = ("done", "partial", "untouched", "unassessed")
 # surrogates: JSON can spell one (`"\ud800"`), but the header is written unescaped, and a string
 # holding one cannot be encoded as UTF-8 at all.
 MAX_LAYERS = 64
-# An umbrella area (RepresentationTheory has twelve) carries one coverage header per sub-roadmap.
-MAX_SUB_ROADMAPS = 32
+# An umbrella area carries one coverage header per sub-roadmap: RepresentationTheory has twelve,
+# RiemannHypothesisForDirichletLFunctions forty-one.
+MAX_SUB_ROADMAPS = 64
 LAYER_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 .\-]{0,39}\Z")
 REMAINING_RE = re.compile(r"\A[^<>\x00-\x1f\x7f\ud800-\udfff]{1,200}\Z")
 _HEX64_RE = re.compile(r"\A[0-9a-f]{64}\Z")
