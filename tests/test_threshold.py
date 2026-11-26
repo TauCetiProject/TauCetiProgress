@@ -347,6 +347,16 @@ def test_a_skipped_area_is_never_chosen_under_either_strategy():
     assert c.plan(labels, commits=[], min_prs=1, skip_areas={"Busy"})["roadmap"] == "Quiet"
 
 
+def test_an_umbrella_with_more_sub_roadmaps_than_a_report_carries_is_never_chosen():
+    c, labels = quiet_and_busy()
+    for i in range(plan.files.MAX_SUB_ROADMAPS + 1):
+        c.write(f"TauCetiRoadmap/Quiet/S{i:02d}/Suggested.lean", "-- sub\n", ago(days=30))
+        c.write(f"TauCetiRoadmap/Quiet/S{i:02d}/README.md", README_WITH_LAYERS, ago(days=30))
+    got = c.plan(labels, strategy="threshold", threshold=5)
+    assert got["roadmap"] == "Busy", got["roadmap"]
+    assert "Quiet: 33 sub-roadmaps; a report carries at most 32" in got["skipped"], got["skipped"]
+
+
 def test_the_cli_selects_the_strategy_and_exits_75_with_a_table():
     c, labels = quiet_and_busy()
     table = pathlib.Path(c.tmp.name) / "table.json"

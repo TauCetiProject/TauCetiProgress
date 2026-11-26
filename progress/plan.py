@@ -714,6 +714,10 @@ def build_plan(
         if area in skip_areas:
             skipped.append(f"{area}: set aside with --skip-area")
             continue
+        subs = len(read_sub_roadmaps(roadmap_dir, area, rel_dir))
+        if subs > files.MAX_SUB_ROADMAPS:
+            skipped.append(f"{area}: {subs} sub-roadmaps; a report carries at most {files.MAX_SUB_ROADMAPS}")
+            continue
         if area in blocked:
             skipped.append(f"{area}: PR #{blocked[area]['number']} is still open")
             try:
